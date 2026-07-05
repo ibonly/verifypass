@@ -1,0 +1,17 @@
+{
+  "name": "@verifypass/worker",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.16.0",
+    "@verifypass/shared": "*",
+    "dotenv": "^16.4.5",
+    "onnxruntime-node": "^1.19.2",
+    "sharp": "^0.33.5"
+  }
+}

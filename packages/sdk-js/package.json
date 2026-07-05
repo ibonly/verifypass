@@ -1,0 +1,16 @@
+{
+  "name": "@verifypass/sdk-js",
+  "version": "0.1.0",
+  "description": "VerifyPass CDN bundle (vanilla JS) — VerifyPass.init(...)",
+  "main": "src/global.js",
+  "scripts": {
+    "build": "esbuild src/global.js --bundle --minify --format=iife --global-name=VerifyPass --outfile=dist/verifypass.js"
+  },
+  "dependencies": {
+    "@verifypass/sdk-core": "*"
+  },
+  "devDependencies": {
+    "esbuild": "^0.21.0"
+  },
+  "license": "UNLICENSED"
+}

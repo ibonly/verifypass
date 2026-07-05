@@ -1,0 +1,14 @@
+node_modules/
+.env
+.env.*
+!.env.example
+dist/
+coverage/
+*.log
+evidence-store/
+.evidence-store/
+.dev-credentials.json
+apps/worker/models/
+apps/api/prisma/migrations/dev/
+.DS_Store
+node_modules/apps/sample-app/public/models/

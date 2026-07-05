@@ -1,0 +1,14 @@
+{
+  "name": "@verifypass/react",
+  "version": "0.1.0",
+  "description": "VerifyPass verification widget for React",
+  "main": "src/index.js",
+  "peerDependencies": {
+    "react": ">=17"
+  },
+  "dependencies": {
+    "@verifypass/sdk-core": "*",
+    "onnxruntime-web": "^1.19.2"
+  },
+  "license": "UNLICENSED"
+}

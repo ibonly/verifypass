@@ -1,0 +1,35 @@
+{
+  "name": "verifypass",
+  "private": true,
+  "version": "0.1.0",
+  "description": "VerifyPass — multitenant liveness, face recognition, and ID verification service",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "ci": "npm run lint && npm test && npm run build && npm run prisma:validate -w apps/api",
+    "test": "npm run test --workspaces --if-present",
+    "dev": "node scripts/dev-stack.js",
+    "dev:api": "npm run dev -w apps/api",
+    "dev:sample": "npm run dev -w apps/sample-app",
+    "start:api": "node apps/api/server.js",
+    "start:worker": "node apps/worker/index.js",
+    "db:generate": "prisma generate --schema apps/api/prisma/schema.prisma",
+    "db:migrate": "prisma migrate deploy --schema apps/api/prisma/schema.prisma",
+    "db:migrate:dev": "prisma migrate dev --schema apps/api/prisma/schema.prisma",
+    "db:push": "prisma db push --schema apps/api/prisma/schema.prisma",
+    "setup": "node scripts/setup-inhouse.js",
+    "models:fetch": "node scripts/fetch-onnx-models.js",
+    "cloudinary:probe": "node scripts/cloudinary-probe.js",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "eslint": "^9.30.1",
+    "prisma": "^5.16.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "@verifypass/sdk-core",
+  "version": "0.1.0",
+  "description": "Framework-agnostic capture engine for VerifyPass (camera, quality checks, upload, session flow)",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  },
+  "license": "UNLICENSED"
+}

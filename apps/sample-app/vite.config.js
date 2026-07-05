@@ -1,0 +1,24 @@
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+
+// Sample webcam test app. Point it at your running API and paste a secret key
+// from the dev stack. Camera capture requires a secure context — localhost is
+// treated as secure by browsers, so `vite dev` on http://localhost works.
+export default defineConfig({
+  plugins: [react()],
+  optimizeDeps: {
+    // sdk-core is a linked CommonJS workspace package; force pre-bundling so it
+    // exposes proper ESM named exports to the dev server.
+    include: ["@verifypass/sdk-core"]
+  },
+  build: {
+    commonjsOptions: {
+      include: [/node_modules/, /packages\/sdk-core/]
+    }
+  },
+  define: {
+    __VP_API_BASE__: JSON.stringify(process.env.VP_API_BASE || "http://localhost:3000"),
+    // Optional convenience for local testing only — never ship a secret key to a browser.
+    __VP_SECRET_KEY__: JSON.stringify(process.env.VP_SECRET_KEY || "")
+  }
+});

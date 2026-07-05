@@ -1,0 +1,284 @@
+// VerifyPass MVP schema (PRD §11 + queue/webhook/user tables)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model Tenant {
+  id             BigInt    @id @default(autoincrement())
+  tenantUid      String    @unique @map("tenant_uid") @db.VarChar(64)
+  companyName    String    @map("company_name") @db.VarChar(255)
+  status         TenantStatus @default(sandbox)
+  webhookUrl     String?   @map("webhook_url") @db.Text
+  webhookSecret  String?   @map("webhook_secret") @db.VarChar(128)
+  allowedDomains Json?     @map("allowed_domains")
+  settings       Json?
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  apiKeys  ApiKey[]
+  sessions VerificationSession[]
+  users    User[]
+
+  @@map("tenants")
+}
+
+enum TenantStatus {
+  sandbox
+  active
+  suspended
+  disabled
+}
+
+model ApiKey {
+  id        BigInt       @id @default(autoincrement())
+  tenantId  BigInt       @map("tenant_id")
+  keyType   ApiKeyType   @map("key_type")
+  isLive    Boolean      @default(false) @map("is_live")
+  keyHash   String       @map("key_hash") @db.VarChar(255)
+  prefix    String       @db.VarChar(32)
+  status    ApiKeyStatus @default(active)
+  expiresAt DateTime?    @map("expires_at")
+  createdAt DateTime     @default(now()) @map("created_at")
+  revokedAt DateTime?    @map("revoked_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([prefix])
+  @@index([tenantId])
+  @@map("api_keys")
+}
+
+enum ApiKeyType {
+  public
+  secret
+}
+
+enum ApiKeyStatus {
+  active
+  revoked
+}
+
+model User {
+  id           BigInt   @id @default(autoincrement())
+  tenantId     BigInt?  @map("tenant_id") // null = platform super admin
+  email        String   @unique @db.VarChar(255)
+  passwordHash String   @map("password_hash") @db.VarChar(255)
+  role         UserRole
+  mfaSecret    String?  @map("mfa_secret") @db.VarChar(128)
+  status       String   @default("active") @db.VarChar(32)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  tenant Tenant? @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId])
+  @@map("users")
+}
+
+enum UserRole {
+  super_admin
+  tenant_admin
+  compliance_reviewer
+  developer
+  auditor
+}
+
+model VerificationSession {
+  id                BigInt        @id @default(autoincrement())
+  sessionUid        String        @unique @map("session_uid") @db.VarChar(64)
+  tenantId          BigInt        @map("tenant_id")
+  customerReference String?       @map("customer_reference") @db.VarChar(128)
+  verificationType  String?       @map("verification_type") @db.VarChar(64)
+  documentTypes     Json?         @map("document_types")
+  callbackUrl       String?       @map("callback_url") @db.Text
+  metadata          Json?
+  sdkTokenHash      String?       @map("sdk_token_hash") @db.VarChar(255)
+  livenessChallenge Json?         @map("liveness_challenge")
+  deviceFingerprint String?       @map("device_fingerprint") @db.VarChar(64)
+  deviceMeta        Json?         @map("device_meta")
+  clientIp          String?       @map("client_ip") @db.VarChar(64)
+  status            SessionStatus @default(created)
+  riskLevel         RiskLevel?    @map("risk_level")
+  decisionReason    Json?         @map("decision_reason")
+  isLive            Boolean       @default(false) @map("is_live")
+  expiresAt         DateTime?     @map("expires_at")
+  completedAt       DateTime?     @map("completed_at")
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @default(now()) @updatedAt @map("updated_at")
+
+  tenant   Tenant               @relation(fields: [tenantId], references: [id])
+  results  VerificationResult[]
+  evidence EvidenceFile[]
+  reviews  ManualReviewNote[]
+
+  @@index([tenantId, status])
+  @@index([tenantId, customerReference])
+  @@index([tenantId, deviceFingerprint])
+  @@index([tenantId, clientIp])
+  @@map("verification_sessions")
+}
+
+enum SessionStatus {
+  created
+  started
+  submitted
+  approved
+  rejected
+  manual_review
+  expired
+  failed
+  abandoned
+}
+
+enum RiskLevel {
+  low
+  medium
+  high
+}
+
+model VerificationResult {
+  id              BigInt    @id @default(autoincrement())
+  sessionId       BigInt    @map("session_id")
+  livenessScore   Decimal?  @map("liveness_score") @db.Decimal(5, 4)
+  livenessStatus  CheckStatus? @map("liveness_status")
+  faceMatchScore  Decimal?  @map("face_match_score") @db.Decimal(5, 4)
+  faceMatchStatus MatchStatus? @map("face_match_status")
+  documentStatus  DocStatus? @map("document_status")
+  ocrConfidence   Decimal?  @map("ocr_confidence") @db.Decimal(5, 4)
+  extractedData   Json?     @map("extracted_data")
+  rawResult       Json?     @map("raw_result")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  session VerificationSession @relation(fields: [sessionId], references: [id])
+
+  @@index([sessionId])
+  @@map("verification_results")
+}
+
+enum CheckStatus {
+  passed
+  failed
+  review
+}
+
+enum MatchStatus {
+  matched
+  not_matched
+  review
+}
+
+enum DocStatus {
+  valid
+  invalid
+  review
+}
+
+model EvidenceFile {
+  id                 BigInt   @id @default(autoincrement())
+  sessionId          BigInt   @map("session_id")
+  fileType           EvidenceType @map("file_type")
+  label              String?  @db.VarChar(64)
+  storagePath        String   @map("storage_path") @db.Text
+  checksum           String?  @db.VarChar(128)
+  cloudinaryUrl      String?  @map("cloudinary_url") @db.Text
+  cloudinaryPublicId String?  @map("cloudinary_public_id") @db.VarChar(255)
+  encrypted          Boolean  @default(true)
+  retentionExpiresAt DateTime? @map("retention_expires_at")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  session VerificationSession @relation(fields: [sessionId], references: [id])
+
+  @@index([sessionId])
+  @@index([retentionExpiresAt])
+  @@map("evidence_files")
+}
+
+enum EvidenceType {
+  id_front
+  id_back
+  selfie
+  liveness_frame
+  audit_pdf
+}
+
+model ManualReviewNote {
+  id        BigInt   @id @default(autoincrement())
+  sessionId BigInt   @map("session_id")
+  userId    BigInt   @map("user_id")
+  decision  String?  @db.VarChar(32) // approved | rejected | recapture
+  note      String?  @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+
+  session VerificationSession @relation(fields: [sessionId], references: [id])
+
+  @@index([sessionId])
+  @@map("manual_review_notes")
+}
+
+model AuditLog {
+  id        BigInt   @id @default(autoincrement())
+  tenantId  BigInt?  @map("tenant_id")
+  sessionId BigInt?  @map("session_id")
+  actorType ActorType @map("actor_type")
+  actorId   String?  @map("actor_id") @db.VarChar(128)
+  action    String   @db.VarChar(128)
+  ipAddress String?  @map("ip_address") @db.VarChar(64)
+  userAgent String?  @map("user_agent") @db.Text
+  metadata  Json?
+  riskEvent Boolean  @default(false) @map("risk_event")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId, createdAt])
+  @@index([sessionId])
+  @@map("audit_logs")
+}
+
+enum ActorType {
+  system
+  tenant_user
+  admin
+  api
+}
+
+model WebhookDelivery {
+  id           BigInt   @id @default(autoincrement())
+  eventUid     String   @unique @map("event_uid") @db.VarChar(64)
+  tenantId     BigInt   @map("tenant_id")
+  sessionId    BigInt?  @map("session_id")
+  event        String   @db.VarChar(64)
+  payload      Json
+  url          String   @db.Text
+  status       String   @default("pending") @db.VarChar(32) // pending|delivered|failed|exhausted
+  attempts     Int      @default(0)
+  lastStatusCode Int?   @map("last_status_code")
+  lastError    String?  @map("last_error") @db.Text
+  nextAttemptAt DateTime? @map("next_attempt_at")
+  deliveredAt  DateTime? @map("delivered_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId, status])
+  @@index([status, nextAttemptAt])
+  @@map("webhook_deliveries")
+}
+
+model JobQueue {
+  id        BigInt   @id @default(autoincrement())
+  type      String   @db.VarChar(64)
+  payload   Json
+  status    String   @default("pending") @db.VarChar(32) // pending|running|done|failed
+  attempts  Int      @default(0)
+  maxAttempts Int    @default(5) @map("max_attempts")
+  runAfter  DateTime @default(now()) @map("run_after")
+  lockedBy  String?  @map("locked_by") @db.VarChar(64)
+  lockedAt  DateTime? @map("locked_at")
+  lastError String?  @map("last_error") @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([status, runAfter])
+  @@map("job_queue")
+}
