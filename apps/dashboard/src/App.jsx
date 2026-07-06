@@ -168,13 +168,16 @@ function ReasonCodes({ codes }) {
   if (!codes || codes.length === 0) return null;
   return (
     <div style={{ marginTop: 8 }}>
-      {codes.map((c) => (
-        <div key={c} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4, fontSize: 13 }}>
-          <span style={{ color: "#DC2626" }}>●</span>
-          <span style={{ color: "#374151" }}>{REASON_LABELS[c] || c}</span>
-          <code style={{ color: "#9CA3AF", fontSize: 11 }}>{c}</code>
-        </div>
-      ))}
+      {codes.map((c) => {
+        const label = REASON_LABELS[c] || c;
+        return (
+          <div key={c} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4, fontSize: 13 }}>
+            <span style={{ color: "#DC2626" }}>●</span>
+            <span style={{ color: "#374151" }}>{label}</span>
+            {label !== c && <code style={{ color: "#9CA3AF", fontSize: 11 }}>{c}</code>}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -414,18 +417,46 @@ function SessionDetail({ sessionId, onClose }) {
                   Decision Reasons
                 </h4>
                 <ReasonCodes codes={data.decision.reasonCodes} />
+                {data.decision.reasonCodes.includes("MISSING_CAPTURES") && data.diagnostics?.missing && (
+                  <p style={{ fontSize: 12, color: "#B45309", margin: "6px 0 0" }}>
+                    Worker saw evidence: {(data.diagnostics.evidenceTypesSeen || []).join(", ") || "none"} —
+                    missing: {Object.entries(data.diagnostics.missing).filter(([, v]) => v).map(([k]) => k).join(", ") || "?"}
+                  </p>
+                )}
+                {data.decision.reasonCodes.includes("MISSING_CAPTURES") && data.diagnostics && !data.diagnostics.pipelineVersion && (
+                  <p style={{ fontSize: 12, color: "#B45309", margin: "6px 0 0" }}>
+                    This decision was made by an OUTDATED worker process (no pipeline
+                    version recorded). Restart the worker and create a new session.
+                  </p>
+                )}
               </div>
+            )}
+            {data.diagnostics?.pipelineVersion && (
+              <p style={{ fontSize: 11, color: "#9CA3AF", margin: "0 0 12px" }}>
+                Judged by pipeline {data.diagnostics.pipelineVersion}
+              </p>
             )}
 
             {/* Extracted document data */}
-            {data.document?.extractedData && (
+            {data.document && (
               <div style={{ marginBottom: 16 }}>
                 <h4 style={{ margin: "0 0 8px", fontSize: 13, color: "#374151", textTransform: "uppercase", letterSpacing: 0.5 }}>
-                  Extracted Document Data
+                  ID Details
                 </h4>
-                <pre style={{ background: "#F9FAFB", padding: 10, borderRadius: 6, fontSize: 11, overflow: "auto", margin: 0 }}>
-                  {JSON.stringify(data.document.extractedData, null, 2)}
-                </pre>
+                {data.document.extractedData && typeof data.document.extractedData === "object" ? (
+                  Object.entries(data.document.extractedData).map(([k, v]) => (
+                    <div key={k} style={rowStyle}>
+                      <span style={labelStyle}>{k.replace(/[_-]/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2").replace(/^./, (c) => c.toUpperCase())}</span>
+                      <span style={valStyle}>{v == null ? "—" : typeof v === "object" ? JSON.stringify(v) : String(v)}</span>
+                    </div>
+                  ))
+                ) : (
+                  <p style={{ fontSize: 12, color: "#9CA3AF", margin: 0 }}>
+                    No text extracted from this document — the ID OCR service
+                    (FACEPLUGIN_IDOCR_URL) is not configured, or the image was
+                    unreadable. Scores and evidence photos are unaffected.
+                  </p>
+                )}
               </div>
             )}
 

@@ -29,14 +29,14 @@ function stubProvider(overrides = {}) {
   };
 }
 
-async function seed({ settings = {}, withSelfie = true, withId = true } = {}) {
+async function seed({ settings = {}, withSelfie = true, withId = true, type = "ID_AND_FACE" } = {}) {
   const db = createMockDb();
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "vp-pipe-"));
   const tenant = await db.tenant.create({ data: { tenantUid: "tnt_p", companyName: "P", status: "active", settings } });
   const session = await db.verificationSession.create({
     data: {
       sessionUid: "vps_PIPE1", tenantId: tenant.id, status: "submitted",
-      verificationType: "ID_AND_FACE", isLive: false
+      verificationType: type, isLive: false
     }
   });
 
@@ -106,6 +106,35 @@ test("borderline match: manual_review, no completedAt", async () => {
   assert.equal(s.completedAt, null);
   const r = await db.verificationResult.findFirst({ where: { sessionId: session.id } });
   assert.equal(r.faceMatchStatus, "review");
+});
+
+test("ID_ONLY: verifies WITHOUT a selfie — document-only signals", async () => {
+  const { db, session } = await seed({ withSelfie: false, type: "ID_ONLY" });
+  const provider = stubProvider();
+  const calls = [];
+  const orig = provider.checkLiveness;
+  provider.checkLiveness = async (buf) => { calls.push("liveness"); return orig(buf); };
+
+  const out = await runVerification({ sessionUid: "vps_PIPE1" }, { db, provider, evidenceKey: KEY });
+  assert.equal(out.status, "approved", `got ${out.reasonCodes}`);
+  assert.equal(calls.length, 1, "liveness runs ONCE — on the document image only");
+
+  const r = await db.verificationResult.findFirst({ where: { sessionId: session.id } });
+  assert.equal(r.livenessScore, null);
+  assert.equal(r.livenessStatus, null);
+  assert.equal(r.faceMatchStatus, null);
+  assert.equal(r.documentStatus, "valid");
+  assert.equal(r.extractedData.fullName, "ADEBAYO JOHN");
+});
+
+test("ID_ONLY: live face submitted as the document → DOCUMENT_IS_LIVE_FACE (no selfie to cross-check)", async () => {
+  const { db } = await seed({ withSelfie: false, type: "ID_ONLY" });
+  const provider = stubProvider();
+  provider.checkLiveness = async () => ({ score: 0.95, verdict: "Real", faceCount: 1, occluded: false, raw: {} });
+
+  const out = await runVerification({ sessionUid: "vps_PIPE1" }, { db, provider, evidenceKey: KEY });
+  assert.equal(out.status, "manual_review");
+  assert.ok(out.reasonCodes.includes("DOCUMENT_IS_LIVE_FACE"));
 });
 
 test("selfie submitted as 'ID front' → DOCUMENT_IS_LIVE_FACE manual_review", async () => {

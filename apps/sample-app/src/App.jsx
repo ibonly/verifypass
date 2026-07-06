@@ -17,9 +17,10 @@ function inferApiBase() {
   if (CONFIGURED_API_BASE) return CONFIGURED_API_BASE.replace(/\/$/, "");
   if (typeof window === "undefined") return "http://localhost:3000";
 
-  const { protocol, hostname } = window.location;
+  const { hostname } = window.location;
   if (hostname === "localhost" || hostname === "127.0.0.1") return "http://localhost:3000";
-  return window.location.origin;
+  if (/\b5175\b/.test(hostname)) return window.location.origin;
+  return "http://localhost:3000";
 }
 
 const API_BASE = inferApiBase();

@@ -8,6 +8,11 @@ const fs = require("fs/promises");
 const { decide, resolveThresholds, decryptBuffer, resolveEvidenceKey, verifyLivenessChallenge } = require("@verifypass/shared");
 const { computeRiskSignals } = require("./riskSignals");
 
+// Stamped into every rawResult + logged at worker startup. When a decision
+// looks impossible, this settles WHICH code produced it — Node caches modules
+// at process start, so an unrestarted worker silently runs old logic.
+const PIPELINE_VERSION = "2026-07-06.4-id-only";
+
 function defaultEvidenceKey(config) {
   return resolveEvidenceKey({
     keyHex: config.evidenceEncryptionKey,
@@ -39,21 +44,36 @@ async function runVerification(payload, { db, provider, evidenceKey }) {
     return decryptBuffer(raw, evidenceKey);
   }
 
-  // Fail closed: missing captures → failed session, not a crash loop
-  if (!selfie || (session.verificationType !== "FACE_ONLY" && !idFront)) {
+  // Fail closed: missing captures → failed session, not a crash loop.
+  // ID_ONLY has NO selfie step — only the document is required there.
+  const needsSelfie = session.verificationType !== "ID_ONLY";
+  const needsId = session.verificationType !== "FACE_ONLY";
+  if ((needsSelfie && !selfie) || (needsId && !idFront)) {
     await finalize(db, session, {
       decision: { status: "failed", riskLevel: "high", reasonCodes: ["MISSING_CAPTURES"] },
-      resultRow: {}
+      // Record WHICH capture was missing — "MISSING_CAPTURES" alone told a
+      // reviewer nothing when the evidence gallery clearly showed a photo.
+      resultRow: {
+        rawResult: {
+          pipelineVersion: PIPELINE_VERSION,
+          missing: {
+            selfie: needsSelfie && !selfie,
+            idFront: needsId && !idFront
+          },
+          verificationType: session.verificationType,
+          evidenceTypesSeen: evidence.map((e) => e.fileType)
+        }
+      }
     });
     return { status: "failed" };
   }
 
-  const selfieBuf = await loadDecrypted(selfie);
+  const selfieBuf = needsSelfie ? await loadDecrypted(selfie) : null;
   const idBuf = idFront ? await loadDecrypted(idFront) : null;
 
   // --- Provider calls (liveness + match + OCR) ---
-  const liveness = await provider.checkLiveness(selfieBuf);
-  const faceMatch = idBuf ? await provider.compareFaces(selfieBuf, idBuf) : null;
+  const liveness = selfieBuf ? await provider.checkLiveness(selfieBuf) : null;
+  const faceMatch = selfieBuf && idBuf ? await provider.compareFaces(selfieBuf, idBuf) : null;
   const doc = idBuf ? await provider.extractDocument(idBuf) : null;
 
   // Document validation: the "ID front" must actually be a DOCUMENT. A selfie
@@ -90,15 +110,17 @@ async function runVerification(payload, { db, provider, evidenceKey }) {
       // strong selfie liveness disarms the mid-action spoof floor (a replay
       // can't produce a high selfie score; low action-frame scores then mean
       // pose/lighting, not spoofing)
-      selfieScore: liveness.score
+      selfieScore: liveness ? liveness.score : null
     };
     challenge = verifyLivenessChallenge(session.livenessChallenge, frames, thresholds, challengeOpts);
   }
 
   const risk = await computeRiskSignals(db, session, thresholds);
   const signals = {
-    selfie: { faceCount: liveness.faceCount },
-    liveness: { score: liveness.score },
+    // ID_ONLY has no selfie: omit selfie/liveness sections entirely — the
+    // decision engine treats absent sections as not-applicable (fail-closed
+    // paths only trigger on PRESENT-but-bad signals).
+    ...(liveness ? { selfie: { faceCount: liveness.faceCount }, liveness: { score: liveness.score } } : {}),
     ...(hasChallenge ? { livenessChallenge: { ok: challenge.ok, reasonCodes: challenge.reasonCodes } } : {}),
     ...(faceMatch ? { idFace: { found: faceMatch.idFaceFound }, faceMatch: { score: faceMatch.score } } : {}),
     ...(doc ? { document: { ocrConfidence: doc.ocrConfidence, expired: doc.expired === true, liveFaceAsDocument } } : {}),
@@ -107,8 +129,9 @@ async function runVerification(payload, { db, provider, evidenceKey }) {
   const decision = decide(signals, thresholds);
 
   const resultRow = {
-    livenessScore: liveness.score,
-    livenessStatus: decision.reasonCodes.includes("LIVENESS_FAILED") ? "failed"
+    livenessScore: liveness ? liveness.score : null,
+    livenessStatus: !liveness ? null
+      : decision.reasonCodes.includes("LIVENESS_FAILED") ? "failed"
       : decision.reasonCodes.includes("LIVENESS_BORDERLINE") ? "review" : "passed",
     faceMatchScore: faceMatch?.score ?? null,
     faceMatchStatus: !faceMatch ? null
@@ -121,9 +144,10 @@ async function runVerification(payload, { db, provider, evidenceKey }) {
     ocrConfidence: doc?.ocrConfidence ?? null,
     extractedData: doc?.extractedData ?? null,
     rawResult: {
+      pipelineVersion: PIPELINE_VERSION,
       provider: provider.name,
       thresholds,
-      liveness: { score: liveness.score, faceCount: liveness.faceCount, occluded: liveness.occluded },
+      liveness: liveness ? { score: liveness.score, faceCount: liveness.faceCount, occluded: liveness.occluded } : null,
       livenessChallenge: hasChallenge
         ? { ok: challenge.ok, aggregateScore: challenge.aggregateScore, reasonCodes: challenge.reasonCodes, perAction: challenge.perAction, actions: session.livenessChallenge.actions }
         : null,
@@ -186,4 +210,4 @@ async function finalize(db, session, { decision, resultRow }) {
   });
 }
 
-module.exports = { runVerification, defaultEvidenceKey };
+module.exports = { runVerification, defaultEvidenceKey, PIPELINE_VERSION };

@@ -160,4 +160,40 @@ function grabSquareFrame(videoEl, w, h) {
   return ctx.getImageData(0, 0, w, h);
 }
 
-module.exports = { startCamera, stopCamera, captureFrame, grabAnalysisFrame, grabFixedFrame, grabSquareFrame };
+/**
+ * Capture ONLY the region inside a centered guide box, from the
+ * FULL-RESOLUTION source. The preview shows the video with object-fit:cover
+ * in a container of displayAspect (w/h); the guide is a centered box of
+ * widthFrac × container width with its own aspect (ID-1 card = 1.586). The
+ * crop makes the document FILL the evidence photo instead of floating in a
+ * room-sized frame — better for OCR, face-compare and reviewers.
+ */
+function captureGuideFrame(videoEl, { displayAspect = 1.6, widthFrac = 0.88, regionAspect = 1.586 } = {}) {
+  const vw = videoEl.videoWidth;
+  const vh = videoEl.videoHeight;
+  if (!vw || !vh) {
+    const err = new Error("Camera is still starting — please try again in a moment.");
+    err.code = "CAMERA_NOT_READY";
+    throw err;
+  }
+  // Source region actually visible under object-fit:cover
+  let visW, visH;
+  if (vw / vh > displayAspect) { visH = vh; visW = vh * displayAspect; }
+  else { visW = vw; visH = vw / displayAspect; }
+  // Guide box in source pixels (centered, like the on-screen guide)
+  let gw = visW * widthFrac;
+  let gh = gw / regionAspect;
+  if (gh > visH * 0.96) { gh = visH * 0.96; gw = gh * regionAspect; }
+  const sx = (vw - gw) / 2;
+  const sy = (vh - gh) / 2;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(gw);
+  canvas.height = Math.round(gh);
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(videoEl, sx, sy, gw, gh, 0, 0, canvas.width, canvas.height);
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const base64 = canvas.toDataURL("image/jpeg", 0.92);
+  return { imageData, base64 };
+}
+
+module.exports = { startCamera, stopCamera, captureFrame, captureGuideFrame, grabAnalysisFrame, grabFixedFrame, grabSquareFrame };

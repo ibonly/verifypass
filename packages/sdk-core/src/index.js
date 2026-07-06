@@ -22,6 +22,7 @@ exports.DEFAULT_RULES = quality.DEFAULT_RULES;
 exports.startCamera = camera.startCamera;
 exports.stopCamera = camera.stopCamera;
 exports.captureFrame = camera.captureFrame;
+exports.captureGuideFrame = camera.captureGuideFrame;
 exports.grabAnalysisFrame = camera.grabAnalysisFrame;
 exports.grabFixedFrame = camera.grabFixedFrame;
 exports.grabSquareFrame = camera.grabSquareFrame;

@@ -10,7 +10,7 @@ require("./src/env");
 const config = require("./src/config");
 const { createFacepluginProvider } = require("./src/providers/faceplugin");
 const { createOnnxProvider } = require("./src/providers/onnx");
-const { runVerification, defaultEvidenceKey } = require("./src/pipeline");
+const { runVerification, defaultEvidenceKey, PIPELINE_VERSION } = require("./src/pipeline");
 
 const POLL_MS = config.pollMs;
 const WORKER_ID = `worker-${process.pid}`;
@@ -118,7 +118,7 @@ async function tick() {
 }
 
 async function main() {
-  console.log(`VerifyPass worker ${WORKER_ID} polling every ${POLL_MS}ms`);
+  console.log(`VerifyPass worker ${WORKER_ID} polling every ${POLL_MS}ms (pipeline ${PIPELINE_VERSION})`);
   while (true) {
     try {
       await tick();

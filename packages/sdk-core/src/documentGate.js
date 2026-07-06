@@ -98,9 +98,10 @@ const SHAPE_DEFAULTS = Object.freeze({
   maxWidthFrac: 0.98,
   minHeightFrac: 0.16,  // …and 16–95% of frame height
   maxHeightFrac: 0.95,
-  minFill: 0.5,         // region area / bbox area — cards are solid rectangles
+  minFill: 0.45,        // region area / bbox area — cards are solid rectangles
+                        // (hand + forearm join the region, diluting fill)
   bandFrac: 0.6,        // middle band of the bbox used for edge straightness
-  maxEdgeDev: 0.04,     // max linear-fit residual stdev / bbox dim for "straight"
+  maxEdgeDev: 0.055,    // max linear-fit residual stdev / bbox dim for "straight"
   interiorMargin: 2,    // edges glued to the frame border are trivially straight — ignore
   minStraightEdges: 2   // a hand grips one edge; the frame may cut another
 });

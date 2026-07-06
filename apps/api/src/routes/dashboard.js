@@ -99,6 +99,13 @@ router.get("/sessions/:sessionId", anyUser, requireTenant, tenantScope, async (r
         status: session.status,
         reasonCodes: session.decisionReason?.reasonCodes || []
       },
+      // Which pipeline judged this session + what evidence it saw — settles
+      // "the photo is right there!" confusion (stale worker, type mismatch).
+      diagnostics: r ? {
+        pipelineVersion: r.rawResult?.pipelineVersion || null,
+        missing: r.rawResult?.missing || null,
+        evidenceTypesSeen: r.rawResult?.evidenceTypesSeen || null
+      } : null,
       createdAt: session.createdAt ? new Date(session.createdAt).toISOString() : null,
       completedAt: session.completedAt ? new Date(session.completedAt).toISOString() : null,
       expiresAt: session.expiresAt ? new Date(session.expiresAt).toISOString() : null

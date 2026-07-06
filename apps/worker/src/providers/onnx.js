@@ -209,13 +209,16 @@ function createOnnxProvider({ modelsDir, matchThreshold = 0.6, livenessThreshold
 
     async checkLiveness(selfieBuffer) {
       const det = await detect(selfieBuffer);
-      if (!det.best) return { score: null, faceCount: 0, occluded: false, quality: null, pose: null, raw: { faces: 0 } };
+      if (!det.best) return { score: null, verdict: "No face", faceCount: 0, occluded: false, quality: null, pose: null, raw: { faces: 0 } };
       const [score, ps] = await Promise.all([
         liveness(selfieBuffer, det.best, det.width, det.height),
         pose(selfieBuffer, det.best, det.width, det.height)
       ]);
       return {
         score,
+        // Same vocabulary as Faceplugin's face_state.result — the pipeline's
+        // document validation (liveFaceAsDocument) keys off "Real".
+        verdict: score >= 0.5 ? "Real" : "Spoof",
         faceCount: det.count,
         occluded: false,
         quality: null,

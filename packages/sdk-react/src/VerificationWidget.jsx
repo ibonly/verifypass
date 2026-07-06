@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   VerifyPassClient, createFlow, assessFrame,
-  startCamera, stopCamera, captureFrame,
+  startCamera, stopCamera, captureFrame, captureGuideFrame,
   grabAnalysisFrame, grabSquareFrame, grabFixedFrame, frameMotion, toGrayscale, meanBrightness, laplacianVariance,
   createFramingStabilizer, createActionDetector, bandMotion, createDocumentGate, isDominantFace
 } from "@verifypass/sdk-core";
@@ -27,6 +27,11 @@ const STEP_COPY = {
   processing: { title: "Verifying…", hint: "This usually takes a few seconds." },
   complete: { title: "Done", hint: "" }
 };
+
+// Document-step guide box: ID-1 card aspect (85.6×54mm), centered, matching
+// the on-screen guide overlay — capture crops to exactly this region.
+// displayAspect must equal frameW/frameH of the document preview (340/212).
+const DOC_GUIDE = { displayAspect: 340 / 212, widthFrac: 0.88, regionAspect: 1.586 };
 
 // Prompts for each server-issued challenge action.
 const ACTION_COPY = {
@@ -234,7 +239,11 @@ export function VerificationWidget({
     setBusy(true);
     setFeedback(null);
     try {
-      const { imageData, base64 } = captureFrame(videoRef.current);
+      // Documents are cropped to the on-screen card guide so the ID FILLS the
+      // evidence photo (matches what the user aligned to; better OCR/review).
+      const { imageData, base64 } = step === "document"
+        ? captureGuideFrame(videoRef.current, DOC_GUIDE)
+        : captureFrame(videoRef.current);
       // During liveness actions the head is MOVING — motion blur is expected
       // and desired evidence. Gating those frames on sharpness silently dropped
       // them (→ LIVENESS_CHALLENGE_INCOMPLETE). Server verifies authoritatively.
@@ -246,6 +255,14 @@ export function VerificationWidget({
       if (step === "document") {
         await client.uploadDocument(base64, "front");
         flow.advance();
+        // ID_ONLY has no face step — the document is the last capture, so THIS
+        // branch must submit, or the session sits in "started" forever.
+        if (flow.state().step === "processing") {
+          await client.submit();
+          const result = await client.waitForResult();
+          flow.finish(result);
+          if (onCompleteRef.current) onCompleteRef.current(result);
+        }
       } else if (step === "liveness") {
         const action = actionsRef.current[actionIdxRef.current];
         await client.uploadLivenessFrame(action, base64);
@@ -356,6 +373,7 @@ export function VerificationWidget({
     let docBlockStreak = 0;
     let docClearStreak = 0;
     let docFaceNow = false;
+    let docRelaxSince = 0;
     setDocFaceBlocked(false);
     const HOLD_MS = 550;
     const SETTLE_DELTA = 3;
@@ -376,6 +394,10 @@ export function VerificationWidget({
     const BURST_TOTAL = 1100;       // progress bar duration
     const AWAIT_HINT_MS = 5000;     // no movement detected → coach the user
     const AWAIT_FACE_LOST_MS = 4000; // face gone this long → back to align
+    // Document step: if something is present, lit and face-clear this long but
+    // the strict card-shape gate hasn't passed (hand/forearm in the mask,
+    // low-contrast card), capture anyway — server validation backstops.
+    const DOC_SHAPE_RELAX_MS = 5000;
     const currentAction = actionsRef.current[actionIdxRef.current] || null;
     let phase = "align";
     let baselineBox = null;
@@ -591,9 +613,21 @@ export function VerificationWidget({
           const docFaceClear = !faceModelUrl || detectorStatus === "failed"
             ? true
             : docDetect && !docFaceNow && docClearStreak >= 2;
+          // Shape-relax timer: real hands holding real cards can corrupt the
+          // change-mask (the forearm merges into the region), starving the
+          // strict cardLike gate forever. If SOMETHING has been present, lit
+          // and face-clear for a sustained window, capture anyway — the
+          // dominant-face veto stays active and the server independently
+          // rejects a live face submitted as a document.
+          if (docGate && docState.present && lightOk && docFaceClear) {
+            if (!docRelaxSince) docRelaxSince = now;
+          } else {
+            docRelaxSince = 0;
+          }
+          const docRelaxed = docRelaxSince > 0 && now - docRelaxSince > DOC_SHAPE_RELAX_MS;
           const inPosition = requiresFaceModel
             ? lockedOk
-            : docGate ? docState.ready && lightOk && docFaceClear
+            : docGate ? (docState.ready || docRelaxed) && lightOk && docFaceClear
               : settled && lightOk;
           setGreen(inPosition);
           if (inPosition) {
@@ -729,6 +763,7 @@ export function VerificationWidget({
             </div>
             {/* framed (circular for face/liveness) camera preview */}
             <div style={{
+              position: "relative",
               width: frameW, height: frameH, margin: "0 auto",
               borderRadius: isDoc ? 16 : "50%", overflow: "hidden", background: "#111",
               border: `4px solid ${ringColor}`,
@@ -741,6 +776,16 @@ export function VerificationWidget({
                 muted
                 style={{ width: "100%", height: "100%", objectFit: "cover", transform: isDoc ? "none" : "scaleX(-1)" }}
               />
+              {isDoc && (
+                /* card-aspect guide — capture crops to exactly this box */
+                <div style={{
+                  position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)",
+                  width: `${DOC_GUIDE.widthFrac * 100}%`, aspectRatio: `${DOC_GUIDE.regionAspect} / 1`,
+                  border: `3px dashed ${green ? "#10B981" : "rgba(255,255,255,0.85)"}`,
+                  borderRadius: 12, pointerEvents: "none", boxSizing: "border-box", zIndex: 1,
+                  boxShadow: "0 0 0 999px rgba(0,0,0,0.35)", transition: "border-color .15s"
+                }} />
+              )}
               {faceStep && (
                 <canvas
                   ref={overlayRef}
@@ -778,9 +823,9 @@ export function VerificationWidget({
               : green ? "Hold still…"
               : faceStep ? "Align your face in the circle"
               : docFaceBlocked ? "That's a face — hold up your ID card instead"
-              : docSeen && !docShapeOk ? "Hold the card flat and fill the frame with it"
+              : docSeen && !docShapeOk ? "Fit your ID inside the box"
               : docSeen ? "Hold steady…"
-              : "Show your ID in the frame"}
+              : "Fit your ID inside the box"}
           </p>
 
           {feedback && (
