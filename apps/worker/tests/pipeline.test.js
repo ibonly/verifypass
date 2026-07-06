@@ -108,6 +108,39 @@ test("borderline match: manual_review, no completedAt", async () => {
   assert.equal(r.faceMatchStatus, "review");
 });
 
+test("selfie submitted as 'ID front' → DOCUMENT_IS_LIVE_FACE manual_review", async () => {
+  const { db, session } = await seed();
+  const provider = stubProvider();
+  // Both images are live-face captures: the liveness container returns "Real"
+  // for the "document" too. A genuine card's printed portrait scores "Spoof".
+  provider.checkLiveness = async () => ({ score: 0.95, verdict: "Real", faceCount: 1, occluded: false, raw: {} });
+
+  const out = await runVerification({ sessionUid: "vps_PIPE1" }, { db, provider, evidenceKey: KEY });
+  assert.equal(out.status, "manual_review");
+  assert.ok(out.reasonCodes.includes("DOCUMENT_IS_LIVE_FACE"));
+
+  const r = await db.verificationResult.findFirst({ where: { sessionId: session.id } });
+  assert.equal(r.documentStatus, "review");
+  assert.equal(r.rawResult.document.liveFaceAsDocument, true);
+  assert.equal(r.rawResult.document.liveness.verdict, "Real");
+});
+
+test("genuine card: doc image scores Spoof (it IS a printed photo) → no flag", async () => {
+  const { db } = await seed();
+  const provider = stubProvider();
+  let call = 0;
+  provider.checkLiveness = async () => {
+    call++;
+    // 1st call = selfie (Real), later call = ID image (Spoof — expected!)
+    return call === 1
+      ? { score: 0.95, verdict: "Real", faceCount: 1, occluded: false, raw: {} }
+      : { score: 0.1, verdict: "Spoof", faceCount: 1, occluded: false, raw: {} };
+  };
+
+  const out = await runVerification({ sessionUid: "vps_PIPE1" }, { db, provider, evidenceKey: KEY });
+  assert.equal(out.status, "approved", `Spoof verdict on the CARD is normal; got ${out.reasonCodes}`);
+});
+
 test("OCR service missing: degrades to manual_review, not crash", async () => {
   const { db } = await seed();
   const provider = stubProvider();

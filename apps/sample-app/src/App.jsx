@@ -10,8 +10,19 @@ import { VerifyPassProvider, VerificationWidget } from "@verifypass/react";
 // the client. The sdkToken embeds the API origin, so the widget does not need a
 // baseUrl. This app takes the secret key at runtime purely for local testing.
 
-const API_BASE = typeof __VP_API_BASE__ !== "undefined" ? __VP_API_BASE__ : "http://localhost:3000";
+const CONFIGURED_API_BASE = typeof __VP_API_BASE__ !== "undefined" ? __VP_API_BASE__ : "";
 const PREFILL_SECRET = typeof __VP_SECRET_KEY__ !== "undefined" ? __VP_SECRET_KEY__ : "";
+
+function inferApiBase() {
+  if (CONFIGURED_API_BASE) return CONFIGURED_API_BASE.replace(/\/$/, "");
+  if (typeof window === "undefined") return "http://localhost:3000";
+
+  const { protocol, hostname } = window.location;
+  if (hostname === "localhost" || hostname === "127.0.0.1") return "http://localhost:3000";
+  return window.location.origin;
+}
+
+const API_BASE = inferApiBase();
 
 const PRIMARY = "#6D28D9";
 

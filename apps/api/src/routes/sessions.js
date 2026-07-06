@@ -10,10 +10,18 @@ const router = Router();
 
 router.use(requireApiKey("secret"), tenantScope);
 
+function publicApiUrlForRequest(req) {
+  if (process.env.API_PUBLIC_URL || process.env.NODE_ENV === "production") return undefined;
+  const host = req.get("x-forwarded-host") || req.get("host");
+  if (!host) return undefined;
+  const proto = req.get("x-forwarded-proto") || req.protocol || "http";
+  return `${proto.split(",")[0]}://${host.split(",")[0]}`.replace(/\/$/, "");
+}
+
 // POST /v1/verification-sessions (PRD §12.1)
 router.post("/", async (req, res, next) => {
   try {
-    const result = await createSession(req.scopedDb, req.body, req.isLive);
+    const result = await createSession(req.scopedDb, req.body, req.isLive, { publicApiUrl: publicApiUrlForRequest(req) });
     await audit({
       tenantId: req.tenant.id,
       actorType: "api",

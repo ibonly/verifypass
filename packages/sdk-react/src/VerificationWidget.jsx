@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   VerifyPassClient, createFlow, assessFrame,
   startCamera, stopCamera, captureFrame,
-  grabAnalysisFrame, grabSquareFrame, frameMotion, toGrayscale, meanBrightness, laplacianVariance,
-  createFramingStabilizer, createActionDetector, bandMotion
+  grabAnalysisFrame, grabSquareFrame, grabFixedFrame, frameMotion, toGrayscale, meanBrightness, laplacianVariance,
+  createFramingStabilizer, createActionDetector, bandMotion, createDocumentGate, isDominantFace
 } from "@verifypass/sdk-core";
 import { useVerifyPass } from "./VerifyPassProvider";
 import { createFaceDetector } from "./faceDetector";
@@ -146,6 +146,12 @@ export function VerificationWidget({
   // Liveness capture phases: "align" (frontal lock) → "perform" (burst capture
   // while the user does the action). Set once per transition — never per frame.
   const [livePhase, setLivePhase] = useState({ phase: "align", startedAt: 0, total: 0 });
+  // Document step: has the ID actually entered the frame? (drives the hint)
+  const [docSeen, setDocSeen] = useState(false);
+  // Document step: does the change-region look like a CARD? (straight edges)
+  const [docShapeOk, setDocShapeOk] = useState(false);
+  // Document step: a LIVE face is filling the frame instead of a card
+  const [docFaceBlocked, setDocFaceBlocked] = useState(false);
 
   // init: create client, fetch the server-issued challenge, build the flow
   useEffect(() => {
@@ -337,6 +343,20 @@ export function VerificationWidget({
     const history = [];
     const stab = createFramingStabilizer(); // temporal smoothing: no flicker, no hold-timer resets on jitter
     let stable = null;
+    // Document step gate: "change-then-steady" — learns the EMPTY scene first,
+    // then requires the ID to actually enter the frame (sustained scene change)
+    // and be held still. A bare steadiness check photographed empty rooms.
+    const docGate = step === "document" ? createDocumentGate() : null;
+    let docState = { armed: false, present: false, steady: false, ready: false, shape: null };
+    let lastDocSeen = false;
+    let lastDocShapeOk = false;
+    setDocSeen(false);
+    setDocShapeOk(false);
+    // Face-vs-card check on the document step (hysteresis so it doesn't flap)
+    let docBlockStreak = 0;
+    let docClearStreak = 0;
+    let docFaceNow = false;
+    setDocFaceBlocked(false);
     const HOLD_MS = 550;
     const SETTLE_DELTA = 3;
     const DETECT_MS = 140;
@@ -369,6 +389,11 @@ export function VerificationWidget({
     let actionDet = null;
     let actionState = { ok: false, triggered: false, holding: false };
     let prevModelGray = null;
+    // One frame captured at the FIRST action-consistent detection while the
+    // face is still visible — the disappearance-clause trigger often fires
+    // after the face has already turned out of detection range, and the
+    // server requires at least one face-bearing frame per action.
+    let earlyShotTaken = false;
 
     const tick = () => {
       const video = videoRef.current;
@@ -392,6 +417,21 @@ export function VerificationWidget({
           const bright = meanBrightness(small);
           lightOk = bright > 35 && bright < 240;
           settled = history.length >= 8 && motion <= baseline + SETTLE_DELTA;
+          if (docGate) {
+            // With dims the gate is fail-closed: ready additionally requires
+            // the change-region to be CARD-shaped (straight-edged solid
+            // rectangle) — a person/hand/wall present+steady never captures.
+            docState = docGate.update(gray, small.width, small.height);
+            if (docState.present !== lastDocSeen) {
+              lastDocSeen = docState.present;
+              setDocSeen(docState.present);
+            }
+            const shapeOk = !!(docState.shape && docState.shape.cardLike);
+            if (shapeOk !== lastDocShapeOk) {
+              lastDocShapeOk = shapeOk;
+              setDocShapeOk(shapeOk);
+            }
+          }
         }
 
         // face model framing (throttled) for face/liveness
@@ -403,16 +443,41 @@ export function VerificationWidget({
           setFramingGuide("model_loading");
         }
 
-        if (faceGate && !detecting && now - lastDetect > DETECT_MS && !capturingRef.current) {
+        // On the DOCUMENT step the detector serves the opposite purpose:
+        // block capture while a LIVE face dominates the frame (people show
+        // their face instead of the card).
+        const docDetect = step === "document" && !!faceModelUrl && detectorStatus === "ready" && !!detectorRef.current;
+
+        if ((faceGate || docDetect) && !detecting && now - lastDetect > DETECT_MS && !capturingRef.current) {
           lastDetect = now;
           detecting = true;
-          // Analyse the SAME center-square the circular preview shows so the
-          // green gate agrees with what the user sees.
-          const modelFrame = grabSquareFrame(video, 320, 240);
+          // Face steps analyse the SAME center-square the circular preview
+          // shows so the green gate agrees with what the user sees. The
+          // document step must scan the FULL frame — a face outside the
+          // center square (leaning in from the side) still has to block.
+          const modelFrame = docDetect ? grabFixedFrame(video, 320, 240) : grabSquareFrame(video, 320, 240);
           detectorRef.current
             .detect(modelFrame)
             .then((f) => {
               if (cancelled) return;
+              if (docDetect) {
+                // Relative rule when a card region is visible: a real ID's
+                // printed portrait is a small fraction of the card's width; a
+                // face (live or photo) filling the "document" blocks capture.
+                const shape = docState.shape;
+                const docWidthPx = shape && shape.found ? shape.widthFrac * 320 : 0;
+                const blocked = isDominantFace(f && f.box, 320, { docWidthPx });
+                docBlockStreak = blocked ? docBlockStreak + 1 : 0;
+                docClearStreak = blocked ? 0 : docClearStreak + 1;
+                if (!docFaceNow && docBlockStreak >= 2) {
+                  docFaceNow = true;
+                  setDocFaceBlocked(true);
+                } else if (docFaceNow && docClearStreak >= 3) {
+                  docFaceNow = false;
+                  setDocFaceBlocked(false);
+                }
+                return;
+              }
               let next = f || { present: false, inFrame: false, guide: "no_face" };
               if (next.inFrame) {
                 const faceCrop = cropImageData(modelFrame, next.box);
@@ -465,6 +530,7 @@ export function VerificationWidget({
               baselineBox = (stable && stable.box) || rawBox || null;
               actionDet = createActionDetector(currentAction, baselineBox);
               actionState = { ok: false, triggered: false, holding: false };
+              earlyShotTaken = false;
               awaitStart = now;
               hintShown = false;
               setLivePhase({ phase: "await", startedAt: now, total: 0, hint: false });
@@ -473,6 +539,12 @@ export function VerificationWidget({
             // Instruction shown — capture NOTHING until THIS action's own
             // signature is seen (2 consecutive detections; jitter can't fire it).
             setGreen(true);
+            if (actionState.ok && rawBox && !earlyShotTaken && !capturingRef.current) {
+              // movement just started and the face is STILL detectable —
+              // grab the guaranteed face-bearing frame for this action now
+              earlyShotTaken = true;
+              captureRef.current({ livenessAdvance: false });
+            }
             if (facePresent && actionState.triggered) {
               phase = "capturing";
               triggerAt = now;
@@ -511,7 +583,18 @@ export function VerificationWidget({
             }
           }
         } else if (!capturingRef.current) {
-          const inPosition = requiresFaceModel ? lockedOk : settled && lightOk;
+          // Doc capture may only proceed once the face check has POSITIVELY
+          // cleared the frame (>=2 consecutive detections without a dominant
+          // face). While the model is still loading nothing has been checked,
+          // so capture waits — otherwise a face gets photographed as "ID"
+          // during the load window. Detector failed/absent degrades gracefully.
+          const docFaceClear = !faceModelUrl || detectorStatus === "failed"
+            ? true
+            : docDetect && !docFaceNow && docClearStreak >= 2;
+          const inPosition = requiresFaceModel
+            ? lockedOk
+            : docGate ? docState.ready && lightOk && docFaceClear
+              : settled && lightOk;
           setGreen(inPosition);
           if (inPosition) {
             if (!greenSince) greenSince = now;
@@ -694,7 +777,10 @@ export function VerificationWidget({
               : isLiveness ? (green ? "Get ready…" : "Center your face to begin")
               : green ? "Hold still…"
               : faceStep ? "Align your face in the circle"
-              : "Hold steady"}
+              : docFaceBlocked ? "That's a face — hold up your ID card instead"
+              : docSeen && !docShapeOk ? "Hold the card flat and fill the frame with it"
+              : docSeen ? "Hold steady…"
+              : "Show your ID in the frame"}
           </p>
 
           {feedback && (

@@ -30,7 +30,10 @@ function resolveThresholds(tenantSettings = {}) {
  * @param {object} [signals.liveness]  {score 0..1}
  * @param {object} [signals.idFace]    {found}
  * @param {object} [signals.faceMatch] {score 0..1} — omit for FACE_ONLY re-auth
- * @param {object} [signals.document]  {ocrConfidence 0..1|null, expired} — omit for FACE_ONLY
+ * @param {object} [signals.document]  {ocrConfidence 0..1|null, expired,
+ *   liveFaceAsDocument} — omit for FACE_ONLY. liveFaceAsDocument: the "ID"
+ *   image passed PASSIVE LIVENESS as a real face — it's a person shown to the
+ *   camera, not a document (a genuine card's printed portrait scores Spoof)
  * @param {object} [signals.risk]      fraud-signal flags (Phase 2):
  *   {repeatedFailedAttempts, deviceSharedAcrossIdentities, ipVelocityExceeded}
  *   — flags force at least manual_review; they never auto-reject on their own
@@ -93,6 +96,11 @@ function decide(signals, thresholds = DEFAULT_THRESHOLDS) {
 
   // Document checks
   if (document) {
+    // A selfie submitted as the "ID front" would otherwise sail through
+    // face-compare (it trivially matches itself). Manual review, not reject:
+    // an honest user confused by the capture UX hits this too, and the
+    // reviewer sees the actual image.
+    if (document.liveFaceAsDocument) reviews.push(R.DOCUMENT_IS_LIVE_FACE);
     if (document.expired) reviews.push(R.DOCUMENT_EXPIRED);
     if (document.ocrConfidence == null || document.ocrConfidence === 0) {
       reviews.push(R.DOCUMENT_OCR_FAILED);

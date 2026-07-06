@@ -62,6 +62,21 @@ test("verify: confidently-spoof frame (below challenge floor) → FAILED", () =>
   assert.ok(r.reasonCodes.includes("LIVENESS_CHALLENGE_FAILED"));
 });
 
+test("verify: STRONG selfie disarms the spoof floor — backlit/tilted action frames must not fail a proven-live user", () => {
+  const c = { actions: ["look_up"], nonce: "x", issuedAt: new Date().toISOString() };
+  const frames = [frame("look_up", 0.12, 1)]; // harsh backlight → very low score
+  const r = verifyLivenessChallenge(c, frames, THRESH, { selfieScore: 0.91 });
+  assert.equal(r.ok, true, JSON.stringify(r));
+});
+
+test("verify: weak selfie keeps the spoof floor armed (replay can't fake a strong selfie)", () => {
+  const c = { actions: ["look_up"], nonce: "x", issuedAt: new Date().toISOString() };
+  const frames = [frame("look_up", 0.12, 1)];
+  const r = verifyLivenessChallenge(c, frames, THRESH, { selfieScore: 0.6 });
+  assert.equal(r.ok, false);
+  assert.ok(r.reasonCodes.includes("LIVENESS_CHALLENGE_FAILED"));
+});
+
 test("verify: MID-ACTION frames with modest scores pass — frontal-biased models score turned heads low", () => {
   const c = { actions: ["turn_right", "look_up"], nonce: "x", issuedAt: new Date().toISOString() };
   const frames = [

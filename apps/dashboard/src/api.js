@@ -41,7 +41,11 @@ export async function api(path, { method = "GET", body } = {}) {
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const err = new Error(json.error?.message || `HTTP ${res.status}`);
+    // surface field-level validation details, not just "Invalid settings"
+    const details = Array.isArray(json.error?.details?.errors)
+      ? `: ${json.error.details.errors.join("; ")}`
+      : "";
+    const err = new Error((json.error?.message || `HTTP ${res.status}`) + details);
     err.code = json.error?.code;
     err.status = res.status;
     throw err;

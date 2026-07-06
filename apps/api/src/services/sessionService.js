@@ -36,14 +36,14 @@ function validateCreatePayload(body) {
   if (errors.length) throw new AppError("VALIDATION_ERROR", "Request validation failed", { errors });
 }
 
-function signSdkToken(sessionUid) {
+function signSdkToken(sessionUid, publicApiUrl = config.apiPublicUrl) {
   // Self-locating v1 token: embeds this deployment's public API origin so the
   // browser SDK derives its endpoint from the token alone — the environment
   // (sandbox/production/self-hosted) travels with the credential, and the
   // consumer never configures a baseUrl. The HMAC covers the FULL token
   // string, so the embedded origin is tamper-evident.
   const raw = crypto.randomBytes(24).toString("base64url");
-  const payload = Buffer.from(JSON.stringify({ u: config.apiPublicUrl, t: raw })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({ u: publicApiUrl, t: raw })).toString("base64url");
   const token = `sdk_v1_${payload}`;
   const tokenHash = crypto.createHmac("sha256", config.sdkTokenSecret).update(`${sessionUid}.${token}`).digest("hex");
   return { token, tokenHash };
@@ -55,10 +55,10 @@ function verifySdkToken(sessionUid, token, tokenHash) {
 }
 
 /** Create a verification session for the authenticated tenant (PRD §9.3/§12.1). */
-async function createSession(scopedDb, body, isLive) {
+async function createSession(scopedDb, body, isLive, options = {}) {
   validateCreatePayload(body || {});
   const sessionUid = uid("vps");
-  const { token, tokenHash } = signSdkToken(sessionUid);
+  const { token, tokenHash } = signSdkToken(sessionUid, options.publicApiUrl);
   const expiresAt = new Date(Date.now() + config.sessionTtlMinutes * 60 * 1000);
   const livenessChallenge = generateLivenessChallenge();
 

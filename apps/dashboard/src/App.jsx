@@ -753,11 +753,14 @@ function Settings() {
         <NumField label="Face match: pass at or above" value={draft.facePass}
           onChange={(v) => setDraft({ ...draft, facePass: v })} hint={`max ${data.thresholds.bounds.faceMatch.passMax}`} />
         <NumField label="Max failed attempts before flag" value={draft.maxFailedAttempts} step={1}
-          onChange={(v) => setDraft({ ...draft, maxFailedAttempts: v })} />
+          onChange={(v) => setDraft({ ...draft, maxFailedAttempts: v })}
+          hint={`${data.thresholds.bounds.risk.maxFailedAttempts.min}–${data.thresholds.bounds.risk.maxFailedAttempts.max}`} />
         <NumField label="Max identities per device (7 days)" value={draft.maxIdentitiesPerDevice} step={1}
-          onChange={(v) => setDraft({ ...draft, maxIdentitiesPerDevice: v })} />
+          onChange={(v) => setDraft({ ...draft, maxIdentitiesPerDevice: v })}
+          hint={`${data.thresholds.bounds.risk.maxIdentitiesPerDevice.min}–${data.thresholds.bounds.risk.maxIdentitiesPerDevice.max}`} />
         <NumField label="Max sessions per IP per hour" value={draft.maxSessionsPerIpPerHour} step={1}
-          onChange={(v) => setDraft({ ...draft, maxSessionsPerIpPerHour: v })} />
+          onChange={(v) => setDraft({ ...draft, maxSessionsPerIpPerHour: v })}
+          hint={`${data.thresholds.bounds.risk.maxSessionsPerIpPerHour.min}–${data.thresholds.bounds.risk.maxSessionsPerIpPerHour.max}`} />
         <button onClick={saveThresholds}
           style={{ marginTop: 8, padding: "8px 16px", background: PRIMARY, color: "#fff", border: 0, borderRadius: 6, cursor: "pointer" }}>
           Save thresholds

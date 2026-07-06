@@ -133,10 +133,17 @@ function verifyLivenessChallenge(challenge, frames = [], thresholds = {}, opts =
       continue;
     }
 
-    // Spoof floor — only when the provider gave a numeric score at all.
+    // Spoof floor — only when the provider gave a numeric score at all, and
+    // ONLY when the selfie did not strongly pass the strict liveness gate.
+    // Rationale: mid-action frames (tilted/turned heads, backlighting) score
+    // low on frontal-biased anti-spoof models even for live users, while a
+    // replay attack cannot produce a high SELFIE score — so a strong selfie
+    // makes low action-frame scores attributable to pose/lighting, not spoofing.
+    const passAt = thresholds?.liveness?.pass ?? 0.85;
+    const selfieStrong = typeof opts.selfieScore === "number" && opts.selfieScore >= passAt;
     const scores = faced.map((c) => c.liveness.score).filter((s) => typeof s === "number");
     const maxScore = scores.length ? Math.max(...scores) : null;
-    if (maxScore !== null && maxScore < CHALLENGE_SCORE_FLOOR) {
+    if (maxScore !== null && maxScore < CHALLENGE_SCORE_FLOOR && !selfieStrong) {
       reasonCodes.push("LIVENESS_CHALLENGE_FAILED");
       perAction[action] = { present: true, live: false, poseOk: false, score: maxScore };
       continue;

@@ -56,8 +56,18 @@ async function runVerification(payload, { db, provider, evidenceKey }) {
   const faceMatch = idBuf ? await provider.compareFaces(selfieBuf, idBuf) : null;
   const doc = idBuf ? await provider.extractDocument(idBuf) : null;
 
+  // Document validation: the "ID front" must actually be a DOCUMENT. A selfie
+  // submitted as the ID passes face-compare trivially (it matches itself), so
+  // the client capture gate can never be the only defense. Passive liveness on
+  // the ID image is the discriminator: a live face shown to the camera scores
+  // "Real"; a genuine card's printed portrait scores "Spoof" (it IS a printed
+  // photo) or "No face". Only "Real" flags — Spoof/No face are expected here.
+  const docLiveness = idBuf ? await provider.checkLiveness(idBuf) : null;
+
   // --- Decision ---
   const thresholds = resolveThresholds(tenant?.settings || {});
+  const liveFaceAsDocument = !!docLiveness && docLiveness.verdict === "Real"
+    && (typeof docLiveness.score === "number" ? docLiveness.score : 0) >= thresholds.liveness.reject;
 
   // Active liveness challenge: score each captured challenge frame server-side
   // and verify the unpredictable, server-issued action sequence. Client scores
@@ -76,7 +86,11 @@ async function runVerification(payload, { db, provider, evidenceKey }) {
     // pose output against real sessions (see rawResult perAction maxAbsYaw/Pitch).
     const challengeOpts = {
       enforcePose: tenant?.settings?.challenge?.enforcePose === true,
-      strictDirection: tenant?.settings?.challenge?.strictDirection === true
+      strictDirection: tenant?.settings?.challenge?.strictDirection === true,
+      // strong selfie liveness disarms the mid-action spoof floor (a replay
+      // can't produce a high selfie score; low action-frame scores then mean
+      // pose/lighting, not spoofing)
+      selfieScore: liveness.score
     };
     challenge = verifyLivenessChallenge(session.livenessChallenge, frames, thresholds, challengeOpts);
   }
@@ -87,7 +101,7 @@ async function runVerification(payload, { db, provider, evidenceKey }) {
     liveness: { score: liveness.score },
     ...(hasChallenge ? { livenessChallenge: { ok: challenge.ok, reasonCodes: challenge.reasonCodes } } : {}),
     ...(faceMatch ? { idFace: { found: faceMatch.idFaceFound }, faceMatch: { score: faceMatch.score } } : {}),
-    ...(doc ? { document: { ocrConfidence: doc.ocrConfidence, expired: doc.expired === true } } : {}),
+    ...(doc ? { document: { ocrConfidence: doc.ocrConfidence, expired: doc.expired === true, liveFaceAsDocument } } : {}),
     risk
   };
   const decision = decide(signals, thresholds);
@@ -102,6 +116,7 @@ async function runVerification(payload, { db, provider, evidenceKey }) {
       : decision.reasonCodes.includes("FACE_MATCH_BORDERLINE") ? "review" : "matched",
     documentStatus: !doc ? null
       : decision.reasonCodes.includes("DOCUMENT_OCR_FAILED") || decision.reasonCodes.includes("DOCUMENT_EXPIRED")
+        || decision.reasonCodes.includes("DOCUMENT_IS_LIVE_FACE")
         ? "review" : "valid",
     ocrConfidence: doc?.ocrConfidence ?? null,
     extractedData: doc?.extractedData ?? null,
@@ -112,8 +127,13 @@ async function runVerification(payload, { db, provider, evidenceKey }) {
       livenessChallenge: hasChallenge
         ? { ok: challenge.ok, aggregateScore: challenge.aggregateScore, reasonCodes: challenge.reasonCodes, perAction: challenge.perAction, actions: session.livenessChallenge.actions }
         : null,
-      faceMatch: faceMatch ? { score: faceMatch.score, idFaceFound: faceMatch.idFaceFound } : null,
-      document: doc ? { available: doc.available, expired: doc.expired } : null,
+      faceMatch: faceMatch ? { score: faceMatch.score, idFaceFound: faceMatch.idFaceFound, providerMatch: faceMatch.providerMatch ?? null } : null,
+      document: doc ? {
+        available: doc.available,
+        expired: doc.expired,
+        liveness: docLiveness ? { verdict: docLiveness.verdict ?? null, score: docLiveness.score, faceCount: docLiveness.faceCount } : null,
+        liveFaceAsDocument
+      } : null,
       riskSignals: {
         repeatedFailedAttempts: risk.repeatedFailedAttempts,
         deviceSharedAcrossIdentities: risk.deviceSharedAcrossIdentities,

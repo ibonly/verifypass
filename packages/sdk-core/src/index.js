@@ -33,6 +33,13 @@ exports.bandMotion = actionSignals.bandMotion;
 exports.createActionDetector = actionSignals.createActionDetector;
 exports.ACTION_GEO = actionSignals.ACTION_GEO;
 
+const documentGate = require("./documentGate");
+exports.createDocumentGate = documentGate.createDocumentGate;
+exports.assessDocumentShape = documentGate.assessDocumentShape;
+exports.isDominantFace = documentGate.isDominantFace;
+exports.DOCUMENT_GATE_DEFAULTS = documentGate.DOCUMENT_GATE_DEFAULTS;
+exports.DOCUMENT_SHAPE_DEFAULTS = documentGate.DOCUMENT_SHAPE_DEFAULTS;
+
 const stabilizer = require("./stabilizer");
 exports.createFramingStabilizer = stabilizer.createFramingStabilizer;
 exports.detectActionTrigger = stabilizer.detectActionTrigger;

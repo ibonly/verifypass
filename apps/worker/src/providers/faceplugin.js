@@ -137,6 +137,10 @@ function createFacepluginProvider({
       }
       return {
         score: typeof state.liveness_score === "number" ? state.liveness_score : null,
+        // The container's verbatim verdict ("Real"|"Spoof"|"No face"|...).
+        // Used by the pipeline's document validation: a "Real" verdict on the
+        // ID-front image means a live face was shown, not a card.
+        verdict: state.result || null,
         faceCount,
         pose,
         occluded: state.is_occluded === true,
@@ -172,7 +176,15 @@ function createFacepluginProvider({
       // the decision engine uses for NO_FACE_ON_DOCUMENT (review, not reject).
       if (/image2/i.test(message)) idFaceFound = false;
 
-      return { score, idFaceFound, raw: json };
+      // The container's OWN verdict (against the threshold we sent). Recorded
+      // for calibration: if the model's similarity scale differs from our
+      // faceMatch thresholds, providerMatch=true alongside a "low" score is
+      // the signal that the tenant thresholds need recalibrating — not the user.
+      const providerMatch = status === "Same Person" ? true
+        : status === "Different Person" ? false
+          : null;
+
+      return { score, idFaceFound, providerMatch, raw: json };
     },
 
     /**

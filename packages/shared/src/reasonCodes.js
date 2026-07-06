@@ -9,6 +9,7 @@ const REASON_CODES = Object.freeze({
   DOCUMENT_IMAGE_LOW_QUALITY: "DOCUMENT_IMAGE_LOW_QUALITY",
   DOCUMENT_EXPIRED: "DOCUMENT_EXPIRED",
   DOCUMENT_OCR_FAILED: "DOCUMENT_OCR_FAILED",
+  DOCUMENT_IS_LIVE_FACE: "DOCUMENT_IS_LIVE_FACE",
   NO_FACE_ON_DOCUMENT: "NO_FACE_ON_DOCUMENT",
   NO_FACE_ON_SELFIE: "NO_FACE_ON_SELFIE",
   MULTIPLE_FACES_DETECTED: "MULTIPLE_FACES_DETECTED",
@@ -39,11 +40,13 @@ const THRESHOLD_BOUNDS = Object.freeze({
   liveness: { rejectMin: 0.5, passMax: 0.99 },
   faceMatch: { rejectMin: 0.5, passMax: 0.99 },
   risk: Object.freeze({
-    maxFailedAttempts: { min: 1, max: 20 },
+    // caps sized to accommodate sandbox/testing tenants (one device running
+    // hundreds of test identities is normal in integration testing)
+    maxFailedAttempts: { min: 1, max: 100 },
     failedAttemptsWindowHours: { min: 1, max: 168 },
-    maxIdentitiesPerDevice: { min: 1, max: 50 },
+    maxIdentitiesPerDevice: { min: 1, max: 500 },
     deviceWindowDays: { min: 1, max: 90 },
-    maxSessionsPerIpPerHour: { min: 5, max: 1000 }
+    maxSessionsPerIpPerHour: { min: 5, max: 5000 }
   })
 });
 

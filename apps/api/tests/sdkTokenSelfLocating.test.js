@@ -42,6 +42,22 @@ test("issued tokens are v1 and embed this deployment's API origin", async (t) =>
   assert.equal(verifySdkToken(created.sessionId, created.sdkToken, session.sdkTokenHash), true);
 });
 
+test("issued tokens can embed a forwarded development API origin", async (t) => {
+  const db = createMockDb();
+  setDb(db);
+  t.after(() => setDb(null));
+
+  const tenant = await db.tenant.create({ data: { tenantUid: "tnt_forward", companyName: "T", status: "active" } });
+  const publicApiUrl = "https://demo-3000.app.github.dev";
+  const created = await createSession(scopeFor(tenant), {}, false, { publicApiUrl });
+
+  const payload = decodePayload(created.sdkToken);
+  assert.equal(payload.u, publicApiUrl);
+
+  const session = await scopeFor(tenant).sessions.findByUid(created.sessionId);
+  assert.equal(verifySdkToken(created.sessionId, created.sdkToken, session.sdkTokenHash), true);
+});
+
 test("tampering with the embedded origin invalidates the token", () => {
   const { token, tokenHash } = signSdkToken("vps_TAMPER");
   const payload = decodePayload(token);
