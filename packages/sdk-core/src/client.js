@@ -10,6 +10,32 @@ class VerifyPassApiError extends Error {
   }
 }
 
+function decodeBase64Url(s) {
+  const b64 = s.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (s.length % 4)) % 4);
+  if (typeof atob === "function") {
+    return decodeURIComponent(Array.from(atob(b64), (c) => "%" + c.charCodeAt(0).toString(16).padStart(2, "0")).join(""));
+  }
+  return Buffer.from(b64, "base64").toString("utf8");
+}
+
+/**
+ * v1 SDK tokens are self-locating: they embed the API origin of the
+ * environment that issued them (sandbox / production / self-hosted), so the
+ * consumer never configures a baseUrl. Legacy `sdk_<random>` tokens return
+ * baseUrl null and rely on an explicit option.
+ */
+function parseSdkToken(token) {
+  const m = /^sdk_v1_([A-Za-z0-9_-]+)$/.exec(String(token || ""));
+  if (!m) return { baseUrl: null };
+  try {
+    const json = JSON.parse(decodeBase64Url(m[1]));
+    const u = typeof json.u === "string" && /^https?:\/\//.test(json.u) ? json.u.replace(/\/$/, "") : null;
+    return { baseUrl: u };
+  } catch (_) {
+    return { baseUrl: null };
+  }
+}
+
 /**
  * API client for SDK-facing endpoints. All requests use the tenant PUBLIC key;
  * the per-session sdkToken authorizes writes to one session only.
@@ -17,18 +43,24 @@ class VerifyPassApiError extends Error {
 class VerifyPassClient {
   /**
    * @param {object} opts
-   * @param {string} opts.baseUrl e.g. https://api.verifypass.com
-   * @param {string} opts.publicKey vp_pub_...
    * @param {string} opts.sessionId vps_...
-   * @param {string} opts.sdkToken sdk_... (from session creation)
+   * @param {string} opts.sdkToken sdk_v1_... (from session creation; embeds
+   *   the API origin, so no baseUrl is needed)
+   * @param {string} [opts.publicKey] vp_pub_... (embedded SDK mode)
+   * @param {string} [opts.baseUrl] explicit override — dev proxies / legacy
+   *   `sdk_<random>` tokens only
    * @param {Function} [opts.fetchImpl] injected for tests / non-browser envs
    */
   constructor({ baseUrl, publicKey, sessionId, sdkToken, fetchImpl }) {
     // publicKey is optional: the hosted page authenticates with sdkToken only.
-    if (!baseUrl || !sessionId || !sdkToken) {
-      throw new Error("VerifyPassClient requires baseUrl, sessionId, sdkToken");
+    if (!sessionId || !sdkToken) {
+      throw new Error("VerifyPassClient requires sessionId and sdkToken");
     }
-    this.baseUrl = baseUrl.replace(/\/$/, "");
+    const resolved = baseUrl || parseSdkToken(sdkToken).baseUrl;
+    if (!resolved) {
+      throw new Error("VerifyPassClient: token does not embed an API origin — pass baseUrl explicitly");
+    }
+    this.baseUrl = resolved.replace(/\/$/, "");
     this.publicKey = publicKey;
     this.sessionId = sessionId;
     this.sdkToken = sdkToken;
@@ -117,4 +149,4 @@ class VerifyPassClient {
   }
 }
 
-module.exports = { VerifyPassClient, VerifyPassApiError };
+module.exports = { VerifyPassClient, VerifyPassApiError, parseSdkToken };

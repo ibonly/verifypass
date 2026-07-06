@@ -2,7 +2,10 @@ import { createContext, useContext, useMemo } from "react";
 
 const VerifyPassContext = createContext(null);
 
-export function VerifyPassProvider({ publicKey, baseUrl = "https://api.verifypass.com", faceModelUrl = null, children }) {
+// baseUrl is optional: v1 SDK tokens embed their environment's API origin, so
+// the widget locates the API from the token alone. Pass baseUrl only for dev
+// proxies or legacy tokens.
+export function VerifyPassProvider({ publicKey = null, baseUrl = null, faceModelUrl = null, children }) {
   const value = useMemo(() => ({ publicKey, baseUrl, faceModelUrl }), [publicKey, baseUrl, faceModelUrl]);
   return <VerifyPassContext.Provider value={value}>{children}</VerifyPassContext.Provider>;
 }

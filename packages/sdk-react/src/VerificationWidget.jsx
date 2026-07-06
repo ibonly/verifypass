@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   VerifyPassClient, createFlow, assessFrame,
   startCamera, stopCamera, captureFrame,
-  grabAnalysisFrame, grabSquareFrame, frameMotion, toGrayscale, meanBrightness, laplacianVariance
+  grabAnalysisFrame, grabSquareFrame, frameMotion, toGrayscale, meanBrightness, laplacianVariance,
+  createFramingStabilizer, createActionDetector, bandMotion
 } from "@verifypass/sdk-core";
 import { useVerifyPass } from "./VerifyPassProvider";
 import { createFaceDetector } from "./faceDetector";
@@ -53,6 +54,25 @@ const ISSUE_COPY = {
   TOO_DARK: "Too dark — move somewhere brighter.",
   TOO_BRIGHT: "Too bright — reduce direct light or glare."
 };
+
+// Human-readable labels shown on the result screen for each rejection reason code.
+const RESULT_REASON_LABELS = {
+  LIVENESS_FAILED: "Liveness check failed",
+  LIVENESS_BORDERLINE: "Liveness score was borderline",
+  LIVENESS_CHALLENGE_FAILED: "Liveness challenge actions not detected",
+  LIVENESS_CHALLENGE_INCOMPLETE: "Liveness challenge was not completed",
+  FACE_MATCH_FAILED: "Face doesn't match the ID document",
+  FACE_MATCH_BORDERLINE: "Face similarity score was borderline",
+  NO_FACE_ON_SELFIE: "No face detected in your selfie",
+  NO_FACE_ON_DOCUMENT: "No face detected on your ID document",
+  MULTIPLE_FACES_DETECTED: "Multiple faces detected in the image",
+  DOCUMENT_OCR_FAILED: "Could not read the text on your ID",
+  DOCUMENT_EXPIRED: "Your ID document appears to be expired",
+  DEVICE_SHARED_ACROSS_IDENTITIES: "This device has been flagged for suspicious activity",
+  TOO_MANY_FAILED_ATTEMPTS: "Too many failed attempts — please try again later",
+  IP_RATE_LIMIT: "Too many requests from your network"
+};
+
 
 const DEFAULT_CONSENT_COPY = "I consent to VerifyPass capturing and processing my ID images, selfie, and biometric data for identity verification.";
 const FACE_FOCUS_MIN = 12;
@@ -123,6 +143,9 @@ export function VerificationWidget({
   const [actionIdx, setActionIdx] = useState(0);
   const [consentChecked, setConsentChecked] = useState(false);
   const [consented, setConsented] = useState(false);
+  // Liveness capture phases: "align" (frontal lock) → "perform" (burst capture
+  // while the user does the action). Set once per transition — never per frame.
+  const [livePhase, setLivePhase] = useState({ phase: "align", startedAt: 0, total: 0 });
 
   // init: create client, fetch the server-issued challenge, build the flow
   useEffect(() => {
@@ -193,7 +216,10 @@ export function VerificationWidget({
     }
   }, [flowState?.step]);
 
-  const capture = useCallback(async () => {
+  const capture = useCallback(async (opts = {}) => {
+    // Called with an Event from the manual button, or {livenessAdvance} from
+    // the burst loop — Event has no livenessAdvance, so manual defaults to true.
+    const livenessAdvance = opts.livenessAdvance !== false;
     if (capturingRef.current) return;
     capturingRef.current = true;
     const flow = flowRef.current;
@@ -203,7 +229,10 @@ export function VerificationWidget({
     setFeedback(null);
     try {
       const { imageData, base64 } = captureFrame(videoRef.current);
-      const quality = assessFrame(imageData);
+      // During liveness actions the head is MOVING — motion blur is expected
+      // and desired evidence. Gating those frames on sharpness silently dropped
+      // them (→ LIVENESS_CHALLENGE_INCOMPLETE). Server verifies authoritatively.
+      const quality = assessFrame(imageData, step === "liveness" ? { minSharpness: 0 } : undefined);
       if (!quality.ok) {
         setFeedback(quality.issues.map((i) => ISSUE_COPY[i] || i).join(" "));
         return;
@@ -214,14 +243,19 @@ export function VerificationWidget({
       } else if (step === "liveness") {
         const action = actionsRef.current[actionIdxRef.current];
         await client.uploadLivenessFrame(action, base64);
-        const next = actionIdxRef.current + 1;
-        if (next >= actionsRef.current.length) {
-          actionIdxRef.current = 0;
-          setActionIdx(0);
-          flow.advance(); // → face
-        } else {
-          actionIdxRef.current = next;
-          setActionIdx(next);
+        // Burst mode uploads several frames per action; only the last one
+        // advances. More frames per action = far better odds the server finds
+        // one live, single-face, pose-matching frame.
+        if (livenessAdvance) {
+          const next = actionIdxRef.current + 1;
+          if (next >= actionsRef.current.length) {
+            actionIdxRef.current = 0;
+            setActionIdx(0);
+            flow.advance(); // → face
+          } else {
+            actionIdxRef.current = next;
+            setActionIdx(next);
+          }
         }
       } else if (step === "face") {
         await client.uploadFace(base64);
@@ -288,6 +322,7 @@ export function VerificationWidget({
 
     setGreen(false);
     framingRef.current = null;
+    setLivePhase({ phase: "align", startedAt: 0, total: 0 });
     setFramingGuide(step === "face" || step === "liveness"
       ? detectorStatus === "failed" ? "model_error" : "model_loading"
       : "no_face");
@@ -298,16 +333,46 @@ export function VerificationWidget({
     let greenSince = 0;
     let lastDetect = 0;
     let detecting = false;
-    let lastGuide = null;
+    let publishedGuide = null;
     const history = [];
+    const stab = createFramingStabilizer(); // temporal smoothing: no flicker, no hold-timer resets on jitter
+    let stable = null;
     const HOLD_MS = 550;
-    const LIVENESS_HOLD_MS = 1600;
     const SETTLE_DELTA = 3;
     const DETECT_MS = 140;
+    // Liveness three-phase capture:
+    //   align     — lock a frontal face (baseline box recorded)
+    //   await     — instruction shown; WAIT until the face-box dynamics (or a
+    //               motion spike, for blink/smile) show the action is actually
+    //               being performed. No timer-based capture: nothing uploads
+    //               until the user moves.
+    //   capturing — short burst (3 frames over ~700ms) at the action's peak.
+    const ALIGN_LOCK_MS = 500;
+    // Burst timing: FIRST frame fires AT the trigger, while the turning face
+    // is still detectable by the server's frontal-biased detector — every
+    // action needs at least one face-bearing frame or it's INCOMPLETE. Later
+    // frames catch the pose peak for the (calibration/pose) evidence.
+    const BURST_AT = [0, 450, 900]; // offsets from the trigger moment
+    const BURST_TOTAL = 1100;       // progress bar duration
+    const AWAIT_HINT_MS = 5000;     // no movement detected → coach the user
+    const AWAIT_FACE_LOST_MS = 4000; // face gone this long → back to align
+    const currentAction = actionsRef.current[actionIdxRef.current] || null;
+    let phase = "align";
+    let baselineBox = null;
+    let awaitStart = 0;
+    let triggerAt = 0;
+    let shots = 0;
+    let hintShown = false;
+    let lastPresentAt = performance.now();
+    // Action-SPECIFIC detector (geometry signature for turns/tilts, eye/mouth
+    // band motion for blink/smile) — created when align completes.
+    let actionDet = null;
+    let actionState = { ok: false, triggered: false, holding: false };
+    let prevModelGray = null;
 
     const tick = () => {
       const video = videoRef.current;
-      if (video && !capturingRef.current) {
+      if (video) {
         const now = performance.now();
         const faceStep = step === "face" || step === "liveness";
         const requiresFaceModel = !!faceModelUrl && faceStep;
@@ -330,15 +395,15 @@ export function VerificationWidget({
         }
 
         // face model framing (throttled) for face/liveness
-        if (faceModelUrl && detectorStatus === "failed" && lastGuide !== "model_error") {
-          lastGuide = "model_error";
+        if (faceModelUrl && detectorStatus === "failed" && publishedGuide !== "model_error") {
+          publishedGuide = "model_error";
           setFramingGuide("model_error");
-        } else if (requiresFaceModel && !faceGate && lastGuide !== "model_loading") {
-          lastGuide = "model_loading";
+        } else if (requiresFaceModel && !faceGate && publishedGuide !== "model_loading") {
+          publishedGuide = "model_loading";
           setFramingGuide("model_loading");
         }
 
-        if (faceGate && !detecting && now - lastDetect > DETECT_MS) {
+        if (faceGate && !detecting && now - lastDetect > DETECT_MS && !capturingRef.current) {
           lastDetect = now;
           detecting = true;
           // Analyse the SAME center-square the circular preview shows so the
@@ -355,27 +420,105 @@ export function VerificationWidget({
                 next = { ...next, focus, inFrame: focus >= FACE_FOCUS_MIN, guide: focus >= FACE_FOCUS_MIN ? "ok" : "focus" };
               }
               framingRef.current = next;
-              if (next.guide !== lastGuide) { lastGuide = next.guide; setFramingGuide(next.guide); }
+              // Stabilizer absorbs per-detection jitter; publish its guide only
+              // on real change (dwell-timed inside), so the pill never flickers.
+              stable = stab.update(next, performance.now());
+              if (stable.guide && stable.guide !== publishedGuide) {
+                publishedGuide = stable.guide;
+                setFramingGuide(stable.guide);
+              }
+              // Feed the per-action detector: box geometry vs baseline, plus
+              // eye/mouth band motion between consecutive detection frames
+              // (expressions don't move the box). Bands fall back to the
+              // baseline box while the head is mid-expression.
+              if (actionDet) {
+                const gray = toGrayscale(modelFrame);
+                const bandBox = next.box || actionDet.baseline;
+                const bands = prevModelGray && bandBox
+                  ? bandMotion(prevModelGray, gray, 320, bandBox)
+                  : { eyes: 0, mouth: 0 };
+                prevModelGray = gray;
+                actionState = actionDet.update({ box: next.box, eyes: bands.eyes, mouth: bands.mouth });
+              } else {
+                prevModelGray = toGrayscale(modelFrame);
+              }
             })
             .catch(() => {
               if (cancelled) return;
               framingRef.current = { present: false, inFrame: false, guide: "no_face" };
-              if (lastGuide !== "no_face") { lastGuide = "no_face"; setFramingGuide("no_face"); }
+              stable = stab.update(framingRef.current, performance.now());
             })
             .finally(() => { detecting = false; });
         }
 
-        const inPosition = requiresFaceModel
-          ? faceGate && !!(framingRef.current && framingRef.current.inFrame) && lightOk
-          : settled && lightOk;
-        setGreen(inPosition);
+        const lockedOk = faceGate && !!(stable && stable.locked) && lightOk;
 
-        if (inPosition) {
-          const holdMs = step === "liveness" ? LIVENESS_HOLD_MS : HOLD_MS;
-          if (!greenSince) greenSince = now;
-          else if (now - greenSince > holdMs) { greenSince = 0; captureRef.current(); }
-        } else {
-          greenSince = 0;
+        if (step === "liveness" && faceGate) {
+          const rawBox = framingRef.current && framingRef.current.box;
+          const facePresent = !!(stable && stable.present);
+          if (facePresent) lastPresentAt = now;
+
+          if (phase === "align") {
+            setGreen(lockedOk);
+            if (lockedOk && stable.lockedSince && now - stable.lockedSince >= ALIGN_LOCK_MS) {
+              phase = "await";
+              baselineBox = (stable && stable.box) || rawBox || null;
+              actionDet = createActionDetector(currentAction, baselineBox);
+              actionState = { ok: false, triggered: false, holding: false };
+              awaitStart = now;
+              hintShown = false;
+              setLivePhase({ phase: "await", startedAt: now, total: 0, hint: false });
+            }
+          } else if (phase === "await") {
+            // Instruction shown — capture NOTHING until THIS action's own
+            // signature is seen (2 consecutive detections; jitter can't fire it).
+            setGreen(true);
+            if (facePresent && actionState.triggered) {
+              phase = "capturing";
+              triggerAt = now;
+              shots = 0;
+              setLivePhase({ phase: "capturing", startedAt: now, total: BURST_TOTAL });
+            } else if (!hintShown && now - awaitStart > AWAIT_HINT_MS) {
+              hintShown = true; // still waiting — coach, don't capture
+              setLivePhase({ phase: "await", startedAt: awaitStart, total: 0, hint: true });
+            } else if (now - lastPresentAt > AWAIT_FACE_LOST_MS) {
+              phase = "align"; // user walked off — re-establish the baseline
+              actionDet = null;
+              setLivePhase({ phase: "align", startedAt: 0, total: 0 });
+            }
+          } else {
+            // capturing: burst while the pose is HELD. Turns/tilts require the
+            // geometric signature at each shot (frames must show the action);
+            // blink/smile are momentary, so their shots follow the schedule.
+            setGreen(true);
+            const holdRequired = currentAction !== "blink" && currentAction !== "smile";
+            const canShoot = !holdRequired || actionState.holding;
+            if (shots < BURST_AT.length && now - triggerAt >= BURST_AT[shots] && !capturingRef.current && facePresent && canShoot) {
+              const isLast = shots === BURST_AT.length - 1;
+              shots++;
+              captureRef.current({ livenessAdvance: isLast });
+            } else if (!capturingRef.current && now - triggerAt > BURST_TOTAL + 2500) {
+              // Burst stalled (pose released mid-burst, or an upload was
+              // rejected by the quality gate) — return to await with a FRESH
+              // detector so the user redoes the movement; a stale latched
+              // trigger would re-fire instantly.
+              phase = "await";
+              actionDet = createActionDetector(currentAction, baselineBox);
+              actionState = { ok: false, triggered: false, holding: false };
+              awaitStart = now;
+              hintShown = true;
+              setLivePhase({ phase: "await", startedAt: now, total: 0, hint: true });
+            }
+          }
+        } else if (!capturingRef.current) {
+          const inPosition = requiresFaceModel ? lockedOk : settled && lightOk;
+          setGreen(inPosition);
+          if (inPosition) {
+            if (!greenSince) greenSince = now;
+            else if (now - greenSince > HOLD_MS) { greenSince = 0; captureRef.current(); }
+          } else {
+            greenSince = 0;
+          }
         }
 
         // Overlay: draw the detected face box (mapped to the display square) so
@@ -393,14 +536,14 @@ export function VerificationWidget({
             ctx.fillStyle = "rgba(255,255,255,0.6)";
             ctx.beginPath(); ctx.arc(cw / 2, ch / 2, 2, 0, 2 * Math.PI); ctx.fill();
           }
-          const fr = framingRef.current;
-          if (fr && fr.box) {
-            const b = fr.box;
+          // draw the SMOOTHED box (EMA) so the overlay glides instead of twitching
+          const b = (stable && stable.box) || (framingRef.current && framingRef.current.box);
+          if (b) {
             const x = (b.x1 / 320) * cw;
             const y = (b.y1 / 240) * ch;
             const w = ((b.x2 - b.x1) / 320) * cw;
             const h = ((b.y2 - b.y1) / 240) * ch;
-            ctx.strokeStyle = fr.inFrame ? "#10B981" : "#F59E0B";
+            ctx.strokeStyle = stable && stable.locked ? "#10B981" : "#F59E0B";
             ctx.lineWidth = 2;
             ctx.strokeRect(x, y, w, h);
             if (DEBUG) {
@@ -436,7 +579,12 @@ export function VerificationWidget({
     : isDoc ? "Fit your ID inside the frame"
     : "Center your face in the circle";
   const faceStep = step === "face" || step === "liveness";
-  const showGuide = faceStep && !green;
+  const awaiting = isLiveness && livePhase.phase === "await";
+  const capturingBurst = isLiveness && livePhase.phase === "capturing";
+  const performing = awaiting || capturingBurst;
+  // While awaiting/capturing the pill shows ONLY the action — framing guides
+  // are irrelevant mid-movement, and swapping them caused flicker.
+  const showGuide = faceStep && !green && !performing;
   const pillDisplay = showGuide ? (GUIDE_COPY[framingGuide] || "Position your face") : pillText;
   const ringColor = green ? "#059669" : "#E5E7EB";
 
@@ -524,10 +672,26 @@ export function VerificationWidget({
             </div>
           </div>
 
+          {/* burst progress: CSS-animated so it never re-renders per frame */}
+          {capturingBurst && (
+            <div style={{ width: frameW, height: 6, background: "#E5E7EB", borderRadius: 3, margin: "12px auto 0", overflow: "hidden" }}>
+              <div
+                key={livePhase.startedAt}
+                style={{
+                  height: "100%", background: "#059669", borderRadius: 3, transformOrigin: "left",
+                  animation: `vp-progress ${livePhase.total}ms linear forwards`
+                }}
+              />
+              <style>{"@keyframes vp-progress { from { transform: scaleX(0) } to { transform: scaleX(1) } }"}</style>
+            </div>
+          )}
+
           <p style={{ textAlign: "center", fontSize: 14, margin: "12px 0 0", minHeight: 18, color: green ? "#059669" : "#6B7280" }}>
             {!cameraReady ? "Starting camera…"
+              : capturingBurst ? "Got it — hold on…"
+              : awaiting ? (livePhase.hint ? "We haven't seen it yet — make the movement bigger and slower" : "Do it now — we'll capture automatically")
               : busy ? "Uploading…"
-              : green && isLiveness ? "Keep performing the action…"
+              : isLiveness ? (green ? "Get ready…" : "Center your face to begin")
               : green ? "Hold still…"
               : faceStep ? "Align your face in the circle"
               : "Hold steady"}
@@ -576,11 +740,24 @@ export function VerificationWidget({
           <p style={{ fontSize: 40, margin: 0 }}>
             {result.status === "approved" ? "✅" : result.status === "manual_review" ? "⏳" : "❌"}
           </p>
-          <p style={{ fontSize: 16 }}>
+          <p style={{ fontSize: 16, margin: "8px 0" }}>
             {result.status === "approved" && "Verification approved."}
             {result.status === "manual_review" && "Your verification is under review. You'll be notified shortly."}
             {["rejected", "failed", "expired"].includes(result.status) && "Verification was not successful."}
           </p>
+          {["rejected", "failed"].includes(result.status) && result.decision?.reasonCodes?.length > 0 && (
+            <div style={{ textAlign: "left", maxWidth: 320, margin: "12px auto 0", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "12px 16px" }}>
+              <p style={{ margin: "0 0 8px", fontSize: 13, fontWeight: 600, color: "#991B1B" }}>Reasons:</p>
+              {result.decision.reasonCodes.map((code) => (
+                <div key={code} style={{ display: "flex", alignItems: "flex-start", gap: 6, marginBottom: 4, fontSize: 13 }}>
+                  <span style={{ color: "#DC2626", marginTop: 1 }}>•</span>
+                  <span style={{ color: "#374151" }}>
+                    {RESULT_REASON_LABELS[code] || code}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>

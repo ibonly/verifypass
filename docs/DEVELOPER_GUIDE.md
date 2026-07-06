@@ -43,7 +43,9 @@ to `hostedUrl` (the token rides in the URL fragment and never reaches server log
 ```jsx
 import { VerifyPassProvider, VerificationWidget } from "@verifypass/react";
 
-<VerifyPassProvider publicKey="vp_pub_test_xxx" baseUrl="https://api.verifypass.com">
+<!-- No API URL needed: the sdkToken embeds the environment (sandbox/production)
+     of the key that created the session. -->
+<VerifyPassProvider publicKey="vp_pub_test_xxx">
   <VerificationWidget
     sessionId={sessionId}
     sdkToken={sdkToken}

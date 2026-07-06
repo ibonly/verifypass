@@ -88,7 +88,16 @@ async function rotateKey(tenantId, keyId) {
   return issued;
 }
 
+/** Delete a key permanently (only revoked keys may be deleted). */
+async function deleteKey(tenantId, keyId) {
+  const db = getDb();
+  const key = await db.apiKey.findFirst({ where: { id: keyId, tenantId } });
+  if (!key) throw new AppError("NOT_FOUND", "API key not found");
+  if (key.status === "active") throw new AppError("VALIDATION_ERROR", "Revoke the key before deleting it");
+  await db.apiKey.delete({ where: { id: keyId } });
+}
+
 module.exports = {
   generateKey, parseKey, hashKey, keyPrefix,
-  issueKey, resolveKey, revokeKey, rotateKey
+  issueKey, resolveKey, revokeKey, rotateKey, deleteKey
 };

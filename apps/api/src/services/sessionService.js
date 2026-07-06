@@ -37,8 +37,14 @@ function validateCreatePayload(body) {
 }
 
 function signSdkToken(sessionUid) {
+  // Self-locating v1 token: embeds this deployment's public API origin so the
+  // browser SDK derives its endpoint from the token alone — the environment
+  // (sandbox/production/self-hosted) travels with the credential, and the
+  // consumer never configures a baseUrl. The HMAC covers the FULL token
+  // string, so the embedded origin is tamper-evident.
   const raw = crypto.randomBytes(24).toString("base64url");
-  const token = `sdk_${raw}`;
+  const payload = Buffer.from(JSON.stringify({ u: config.apiPublicUrl, t: raw })).toString("base64url");
+  const token = `sdk_v1_${payload}`;
   const tokenHash = crypto.createHmac("sha256", config.sdkTokenSecret).update(`${sessionUid}.${token}`).digest("hex");
   return { token, tokenHash };
 }

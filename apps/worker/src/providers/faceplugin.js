@@ -44,6 +44,30 @@ function makeForm(files, fields = {}) {
   return form;
 }
 
+/**
+ * Count SIGNIFICANT faces only. RetinaFace occasionally emits a tiny spurious
+ * second box (pattern on clothing/background, or a duplicate the NMS missed),
+ * which made single-person frames fail the faceCount===1 gate — rejecting real
+ * users with MULTIPLE_FACES_DETECTED / LIVENESS_CHALLENGE_INCOMPLETE.
+ * A face counts only if its area is >= 25% of the largest face's area
+ * (50% of its linear size) — a real second person near the camera still
+ * counts; background objects/faces-on-shelves don't. (Raised from 15% after
+ * real sessions still produced spurious secondary detections; multi-face is
+ * also now a manual-review signal rather than a hard reject, so a reviewer
+ * backstops this heuristic.)
+ */
+function significantFaceCount(faces) {
+  if (!Array.isArray(faces) || faces.length === 0) return 0;
+  const areas = faces.map((f) => {
+    const w = Math.max(0, Number(f.x2) - Number(f.x1));
+    const h = Math.max(0, Number(f.y2) - Number(f.y1));
+    return w * h;
+  });
+  const max = Math.max(...areas);
+  if (!(max > 0)) return faces.length;
+  return areas.filter((a) => a >= max * 0.25).length;
+}
+
 function createFacepluginProvider({
   livenessUrl,
   faceUrl,
@@ -89,14 +113,32 @@ function createFacepluginProvider({
       const state = json.face_state || {};
       const result = state.result || "";
       const faceCount = Array.isArray(json.faces) && json.faces.length
-        ? json.faces.length
+        ? significantFaceCount(json.faces)
         : result === "No face" ? 0
           : result === "Multiple face" ? 2
             : result === "Real" || result === "Spoof" ? 1
               : 0;
+      // Pose of the PRIMARY (largest) face — the liveness container returns
+      // yaw/roll/pitch per face. Used by the challenge verifier to confirm the
+      // requested head movement actually happened (magnitude-based).
+      let pose = null;
+      if (Array.isArray(json.faces) && json.faces.length) {
+        const primary = json.faces.reduce((best, f) => {
+          const area = Math.max(0, Number(f.x2) - Number(f.x1)) * Math.max(0, Number(f.y2) - Number(f.y1));
+          return !best || area > best.area ? { f, area } : best;
+        }, null).f;
+        if (typeof primary.yaw === "number" || typeof primary.pitch === "number") {
+          pose = {
+            yaw: Number(primary.yaw) || 0,
+            pitch: Number(primary.pitch) || 0,
+            roll: Number(primary.roll) || 0
+          };
+        }
+      }
       return {
         score: typeof state.liveness_score === "number" ? state.liveness_score : null,
         faceCount,
+        pose,
         occluded: state.is_occluded === true,
         quality: state.quality || null,
         luminance: state.luminance || null,
@@ -155,4 +197,4 @@ function createFacepluginProvider({
   };
 }
 
-module.exports = { createFacepluginProvider, ProviderError };
+module.exports = { createFacepluginProvider, ProviderError, significantFaceCount };

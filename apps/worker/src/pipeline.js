@@ -71,7 +71,14 @@ async function runVerification(payload, { db, provider, evidenceKey }) {
       const lv = await provider.checkLiveness(buf);
       frames.push({ action: fr.label, liveness: { score: lv.score, faceCount: lv.faceCount }, pose: lv.pose || null });
     }
-    challenge = verifyLivenessChallenge(session.livenessChallenge, frames, thresholds);
+    // Pose enforcement + direction strictness are tenant-opt-in flags, meant
+    // to be enabled only after calibrating the deployed Faceplugin container's
+    // pose output against real sessions (see rawResult perAction maxAbsYaw/Pitch).
+    const challengeOpts = {
+      enforcePose: tenant?.settings?.challenge?.enforcePose === true,
+      strictDirection: tenant?.settings?.challenge?.strictDirection === true
+    };
+    challenge = verifyLivenessChallenge(session.livenessChallenge, frames, thresholds, challengeOpts);
   }
 
   const risk = await computeRiskSignals(db, session, thresholds);

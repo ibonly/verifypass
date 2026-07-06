@@ -33,7 +33,9 @@ function el(tag, style, text) {
 }
 
 function init(opts = {}) {
-  const { publicKey, sessionId, sdkToken, container, baseUrl = "https://api.verifypass.com", theme = {}, onComplete, onError } = opts;
+  // baseUrl optional: v1 sdkTokens embed the API origin of the environment
+  // that issued them (see VerifyPassClient/parseSdkToken).
+  const { publicKey, sessionId, sdkToken, container, baseUrl = null, theme = {}, onComplete, onError } = opts;
   const root = typeof container === "string" ? document.querySelector(container) : container;
   if (!root) throw new Error("VerifyPass.init: container not found");
   if (!publicKey || !sessionId || !sdkToken) throw new Error("VerifyPass.init: publicKey, sessionId, sdkToken are required");

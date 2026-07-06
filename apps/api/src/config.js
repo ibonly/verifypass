@@ -18,9 +18,23 @@ function requireEvidenceKey() {
   return value;
 }
 
+function requireApiPublicUrl() {
+  const value = process.env.API_PUBLIC_URL || `http://localhost:${process.env.PORT || 3000}`;
+  if (process.env.NODE_ENV === "production") {
+    if (!process.env.API_PUBLIC_URL || !/^https:\/\//.test(value)) {
+      throw new Error("API_PUBLIC_URL must be set to this deployment's https origin in production (it is embedded in SDK tokens)");
+    }
+  }
+  return value.replace(/\/$/, "");
+}
+
 module.exports = {
   env: process.env.NODE_ENV || "development",
   port: Number(process.env.PORT || 3000),
+  // Public origin of THIS API deployment — embedded in SDK tokens so browser
+  // SDKs are self-locating (consumers never configure a baseUrl). One value
+  // per environment; sandbox and production deployments each set their own.
+  apiPublicUrl: requireApiPublicUrl(),
   sessionTtlMinutes: Number(process.env.SESSION_TTL_MINUTES || 30),
   sdkTokenSecret: requireSecret("SDK_TOKEN_SECRET", "dev-only-secret"),
   authTokenSecret: requireSecret("AUTH_TOKEN_SECRET", "dev-only-auth-secret"),

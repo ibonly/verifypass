@@ -11,7 +11,7 @@ const { audit } = require("../services/auditLogger");
 const {
   validateThresholds, validateRetention, effectiveSettings, saveSettingsPatch
 } = require("../services/settingsService");
-const { issueKey, rotateKey, revokeKey } = require("../services/apiKeyService");
+const { issueKey, rotateKey, revokeKey, deleteKey } = require("../services/apiKeyService");
 
 const router = Router();
 const admins = requireUser("super_admin", "tenant_admin");
@@ -102,6 +102,18 @@ router.post("/api-keys/:id/revoke", async (req, res, next) => {
     await audit({
       tenantId: req.tenant.id, actorType: "tenant_user", actorId: `user:${req.user.id}`,
       action: "api_key.revoked", req, metadata: { keyId: req.params.id }
+    });
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// DELETE /v1/settings/api-keys/:id — permanently removes a revoked key
+router.delete("/api-keys/:id", async (req, res, next) => {
+  try {
+    await deleteKey(req.tenant.id, BigInt(req.params.id));
+    await audit({
+      tenantId: req.tenant.id, actorType: "tenant_user", actorId: `user:${req.user.id}`,
+      action: "api_key.deleted", req, metadata: { keyId: req.params.id }
     });
     res.json({ success: true });
   } catch (err) { next(err); }

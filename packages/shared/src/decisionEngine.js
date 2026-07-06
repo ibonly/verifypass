@@ -60,10 +60,13 @@ function decide(signals, thresholds = DEFAULT_THRESHOLDS) {
     if (!(livenessChallenge.reasonCodes || []).length) rejects.push(R.LIVENESS_CHALLENGE_FAILED);
   }
 
-  // Selfie face presence (hard gates)
+  // Selfie face presence. No face = hard reject. Multiple faces = MANUAL
+  // REVIEW (PRD §13.2 allows either): face detectors emit spurious secondary
+  // boxes on busy backgrounds, and a false positive must not hard-reject a
+  // real user — a reviewer sees the actual photo.
   if (selfie) {
     if (selfie.faceCount === 0) rejects.push(R.NO_FACE_ON_SELFIE);
-    else if (selfie.faceCount > 1) rejects.push(R.MULTIPLE_FACES_DETECTED);
+    else if (selfie.faceCount > 1) reviews.push(R.MULTIPLE_FACES_DETECTED);
   }
 
   // Liveness bands

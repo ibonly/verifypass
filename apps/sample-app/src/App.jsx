@@ -3,11 +3,12 @@ import { VerifyPassProvider, VerificationWidget } from "@verifypass/react";
 
 // Local in-house webcam test harness. It plays the role a fintech BACKEND
 // normally plays (creating a session with the secret key), then hands the
-// session to the browser widget which uses the DEVICE CAMERA for capture.
+// self-locating sdkToken to the browser widget for DEVICE CAMERA capture.
 //
 // SECURITY NOTE: a real integration NEVER puts the secret key in the browser —
 // the backend creates the session and passes only { sessionId, sdkToken } to
-// the client. This app takes the secret key at runtime purely for local testing.
+// the client. The sdkToken embeds the API origin, so the widget does not need a
+// baseUrl. This app takes the secret key at runtime purely for local testing.
 
 const API_BASE = typeof __VP_API_BASE__ !== "undefined" ? __VP_API_BASE__ : "http://localhost:3000";
 const PREFILL_SECRET = typeof __VP_SECRET_KEY__ !== "undefined" ? __VP_SECRET_KEY__ : "";
@@ -23,6 +24,8 @@ export default function App() {
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const [cameraState, setCameraState] = useState("pending"); // pending | granted | denied | unsupported
+  const tokenIsSelfLocating = Boolean(session?.sdkToken?.startsWith("sdk_v1_"));
+  const widgetBaseUrl = tokenIsSelfLocating ? null : API_BASE;
 
   // Request camera permission as soon as the page loads (not at capture time).
   // Once granted, the widget's camera starts later without a second prompt.
@@ -78,7 +81,7 @@ export default function App() {
     <div style={{ minHeight: "100vh", fontFamily: "system-ui, sans-serif", color: "#111827" }}>
       <header style={{ background: "#111827", color: "#fff", padding: "14px 20px" }}>
         <strong>VerifyPass</strong> · Sample Webcam Test App
-        <span style={{ float: "right", fontSize: 12, color: "#9CA3AF" }}>{API_BASE}</span>
+        <span style={{ float: "right", fontSize: 12, color: "#9CA3AF" }}>Session API: {API_BASE}</span>
       </header>
 
       <main style={{ maxWidth: 460, margin: "24px auto", padding: "0 16px" }}>
@@ -88,7 +91,7 @@ export default function App() {
             <p style={{ color: "#6B7280", fontSize: 14 }}>
               Paste a <b>secret key</b> from the dev stack output
               (<code>vp_sec_…</code>). This stands in for your backend creating a
-              session; the camera capture then runs in this browser.
+              session; the returned sdkToken then tells the widget which API to use.
             </p>
 
             <Warning>
@@ -133,8 +136,12 @@ export default function App() {
           <Card>
             <div style={{ fontSize: 12, color: "#6B7280", marginBottom: 8 }}>
               Session <code>{session.sessionId}</code>
+              <br />
+              {tokenIsSelfLocating
+                ? "Widget API is resolved from the self-locating sdkToken."
+                : "Legacy sdkToken detected; widget is using the local API fallback."}
             </div>
-            <VerifyPassProvider publicKey={null} baseUrl={API_BASE} faceModelUrl="/models/fr_detect.onnx">
+            <VerifyPassProvider publicKey={null} baseUrl={widgetBaseUrl} faceModelUrl="/models/fr_detect.onnx">
               <VerificationWidget
                 sessionId={session.sessionId}
                 sdkToken={session.sdkToken}

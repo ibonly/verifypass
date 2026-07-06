@@ -27,7 +27,7 @@ const GOLDEN = [
   ["face score borderline (0.7) → manual_review", { faceMatch: { score: 0.7 } }, "manual_review", ["FACE_MATCH_BORDERLINE"]],
   ["face score at pass (0.82) → approved", { faceMatch: { score: 0.82 } }, "approved", []],
   ["no face on selfie → rejected", { selfie: { faceCount: 0 } }, "rejected", ["NO_FACE_ON_SELFIE"]],
-  ["multiple faces → rejected", { selfie: { faceCount: 3 } }, "rejected", ["MULTIPLE_FACES_DETECTED"]],
+  ["multiple faces → manual_review (detector false positives must not hard-reject)", { selfie: { faceCount: 3 } }, "manual_review", ["MULTIPLE_FACES_DETECTED"]],
   ["no face on ID → manual_review", { idFace: { found: false } }, "manual_review", ["NO_FACE_ON_DOCUMENT"]],
   ["OCR failed, faces fine → manual_review", { document: { ocrConfidence: null, expired: false } }, "manual_review", ["DOCUMENT_OCR_FAILED"]],
   ["document expired → manual_review", { document: { ocrConfidence: 0.9, expired: true } }, "manual_review", ["DOCUMENT_EXPIRED"]],

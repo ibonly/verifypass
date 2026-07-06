@@ -14,7 +14,11 @@
 const crypto = require("crypto");
 
 // Actions the client SDK knows how to prompt + we can verify from pose/landmarks.
-const CHALLENGE_ACTIONS = Object.freeze(["blink", "turn_left", "turn_right", "look_up", "smile"]);
+// "blink" was removed from the pool: eye-band motion detection is too easily
+// confounded by lighting flicker/exposure changes, producing false triggers
+// and unreliable verification. (Verification code paths for blink remain for
+// any sessions issued before the change.)
+const CHALLENGE_ACTIONS = Object.freeze(["turn_left", "turn_right", "look_up", "smile"]);
 
 const DEFAULT_STEPS = 3;
 const DEFAULT_TTL_MS = 10 * 60 * 1000; // challenge must be completed within 10 min
@@ -48,22 +52,44 @@ function isChallengeFresh(challenge, { now = Date.now, ttlMs = DEFAULT_TTL_MS } 
   return now() - t <= ttlMs;
 }
 
-/** Does an observed pose satisfy the requested action? Only used when pose is present. */
-function poseMatchesAction(action, pose) {
-  if (!pose) return true; // no pose signal (passive provider) → don't gate on pose
+// Anti-spoof floor for MID-ACTION frames. Deliberately far below
+// liveness.reject: passive liveness models are frontal-biased, so a genuine
+// turned/tilted head legitimately scores low. The SELFIE carries the strict
+// passive-liveness gate; challenge frames only prove the action happened on
+// a face, and only a confidently-spoof score fails them.
+const CHALLENGE_SCORE_FLOOR = 0.3;
+
+/**
+ * Does an observed pose satisfy the requested action?
+ * Returns true/false when a verdict is possible, or null when this frame
+ * carries no signal for the action (e.g. no pose data, or smile without an
+ * expression flag).
+ *
+ * Direction is NOT enforced by default — pose sign conventions differ across
+ * models and mirrored captures, and a sign-flipped check silently rejects
+ * every legitimate user. Magnitude (|yaw|/|pitch| past threshold) proves a
+ * real head movement; enable `strictDirection` only after calibrating the
+ * deployed container's conventions.
+ */
+function poseSatisfiesAction(action, pose, { strictDirection = false } = {}) {
+  if (!pose) return null;
   const yaw = Number(pose.yaw) || 0;
   const pitch = Number(pose.pitch) || 0;
   switch (action) {
-    case "turn_left": return yaw <= -POSE.yaw;
-    case "turn_right": return yaw >= POSE.yaw;
-    case "look_up": return pitch <= -POSE.pitch;
-    case "look_down": return pitch >= POSE.pitch;
-    // blink/smile need landmark/expression signals; if provided as booleans use them,
-    // otherwise fall through to liveness-only verification for that step.
-    case "blink": return pose.blinked !== false;
-    case "smile": return pose.smiled !== false;
-    default: return true;
+    case "turn_left": return strictDirection ? yaw <= -POSE.yaw : Math.abs(yaw) >= POSE.yaw;
+    case "turn_right": return strictDirection ? yaw >= POSE.yaw : Math.abs(yaw) >= POSE.yaw;
+    case "look_up": return strictDirection ? pitch <= -POSE.pitch : Math.abs(pitch) >= POSE.pitch;
+    case "look_down": return strictDirection ? pitch >= POSE.pitch : Math.abs(pitch) >= POSE.pitch;
+    case "blink": return pose.blinked === undefined ? null : pose.blinked !== false;
+    case "smile": return pose.smiled === undefined ? null : pose.smiled !== false;
+    default: return null;
   }
+}
+
+/** @deprecated kept for compatibility; use poseSatisfiesAction */
+function poseMatchesAction(action, pose) {
+  const r = poseSatisfiesAction(action, pose, { strictDirection: true });
+  return r === null ? true : r;
 }
 
 /**
@@ -77,7 +103,6 @@ function poseMatchesAction(action, pose) {
 function verifyLivenessChallenge(challenge, frames = [], thresholds = {}, opts = {}) {
   const reasonCodes = [];
   const perAction = {};
-  const rejectAt = thresholds?.liveness?.reject ?? 0.7;
 
   if (!challenge || !Array.isArray(challenge.actions) || challenge.actions.length === 0) {
     // No challenge on this session — nothing to verify here.
@@ -98,20 +123,62 @@ function verifyLivenessChallenge(challenge, frames = [], thresholds = {}, opts =
   const bestScores = [];
   for (const action of challenge.actions) {
     const candidates = byAction.get(action) || [];
-    const usable = candidates.filter((c) => c.liveness && c.liveness.faceCount === 1);
-    if (usable.length === 0) {
+    // Mid-action frames: a face must be PRESENT. faceCount>=1 (not ===1):
+    // profile/tilted heads make detectors split or double-count, and the
+    // selfie gate already rejects genuinely multi-person sessions.
+    const faced = candidates.filter((c) => c.liveness && c.liveness.faceCount >= 1);
+    if (faced.length === 0) {
       reasonCodes.push("LIVENESS_CHALLENGE_INCOMPLETE");
       perAction[action] = { present: candidates.length > 0, live: false, poseOk: false };
       continue;
     }
-    const live = usable.find((c) => typeof c.liveness.score === "number" && c.liveness.score >= rejectAt && poseMatchesAction(action, c.pose));
-    if (!live) {
+
+    // Spoof floor — only when the provider gave a numeric score at all.
+    const scores = faced.map((c) => c.liveness.score).filter((s) => typeof s === "number");
+    const maxScore = scores.length ? Math.max(...scores) : null;
+    if (maxScore !== null && maxScore < CHALLENGE_SCORE_FLOOR) {
       reasonCodes.push("LIVENESS_CHALLENGE_FAILED");
-      perAction[action] = { present: true, live: false, poseOk: false };
+      perAction[action] = { present: true, live: false, poseOk: false, score: maxScore };
       continue;
     }
-    perAction[action] = { present: true, live: true, poseOk: true, score: live.liveness.score };
-    bestScores.push(live.liveness.score);
+
+    // Pose: at least one frame must reach the movement magnitude, judged only
+    // on frames that actually carry a pose signal for this action.
+    const poseVerdicts = faced
+      .map((c) => poseSatisfiesAction(action, c.pose, opts))
+      .filter((v) => v !== null);
+    const poseOk = poseVerdicts.length === 0 ? null : poseVerdicts.some(Boolean);
+
+    // Record OBSERVED magnitudes for calibration — pose units/ranges differ
+    // across models (degrees vs radians, sign conventions), so these numbers
+    // in rawResult are how a deployment calibrates POSE thresholds before
+    // turning enforcement on.
+    const posed = faced.filter((c) => c.pose);
+    const poseObserved = posed.length
+      ? {
+          maxAbsYaw: Math.max(...posed.map((c) => Math.abs(Number(c.pose.yaw) || 0))),
+          maxAbsPitch: Math.max(...posed.map((c) => Math.abs(Number(c.pose.pitch) || 0)))
+        }
+      : null;
+
+    // Pose enforcement is OPT-IN (settings.challenge.enforcePose) until the
+    // deployed container's pose output has been calibrated against real
+    // sessions. Uncalibrated hard-fail rejects every legitimate user.
+    if (poseOk === false && opts.enforcePose === true) {
+      reasonCodes.push("LIVENESS_CHALLENGE_FAILED");
+      perAction[action] = { present: true, live: true, poseOk: false, poseChecked: true, score: maxScore, ...poseObserved };
+      continue;
+    }
+
+    perAction[action] = {
+      present: true, live: true,
+      poseOk: poseOk !== false,
+      poseChecked: poseOk !== null,
+      poseEnforced: opts.enforcePose === true,
+      score: maxScore,
+      ...poseObserved
+    };
+    if (maxScore !== null) bestScores.push(maxScore);
   }
 
   const ok = reasonCodes.length === 0;
@@ -122,6 +189,8 @@ function verifyLivenessChallenge(challenge, frames = [], thresholds = {}, opts =
 
 module.exports = {
   CHALLENGE_ACTIONS,
+  CHALLENGE_SCORE_FLOOR,
+  poseSatisfiesAction,
   DEFAULT_STEPS,
   DEFAULT_TTL_MS,
   generateLivenessChallenge,

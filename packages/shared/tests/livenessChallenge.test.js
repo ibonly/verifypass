@@ -55,19 +55,68 @@ test("verify: missing a required action → INCOMPLETE, not ok", () => {
   assert.ok(r.reasonCodes.includes("LIVENESS_CHALLENGE_INCOMPLETE"));
 });
 
-test("verify: spoofed frame (low liveness) → FAILED", () => {
+test("verify: confidently-spoof frame (below challenge floor) → FAILED", () => {
   const c = { actions: ["blink"], nonce: "x", issuedAt: new Date().toISOString() };
   const r = verifyLivenessChallenge(c, [frame("blink", 0.2)], THRESH);
   assert.equal(r.ok, false);
   assert.ok(r.reasonCodes.includes("LIVENESS_CHALLENGE_FAILED"));
 });
 
-test("verify: pose contradicts action (replay/wrong motion) → FAILED", () => {
+test("verify: MID-ACTION frames with modest scores pass — frontal-biased models score turned heads low", () => {
+  const c = { actions: ["turn_right", "look_up"], nonce: "x", issuedAt: new Date().toISOString() };
+  const frames = [
+    frame("turn_right", 0.45, 1, { yaw: 22 }),  // turned head: low-ish score is EXPECTED
+    frame("look_up", null, 1, { pitch: -18 })    // no score signal at all on this frame
+  ];
+  const r = verifyLivenessChallenge(c, frames, THRESH);
+  assert.equal(r.ok, true, JSON.stringify(r));
+});
+
+test("verify: pose magnitude proves movement regardless of sign (mirror-proof)", () => {
   const c = { actions: ["turn_left"], nonce: "x", issuedAt: new Date().toISOString() };
-  // high liveness but yaw says they turned RIGHT, not left
-  const r = verifyLivenessChallenge(c, [frame("turn_left", 0.95, 1, { yaw: 25 })], THRESH);
+  // sign conventions vary by model/mirroring — |yaw| past threshold = a real turn
+  const r = verifyLivenessChallenge(c, [frame("turn_left", 0.9, 1, { yaw: 25 })], THRESH);
+  assert.equal(r.ok, true);
+});
+
+test("verify: strictDirection enforces the sign once conventions are calibrated", () => {
+  const c = { actions: ["turn_left"], nonce: "x", issuedAt: new Date().toISOString() };
+  const opts = { enforcePose: true, strictDirection: true };
+  const wrongWay = verifyLivenessChallenge(c, [frame("turn_left", 0.9, 1, { yaw: 25 })], THRESH, opts);
+  assert.equal(wrongWay.ok, false);
+  const rightWay = verifyLivenessChallenge(c, [frame("turn_left", 0.9, 1, { yaw: -25 })], THRESH, opts);
+  assert.equal(rightWay.ok, true);
+});
+
+test("verify: pose below threshold is OBSERVATIONAL by default (uncalibrated units must not reject)", () => {
+  const c = { actions: ["turn_right"], nonce: "x", issuedAt: new Date().toISOString() };
+  const frames = [
+    frame("turn_right", 0.95, 1, { yaw: 3 }),
+    frame("turn_right", 0.96, 1, { yaw: 5 })
+  ];
+  const r = verifyLivenessChallenge(c, frames, THRESH);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  // ...but the shortfall + observed magnitudes are recorded for calibration
+  assert.equal(r.perAction.turn_right.poseOk, false);
+  assert.equal(r.perAction.turn_right.poseEnforced, false);
+  assert.equal(r.perAction.turn_right.maxAbsYaw, 5);
+});
+
+test("verify: enforcePose turns the same shortfall into FAILED", () => {
+  const c = { actions: ["turn_right"], nonce: "x", issuedAt: new Date().toISOString() };
+  const frames = [frame("turn_right", 0.95, 1, { yaw: 3 })];
+  const r = verifyLivenessChallenge(c, frames, THRESH, { enforcePose: true });
   assert.equal(r.ok, false);
   assert.ok(r.reasonCodes.includes("LIVENESS_CHALLENGE_FAILED"));
+  assert.equal(r.perAction.turn_right.maxAbsYaw, 3);
+});
+
+test("verify: doubled detection on a turned head (faceCount 2) is still usable", () => {
+  // profile faces make detectors split/double-count; the SELFIE gate owns
+  // genuine multi-person rejection
+  const c = { actions: ["turn_left"], nonce: "x", issuedAt: new Date().toISOString() };
+  const r = verifyLivenessChallenge(c, [frame("turn_left", 0.5, 2, { yaw: -20 })], THRESH);
+  assert.equal(r.ok, true);
 });
 
 test("verify: no face on a challenge frame → INCOMPLETE", () => {

@@ -9,6 +9,7 @@ const faceDetectMath = require("./faceDetectMath");
 
 exports.VerifyPassClient = client.VerifyPassClient;
 exports.VerifyPassApiError = client.VerifyPassApiError;
+exports.parseSdkToken = client.parseSdkToken;
 exports.createFlow = flow.createFlow;
 exports.STEP_SEQUENCES = flow.STEP_SEQUENCES;
 exports.TERMINAL_STATUSES = flow.TERMINAL_STATUSES;
@@ -25,6 +26,18 @@ exports.grabAnalysisFrame = camera.grabAnalysisFrame;
 exports.grabFixedFrame = camera.grabFixedFrame;
 exports.grabSquareFrame = camera.grabSquareFrame;
 exports.collectDeviceSignals = device.collectDeviceSignals;
+
+const actionSignals = require("./actionSignals");
+exports.actionGeometry = actionSignals.actionGeometry;
+exports.bandMotion = actionSignals.bandMotion;
+exports.createActionDetector = actionSignals.createActionDetector;
+exports.ACTION_GEO = actionSignals.ACTION_GEO;
+
+const stabilizer = require("./stabilizer");
+exports.createFramingStabilizer = stabilizer.createFramingStabilizer;
+exports.detectActionTrigger = stabilizer.detectActionTrigger;
+exports.STABILIZER_DEFAULTS = stabilizer.STABILIZER_DEFAULTS;
+exports.ACTION_TRIGGER = stabilizer.ACTION_TRIGGER;
 exports.DETECT_CONFIG = faceDetectMath.DETECT_CONFIG;
 exports.bestFaceBox = faceDetectMath.bestFaceBox;
 exports.assessFraming = faceDetectMath.assessFraming;
