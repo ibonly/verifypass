@@ -67,6 +67,45 @@ router.post("/:sessionId/decision", reviewers, requireTenant, tenantScope, async
     }
 
     const db = getDb();
+
+    // Maker-checker (four-eyes, tenant opt-in): terminal decisions need a
+    // SECOND, DIFFERENT reviewer. The first reviewer's decision is recorded
+    // as a proposal; the session stays in manual_review until confirmed.
+    // Recapture is non-terminal and applies immediately.
+    const { dualApprovalFor } = require("../services/settingsService");
+    if (dualApprovalFor(req.tenant) && decision !== "recapture") {
+      const notes = await db.manualReviewNote.findMany({ where: { sessionId: session.id } });
+      const proposal = [...notes]
+        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+        .find((n) => typeof n.decision === "string" && n.decision.startsWith("proposed:"));
+      const proposedDecision = proposal ? proposal.decision.slice("proposed:".length) : null;
+
+      if (!proposal || proposedDecision !== decision) {
+        // First reviewer, or a different decision → (re)propose, don't apply.
+        await db.manualReviewNote.create({
+          data: { sessionId: session.id, userId: req.user.id, decision: `proposed:${decision}`, note: note || null }
+        });
+        await audit({
+          tenantId: req.tenant.id, sessionId: session.id, actorType: "tenant_user",
+          actorId: `user:${req.user.id}`, action: "review.proposed", req,
+          metadata: { decision, note: note || null, superseded: proposedDecision || null }
+        });
+        return res.json({
+          success: true, sessionId: session.sessionUid,
+          status: "pending_second_approval", proposedDecision: decision
+        });
+      }
+      if (String(proposal.userId) === String(req.user.id)) {
+        throw new AppError("FORBIDDEN", "maker-checker: a different reviewer must confirm this decision");
+      }
+      // Second, distinct reviewer confirming the same decision → mark the
+      // proposal consumed (a later re-review must not inherit it), then apply.
+      await db.manualReviewNote.updateMany({
+        where: { id: proposal.id },
+        data: { decision: `applied:${decision}` }
+      });
+    }
+
     await db.manualReviewNote.create({
       data: { sessionId: session.id, userId: req.user.id, decision, note: note || null }
     });

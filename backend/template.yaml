@@ -7,10 +7,17 @@ Description: >
   every minute as the guarantee and runs the maintenance crons.
 
 Parameters:
+  ApiReservedConcurrency:
+    Type: Number
+    Default: 0
+    Description: >-
+      Max concurrent API containers (0 = unreserved). Each warm container holds
+      a Prisma connection pool; cap this OR set maxPoolSize in DatabaseUrl so
+      Lambda bursts cannot exhaust the Atlas connection limit.
   DatabaseUrl:
     Type: String
     NoEcho: true
-    Description: mongodb+srv://user:pass@cluster.mongodb.net/verifypass (Atlas; TLS built in)
+    Description: mongodb+srv://user:pass@cluster.mongodb.net/verifypass (Atlas; TLS built in) — append &maxPoolSize=5 so Lambda concurrency can't exhaust the Atlas connection cap
   ApiPublicUrl:
     Type: String
     Description: Public https origin of the API (embedded in SDK tokens). Set to the Function URL or your custom domain.
@@ -46,6 +53,9 @@ Globals:
         DATABASE_URL: !Ref DatabaseUrl
         SDK_TOKEN_SECRET: !Ref SdkTokenSecret
         EVIDENCE_ENCRYPTION_KEY: !Ref EvidenceEncryptionKey
+
+Conditions:
+  HasApiReservedConcurrency: !Not [!Equals [!Ref ApiReservedConcurrency, 0]]
 
 Resources:
   # Encrypted evidence objects. The app encrypts (AES-256-GCM) BEFORE upload;
@@ -106,6 +116,7 @@ Resources:
       DockerContext: .
       DockerTag: api
     Properties:
+      ReservedConcurrentExecutions: !If [HasApiReservedConcurrency, !Ref ApiReservedConcurrency, !Ref AWS::NoValue]
       PackageType: Image
       MemorySize: 1024
       Timeout: 30

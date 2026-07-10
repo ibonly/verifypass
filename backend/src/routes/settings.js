@@ -59,6 +59,22 @@ router.put("/retention", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// PUT /v1/settings/review — maker-checker (dual approval) toggle
+router.put("/review", async (req, res, next) => {
+  try {
+    const { validateReview } = require("../services/settingsService");
+    const clean = validateReview(req.body || {});
+    const before = (req.tenant.settings || {}).review || {};
+    await saveSettingsPatch(req.tenant, "review", clean);
+    req.tenant.settings = { ...(req.tenant.settings || {}), review: clean };
+    await audit({
+      tenantId: req.tenant.id, actorType: "tenant_user", actorId: `user:${req.user.id}`,
+      action: "settings.review_updated", req, metadata: { before, after: clean }
+    });
+    res.json({ success: true, review: clean });
+  } catch (err) { next(err); }
+});
+
 // --- API key management (PRD §21: tenant admin manages keys) ---
 
 // GET /v1/settings/api-keys

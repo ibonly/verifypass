@@ -10,7 +10,7 @@ const { computeRiskSignals } = require("./riskSignals");
 // Stamped into every rawResult + logged at worker startup. When a decision
 // looks impossible, this settles WHICH code produced it — Node caches modules
 // at process start, so an unrestarted worker silently runs old logic.
-const PIPELINE_VERSION = "2026-07-06.4-id-only";
+const PIPELINE_VERSION = "2026-07-10.5-idback-screening";
 
 function defaultEvidenceKey(config) {
   return resolveEvidenceKey({
@@ -32,7 +32,8 @@ function dbEnqueue(db) {
     db.jobQueue.create({ data: { type, payload: jobPayload, status: "pending", runAfter, maxAttempts } });
 }
 
-async function runVerification(payload, { db, provider, evidenceKey, env, modelVersion = null, enqueueJob }) {
+async function runVerification(payload, { db, provider, evidenceKey, env, modelVersion = null, enqueueJob, screen }) {
+  const doScreen = screen || require("./screening").screenCustomer;
   const dispatch = enqueueJob || dbEnqueue(db);
   const { sessionUid } = payload;
   const session = await db.verificationSession.findFirst({ where: { sessionUid } });
@@ -42,8 +43,13 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
   const tenant = await db.tenant.findFirst({ where: { id: session.tenantId } });
   const evidence = await db.evidenceFile.findMany({ where: { sessionId: session.id } });
 
-  const latest = (type) => evidence.filter((e) => e.fileType === type).sort((a, b) => b.id - a.id)[0] || null;
+  // Newest first by createdAt — ids are ObjectId STRINGS on MongoDB, so
+  // numeric subtraction on them is NaN and would silently not sort.
+  const latest = (type) => evidence
+    .filter((e) => e.fileType === type)
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0] || null;
   const idFront = latest("id_front");
+  const idBack = latest("id_back");
   const selfie = latest("selfie");
   const livenessFrames = evidence.filter((e) => e.fileType === "liveness_frame");
 
@@ -80,11 +86,36 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
 
   const selfieBuf = needsSelfie ? await loadDecrypted(selfie) : null;
   const idBuf = idFront ? await loadDecrypted(idFront) : null;
+  const idBackBuf = idBack ? await loadDecrypted(idBack).catch(() => null) : null;
 
   // --- Provider calls (liveness + match + OCR) ---
   const liveness = selfieBuf ? await provider.checkLiveness(selfieBuf) : null;
   const faceMatch = selfieBuf && idBuf ? await provider.compareFaces(selfieBuf, idBuf) : null;
-  const doc = idBuf ? await provider.extractDocument(idBuf) : null;
+  let doc = idBuf ? await provider.extractDocument(idBuf) : null;
+
+  // Two-sided documents (voter's card, driver's licence): OCR the back too —
+  // it often carries the MRZ/serial. Front fields win; back fills the gaps.
+  let docBack = null;
+  if (idBackBuf) {
+    docBack = await provider.extractDocument(idBackBuf).catch(() => null);
+    if (docBack && docBack.available) {
+      if (!doc || !doc.available) {
+        doc = { ...docBack, side: "back" };
+      } else {
+        const front = doc.extractedData || {};
+        const back = docBack.extractedData || {};
+        const frontNonEmpty = Object.fromEntries(
+          Object.entries(front).filter(([, v]) => v != null && v !== "")
+        );
+        doc = {
+          ...doc,
+          extractedData: { ...back, ...frontNonEmpty },
+          ocrConfidence: Math.max(doc.ocrConfidence ?? 0, docBack.ocrConfidence ?? 0) || (doc.ocrConfidence ?? null),
+          expired: doc.expired === true || docBack.expired === true
+        };
+      }
+    }
+  }
 
   // Document validation: the "ID front" must actually be a DOCUMENT. A selfie
   // submitted as the ID passes face-compare trivially (it matches itself), so
@@ -166,6 +197,21 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
   };
   const decision = decide(signals, thresholds);
 
+  // Sanctions/PEP screening (SCREENING_BACKEND, default none/off). Runs AFTER
+  // the biometric decision so an outage can't block the pipeline, but a HIT
+  // never auto-approves: approved → manual_review (enhanced due diligence).
+  const screening = await doScreen({
+    fullName: doc?.extractedData?.fullName || session.metadata?.customerName || null,
+    customerReference: session.customerReference || null
+  });
+  if (screening.hit) {
+    decision.riskLevel = "high";
+    if (!decision.reasonCodes.includes("SANCTIONS_PEP_MATCH")) {
+      decision.reasonCodes = [...decision.reasonCodes, "SANCTIONS_PEP_MATCH"];
+    }
+    if (decision.status === "approved") decision.status = "manual_review";
+  }
+
   const resultRow = {
     livenessScore: liveness ? liveness.score : null,
     livenessStatus: !liveness ? null
@@ -199,8 +245,14 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
         validated: doc.validated !== false,
         ocrEngine: doc.raw?.engine || null,
         liveness: docLiveness ? { verdict: docLiveness.verdict ?? null, score: docLiveness.score, faceCount: docLiveness.faceCount } : null,
-        liveFaceAsDocument
+        liveFaceAsDocument,
+        back: docBack ? {
+          available: docBack.available,
+          ocrEngine: docBack.raw?.engine || null,
+          ocrConfidence: docBack.ocrConfidence ?? null
+        } : null
       } : null,
+      screening,
       riskSignals: {
         repeatedFailedAttempts: risk.repeatedFailedAttempts,
         deviceSharedAcrossIdentities: risk.deviceSharedAcrossIdentities,

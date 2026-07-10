@@ -9,11 +9,24 @@ const STEP_SEQUENCES = {
   FACE_ONLY: ["liveness", "face", "processing", "complete"]
 };
 
+// Nigerian document types that carry data on the reverse side.
+const TWO_SIDED_DOCUMENT_TYPES = ["voters_card", "drivers_license", "national_id_card"];
+
+function needsDocumentBack(documentTypes) {
+  return Array.isArray(documentTypes)
+    && documentTypes.some((t) => TWO_SIDED_DOCUMENT_TYPES.includes(String(t || "").toLowerCase()));
+}
+
 const TERMINAL_STATUSES = ["approved", "rejected", "manual_review", "expired", "failed", "abandoned"];
 
-function createFlow(verificationType = "ID_AND_FACE") {
-  const steps = STEP_SEQUENCES[verificationType];
-  if (!steps) throw new Error(`Unknown verificationType: ${verificationType}`);
+function createFlow(verificationType = "ID_AND_FACE", opts = {}) {
+  const base = STEP_SEQUENCES[verificationType];
+  if (!base) throw new Error(`Unknown verificationType: ${verificationType}`);
+  // Two-sided documents (voter's card, driver's licence): capture the back
+  // right after the front. Server OCRs both and merges (front fields win).
+  const steps = opts.documentBack && base.includes("document")
+    ? base.flatMap((s) => (s === "document" ? ["document", "document_back"] : [s]))
+    : base;
 
   let index = 0;
   let error = null;
@@ -88,4 +101,4 @@ function createFlow(verificationType = "ID_AND_FACE") {
   };
 }
 
-module.exports = { createFlow, STEP_SEQUENCES, TERMINAL_STATUSES };
+module.exports = { createFlow, STEP_SEQUENCES, TERMINAL_STATUSES, TWO_SIDED_DOCUMENT_TYPES, needsDocumentBack };

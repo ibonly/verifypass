@@ -146,3 +146,50 @@ test("webhookFailures: only failed/exhausted, tenant-scoped", async (t) => {
   const rows = await reports.webhookFailures(scopeFor(tenant));
   assert.deepEqual(rows.map((r) => r.eventId).sort(), ["evt_bad", "evt_dead"]);
 });
+
+test("usageSummary: monthly created/billable split + type breakdown", async (t) => {
+  const db = createMockDb();
+  setDb(db);
+  t.after(() => setDb(null));
+  const { tenantScope } = require("../src/middleware/tenantScope");
+  const tenant = await db.tenant.create({ data: { tenantUid: "tnt_us", companyName: "U", status: "active" } });
+  const req = { tenant };
+  tenantScope(req, {}, () => {});
+
+  const now = new Date();
+  for (const [status, type] of [["approved", "ID_AND_FACE"], ["rejected", "ID_ONLY"], ["created", "ID_AND_FACE"], ["manual_review", "FACE_ONLY"]]) {
+    await db.verificationSession.create({
+      data: { sessionUid: `vps_us_${status}_${type}`, tenantId: tenant.id, status, verificationType: type, createdAt: now }
+    });
+  }
+  const reports = require("../src/services/reportService");
+  const rows = await reports.usageSummary(req.scopedDb, { months: 1 });
+  assert.equal(rows.length, 1);
+  const m = rows[0];
+  assert.equal(m.total, 4);
+  assert.equal(m.billable, 3, "created-but-never-run sessions are not billable");
+  assert.equal(m.byType.ID_AND_FACE, 2);
+});
+
+test("scoreDistribution: per-session score rows with model/pipeline version", async (t) => {
+  const db = createMockDb();
+  setDb(db);
+  t.after(() => setDb(null));
+  const { tenantScope } = require("../src/middleware/tenantScope");
+  const tenant = await db.tenant.create({ data: { tenantUid: "tnt_sc", companyName: "S", status: "active" } });
+  const req = { tenant };
+  tenantScope(req, {}, () => {});
+
+  const s = await db.verificationSession.create({
+    data: { sessionUid: "vps_sc1", tenantId: tenant.id, status: "approved", riskLevel: "low", verificationType: "ID_AND_FACE", createdAt: new Date() }
+  });
+  await db.verificationResult.create({
+    data: { sessionId: s.id, livenessScore: 0.91, faceMatchScore: 0.83, ocrConfidence: 0.77, rawResult: { modelVersion: "onnx-1", pipelineVersion: "p1" } }
+  });
+  const reports = require("../src/services/reportService");
+  const rows = await reports.scoreDistribution(req.scopedDb, { days: 30 });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].livenessScore, 0.91);
+  assert.equal(rows[0].modelVersion, "onnx-1");
+  assert.equal(rows[0].status, "approved");
+});

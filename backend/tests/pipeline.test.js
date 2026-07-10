@@ -357,3 +357,51 @@ test("wrong evidence key fails loudly (tamper/misconfig protection)", async () =
     runVerification({ sessionUid: "vps_PIPE1" }, { db, provider: stubProvider(), evidenceKey: crypto.randomBytes(32) })
   );
 });
+
+test("id_back: back-side OCR merges into the front (front fields win, gaps filled)", async () => {
+  const { db, session, addEvidence } = await seed();
+  await addEvidence("id_back");
+  let calls = 0;
+  const provider = stubProvider();
+  provider.extractDocument = async () => {
+    calls++;
+    return calls === 1
+      ? { available: true, ocrConfidence: 0.6, extractedData: { fullName: "ADEBAYO JOHN", documentNumber: null }, expired: false, raw: { engine: "tess" } }
+      : { available: true, ocrConfidence: 0.9, extractedData: { fullName: "WRONG BACK NAME", documentNumber: "A99", dateOfBirth: "1990-01-01" }, expired: false, raw: { engine: "tess" } };
+  };
+  const out = await runVerification({ sessionUid: "vps_PIPE1" }, { db, provider, evidenceKey: KEY });
+  assert.equal(calls, 2, "both sides OCRed");
+  const r = await db.verificationResult.findFirst({ where: { sessionId: session.id } });
+  assert.equal(r.extractedData.fullName, "ADEBAYO JOHN", "front wins");
+  assert.equal(r.extractedData.documentNumber, "A99", "back fills the gap");
+  assert.equal(r.extractedData.dateOfBirth, "1990-01-01");
+  assert.equal(r.rawResult.document.back.available, true);
+  assert.equal(out.status, "approved");
+});
+
+test("screening hit: approved escalates to manual_review with SANCTIONS_PEP_MATCH", async () => {
+  const { db, session } = await seed();
+  const out = await runVerification({ sessionUid: "vps_PIPE1" }, {
+    db, provider: stubProvider(), evidenceKey: KEY,
+    screen: async () => ({ performed: true, backend: "webhook", hit: true, sanctions: true, pep: false, matchCount: 1 })
+  });
+  assert.equal(out.status, "manual_review");
+  assert.ok(out.reasonCodes.includes("SANCTIONS_PEP_MATCH"));
+  const s = await db.verificationSession.findFirst({ where: { id: session.id } });
+  assert.equal(s.status, "manual_review");
+  assert.equal(s.riskLevel, "high");
+  const r = await db.verificationResult.findFirst({ where: { sessionId: session.id } });
+  assert.equal(r.rawResult.screening.hit, true);
+});
+
+test("screening outage: fail-open, decision unaffected, outcome recorded", async () => {
+  const { db, session } = await seed();
+  const out = await runVerification({ sessionUid: "vps_PIPE1" }, {
+    db, provider: stubProvider(), evidenceKey: KEY,
+    screen: async () => ({ performed: false, backend: "webhook", hit: false, error: "ECONNREFUSED" })
+  });
+  assert.equal(out.status, "approved", "provider outage must not block onboarding");
+  const r = await db.verificationResult.findFirst({ where: { sessionId: session.id } });
+  assert.equal(r.rawResult.screening.performed, false);
+  assert.match(r.rawResult.screening.error, /ECONNREFUSED/);
+});

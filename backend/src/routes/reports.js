@@ -104,6 +104,33 @@ router.get("/audit-log", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /v1/reports/usage?months=6&format=csv — per-month metering (billing)
+router.get("/usage", async (req, res, next) => {
+  try {
+    const rows = await reports.usageSummary(req.scopedDb, { months: req.query.months });
+    await logExport(req, "usage");
+    send(res, req, {
+      name: "usage", rows, wrap: "months",
+      columns: ["month", "total", "billable", "approved", "rejected", "manual_review", "failed"]
+        .map((k) => ({ key: k, header: k }))
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /v1/reports/score-distribution?days=90&format=csv — raw score rows for
+// FAR/FRR threshold calibration; group by modelVersion before aggregating.
+router.get("/score-distribution", async (req, res, next) => {
+  try {
+    const rows = await reports.scoreDistribution(req.scopedDb, { days: req.query.days });
+    await logExport(req, "score-distribution");
+    send(res, req, {
+      name: "score-distribution", rows, wrap: "scores",
+      columns: ["sessionId", "verificationType", "status", "riskLevel", "livenessScore", "faceMatchScore", "ocrConfidence", "modelVersion", "pipelineVersion", "createdAt"]
+        .map((k) => ({ key: k, header: k }))
+    });
+  } catch (err) { next(err); }
+});
+
 // GET /v1/reports/sessions/:sessionId/evidence.pdf — full case file
 router.get("/sessions/:sessionId/evidence.pdf", async (req, res, next) => {
   try {

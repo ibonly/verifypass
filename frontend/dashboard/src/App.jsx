@@ -292,6 +292,7 @@ function Sessions({ onSelectSession }) {
 
 function SessionDetail({ sessionId, onClose }) {
   const { data, error } = useData(`/v1/dashboard/sessions/${sessionId}`, [sessionId]);
+  const attempts = useData(`/v1/dashboard/sessions/${sessionId}/attempts`, [sessionId]);
   const panelRef = useRef(null);
 
   // Close on outside click
@@ -411,6 +412,30 @@ function SessionDetail({ sessionId, onClose }) {
                     <span style={valStyle}>{data.document.status || "—"}</span>
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* Attempt history (retry flow) */}
+            {attempts.data?.attempts?.length > 1 && (
+              <div style={{ marginBottom: 16 }}>
+                <h4 style={{ margin: "0 0 10px", fontSize: 13, color: "#374151", textTransform: "uppercase", letterSpacing: 0.5 }}>
+                  Attempts ({attempts.data.attemptCount})
+                </h4>
+                {attempts.data.attempts.map((a) => (
+                  <div key={a.attempt} style={{ marginBottom: 8, paddingLeft: 10, borderLeft: "2px solid #E5E7EB" }}>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>
+                      #{a.attempt} <span style={{ color: "#6B7280", fontWeight: 400 }}>
+                        {a.trigger === "initial" ? "first attempt" : a.trigger === "retry_manual_upload" ? "retry (manual upload)" : "retry"}
+                        {a.startedAt ? ` · ${a.startedAt.slice(0, 19).replace("T", " ")}` : ""}
+                      </span>
+                    </div>
+                    {a.events.map((e, i) => (
+                      <div key={i} style={{ fontSize: 12, color: "#6B7280" }}>
+                        {e.action}{e.status ? ` → ${e.status}` : ""}{e.reasonCodes?.length ? ` (${e.reasonCodes.join(", ")})` : ""}
+                      </div>
+                    ))}
+                  </div>
+                ))}
               </div>
             )}
 
@@ -643,6 +668,7 @@ function Reports() {
   const [days, setDays] = useState(30);
   const volume = useData(`/v1/reports/volume?days=${days}`, [days]);
   const reasons = useData(`/v1/reports/rejection-reasons?days=${days}`, [days]);
+  const usage = useData("/v1/reports/usage?months=6", []);
   const today = new Date().toISOString().slice(0, 10);
 
   const dl = (name) => () =>
@@ -660,13 +686,27 @@ function Reports() {
           <option value={30}>Last 30 days</option>
           <option value={90}>Last 90 days</option>
         </select>
-        {["volume", "rejection-reasons", "risk-events", "audit-log", "webhook-failures"].map((n) => (
+        {["volume", "rejection-reasons", "risk-events", "audit-log", "webhook-failures", "usage", "score-distribution"].map((n) => (
           <button key={n} onClick={dl(n)}
             style={{ padding: "8px 12px", borderRadius: 6, border: "1px solid #D1D5DB", background: "#fff", fontSize: 13, cursor: "pointer" }}>
             ⬇ {n}.csv
           </button>
         ))}
       </div>
+
+      <Card title="Usage (per month — billable = reached a decision)">
+        {(usage.data?.months || []).length === 0 && <p style={{ color: "#6B7280" }}>No usage yet.</p>}
+        {(usage.data?.months || []).map((m) => (
+          <div key={m.month} style={{ display: "flex", gap: 12, fontSize: 13, marginBottom: 4, alignItems: "baseline" }}>
+            <span style={{ width: 70, color: "#6B7280", fontSize: 12 }}>{m.month}</span>
+            <span style={{ fontWeight: 600 }}>{m.billable} billable</span>
+            <span style={{ color: "#6B7280" }}>of {m.total} created</span>
+            <span style={{ color: "#6B7280", fontSize: 12 }}>
+              {Object.entries(m.byType || {}).map(([t, c]) => `${t}: ${c}`).join(" · ")}
+            </span>
+          </div>
+        ))}
+      </Card>
 
       <Card title="Daily volume">
         {(volume.data?.days || []).length === 0 && <p style={{ color: "#6B7280" }}>No sessions in this window.</p>}

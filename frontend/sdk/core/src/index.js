@@ -11,6 +11,7 @@ exports.VerifyPassClient = client.VerifyPassClient;
 exports.VerifyPassApiError = client.VerifyPassApiError;
 exports.parseSdkToken = client.parseSdkToken;
 exports.createFlow = flow.createFlow;
+exports.needsDocumentBack = flow.needsDocumentBack;
 exports.STEP_SEQUENCES = flow.STEP_SEQUENCES;
 exports.TERMINAL_STATUSES = flow.TERMINAL_STATUSES;
 exports.toGrayscale = quality.toGrayscale;

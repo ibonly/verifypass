@@ -120,4 +120,27 @@ function retentionFor(tenant) {
   return { ...DEFAULT_RETENTION, ...((tenant?.settings || {}).retention || {}) };
 }
 
-module.exports = { validateThresholds, validateRetention, effectiveSettings, saveSettingsPatch, retentionFor };
+/**
+ * Maker-checker (dual approval) on manual review decisions — CBN-aligned
+ * four-eyes control. Opt-in per tenant: settings.review.dualApproval.
+ */
+function dualApprovalFor(tenant) {
+  return (tenant?.settings || {}).review?.dualApproval === true;
+}
+
+/** Validate the review-control settings patch. */
+function validateReview(input = {}) {
+  const errors = [];
+  const clean = {};
+  if (input.dualApproval != null) {
+    if (typeof input.dualApproval !== "boolean") errors.push("dualApproval must be a boolean");
+    else clean.dualApproval = input.dualApproval;
+  }
+  for (const k of Object.keys(input)) {
+    if (k !== "dualApproval") errors.push(`unknown review setting '${k}'`);
+  }
+  if (errors.length) bad(errors);
+  return clean;
+}
+
+module.exports = { validateThresholds, validateRetention, validateReview, effectiveSettings, saveSettingsPatch, retentionFor, dualApprovalFor };

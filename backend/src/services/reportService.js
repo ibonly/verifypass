@@ -131,4 +131,64 @@ async function customerHistory(scopedDb, customerReference) {
   return { customerReference, sessionCount: items.length, sessions: items };
 }
 
-module.exports = { dailyVolume, topReasons, webhookFailures, riskEvents, auditExport, customerHistory };
+/**
+ * Per-month usage for metering/billing. "billable" = sessions that reached a
+ * decision (approved/rejected/manual_review) — created-but-abandoned sessions
+ * consumed no provider compute and are broken out separately.
+ */
+async function usageSummary(scopedDb, { months = 6 } = {}) {
+  const n = Math.min(Math.max(Number(months) || 6, 1), 24);
+  const since = new Date();
+  since.setMonth(since.getMonth() - (n - 1));
+  since.setDate(1);
+  since.setHours(0, 0, 0, 0);
+  const BILLABLE = ["approved", "rejected", "manual_review"];
+  const sessions = await scopedDb.sessions.list({ createdAt: { gte: since } });
+  const byMonth = new Map();
+  for (const s of sessions) {
+    const key = new Date(s.createdAt).toISOString().slice(0, 7); // YYYY-MM
+    if (!byMonth.has(key)) {
+      byMonth.set(key, { month: key, total: 0, billable: 0, approved: 0, rejected: 0, manual_review: 0, failed: 0, byType: {} });
+    }
+    const m = byMonth.get(key);
+    m.total++;
+    if (BILLABLE.includes(s.status)) m.billable++;
+    if (m[s.status] != null && typeof m[s.status] === "number") m[s.status]++;
+    const t = s.verificationType || "ID_AND_FACE";
+    m.byType[t] = (m.byType[t] || 0) + 1;
+  }
+  return [...byMonth.values()].sort((a, b) => a.month.localeCompare(b.month));
+}
+
+/**
+ * Raw per-session score rows for FAR/FRR threshold calibration (skill §26.3).
+ * Genuine/impostor pools are separated OFFLINE by the analyst; scores are only
+ * comparable within one modelVersion — group by it before aggregating.
+ */
+async function scoreDistribution(scopedDb, { days = 90 } = {}) {
+  const { from } = rangeFilter(days);
+  const sessions = await scopedDb.sessions.list(
+    { createdAt: { gte: from } },
+    { orderBy: { createdAt: "desc" }, take: 5000 }
+  );
+  const rows = [];
+  for (const s of sessions) {
+    const r = await scopedDb.results.latestForSession(s.id);
+    if (!r) continue;
+    rows.push({
+      sessionId: s.sessionUid,
+      verificationType: s.verificationType || "ID_AND_FACE",
+      status: s.status,
+      riskLevel: s.riskLevel || null,
+      livenessScore: r.livenessScore != null ? Number(r.livenessScore) : null,
+      faceMatchScore: r.faceMatchScore != null ? Number(r.faceMatchScore) : null,
+      ocrConfidence: r.ocrConfidence != null ? Number(r.ocrConfidence) : null,
+      modelVersion: r.rawResult?.modelVersion ?? null,
+      pipelineVersion: r.rawResult?.pipelineVersion ?? null,
+      createdAt: s.createdAt ? new Date(s.createdAt).toISOString() : null
+    });
+  }
+  return rows;
+}
+
+module.exports = { dailyVolume, topReasons, webhookFailures, riskEvents, auditExport, customerHistory, usageSummary, scoreDistribution };

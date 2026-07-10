@@ -160,6 +160,9 @@ router.get("/:sessionId/challenge", ...sdkAuth, async (req, res, next) => {
       success: true,
       sessionId: session.sessionUid,
       verificationType: session.verificationType || "ID_AND_FACE",
+      // Two-sided document types (voter's card, driver's licence) tell the
+      // SDK to add a back-of-ID capture step.
+      documentTypes: Array.isArray(session.documentTypes) ? session.documentTypes : [],
       livenessActions: Array.isArray(session.livenessChallenge?.actions) ? session.livenessChallenge.actions : [],
       attempts: priorRetries + 1,
       maxAttempts: RETRY_MAX_ATTEMPTS,

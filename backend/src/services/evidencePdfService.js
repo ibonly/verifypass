@@ -116,7 +116,7 @@ async function buildEvidencePdf(scopedDb, tenant, sessionUid, { evidenceKey } = 
   const labels = { id_front: "ID document (front)", id_back: "ID document (back)", selfie: "Live selfie" };
   let anyImage = false;
   for (const type of wanted) {
-    const file = evidence.filter((e) => e.fileType === type).sort((a, b) => (a.id < b.id ? 1 : -1))[0];
+    const file = evidence.filter((e) => e.fileType === type).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
     if (!file) continue;
     try {
       const jpeg = await readEvidence(file.storagePath, { key: evidenceKey });

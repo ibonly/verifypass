@@ -54,3 +54,22 @@ test("onChange notifies and unsubscribes", () => {
   flow.advance(); // face → processing (not observed)
   assert.deepEqual(seen, ["face"]);
 });
+
+test("documentBack option inserts document_back right after document", () => {
+  const { createFlow, needsDocumentBack } = require("../src/flow");
+  const f = createFlow("ID_AND_FACE", { documentBack: true });
+  assert.deepEqual(f.steps, ["document", "document_back", "liveness", "face", "processing", "complete"]);
+  const idOnly = createFlow("ID_ONLY", { documentBack: true });
+  assert.deepEqual(idOnly.steps, ["document", "document_back", "processing", "complete"]);
+  // FACE_ONLY has no document step — option is a no-op
+  assert.deepEqual(createFlow("FACE_ONLY", { documentBack: true }).steps, ["liveness", "face", "processing", "complete"]);
+});
+
+test("needsDocumentBack: two-sided Nigerian document types", () => {
+  const { needsDocumentBack } = require("../src/flow");
+  assert.equal(needsDocumentBack(["voters_card"]), true);
+  assert.equal(needsDocumentBack(["drivers_license", "passport"]), true);
+  assert.equal(needsDocumentBack(["passport"]), false);
+  assert.equal(needsDocumentBack([]), false);
+  assert.equal(needsDocumentBack(undefined), false);
+});

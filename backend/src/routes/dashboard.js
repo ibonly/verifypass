@@ -240,4 +240,48 @@ router.get("/evidence/:evidenceId/image", async (req, res, next) => {
 });
 
 
+// GET /v1/dashboard/sessions/:sessionId/attempts — end-user attempt history.
+// Derived from the audit trail (the audit rows ARE the attempt counter — the
+// same source the retry endpoint enforces its limit with, so they can't drift).
+router.get("/sessions/:sessionId/attempts", async (req, res, next) => {
+  try {
+    const session = await req.scopedDb.sessions.findByUid(req.params.sessionId);
+    if (!session) throw new AppError("SESSION_NOT_FOUND");
+    const logs = await req.scopedDb.auditLogs.list({ sessionId: session.id }, { take: 500 });
+    const sorted = [...logs].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+
+    const attempts = [{
+      attempt: 1,
+      startedAt: session.createdAt ? new Date(session.createdAt).toISOString() : null,
+      trigger: "initial",
+      events: []
+    }];
+    for (const l of sorted) {
+      if (l.action === "session.retry") {
+        attempts.push({
+          attempt: attempts.length + 1,
+          startedAt: l.createdAt ? new Date(l.createdAt).toISOString() : null,
+          trigger: l.metadata?.manualUpload ? "retry_manual_upload" : "retry",
+          events: []
+        });
+      } else if (["session.submitted", "verification.decided", "review.recapture", "review.approved", "review.rejected", "review.proposed"].includes(l.action)) {
+        attempts[attempts.length - 1].events.push({
+          action: l.action,
+          at: l.createdAt ? new Date(l.createdAt).toISOString() : null,
+          ...(l.metadata?.status ? { status: l.metadata.status } : {}),
+          ...(l.metadata?.reasonCodes ? { reasonCodes: l.metadata.reasonCodes } : {})
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      sessionId: session.sessionUid,
+      currentStatus: session.status,
+      attemptCount: attempts.length,
+      attempts
+    });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

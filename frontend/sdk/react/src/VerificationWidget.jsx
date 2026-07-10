@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  VerifyPassClient, createFlow, assessFrame,
+  VerifyPassClient, createFlow, needsDocumentBack, assessFrame,
   startCamera, stopCamera, captureFrame, captureGuideFrame,
   grabAnalysisFrame, grabSquareFrame, grabFixedFrame, frameMotion, toGrayscale, meanBrightness, laplacianVariance,
   createFramingStabilizer, createActionDetector, bandMotion, createDocumentGate, isDominantFace
@@ -8,10 +8,18 @@ import {
 import { useVerifyPass } from "./VerifyPassProvider";
 import { createFaceDetector } from "./faceDetector";
 
+// Both document sides share capture UX (card guide, doc gate, back camera).
+const isDocumentStep = (s) => s === "document" || s === "document_back";
+
 const STEP_COPY = {
   document: {
     title: "Scan your ID",
     hint: "Place your ID inside the frame. Avoid glare and shadows.",
+    facingMode: "environment"
+  },
+  document_back: {
+    title: "Scan the BACK of your ID",
+    hint: "Flip your ID over and place the back inside the frame.",
     facingMode: "environment"
   },
   liveness: {
@@ -235,7 +243,7 @@ export function VerificationWidget({
       if (cancelled) return;
       actionsRef.current = challengeActions;
       setActions(challengeActions);
-      const flow = createFlow(verificationType);
+      const flow = createFlow(verificationType, { documentBack: needsDocumentBack(c.documentTypes) });
       flowRef.current = flow;
       setFlowState(flow.state());
       off = flow.onChange((s) => {
@@ -252,7 +260,7 @@ export function VerificationWidget({
   // consent gate is dismissed.
   const captureFacing = (() => {
     const step = flowState?.step;
-    return (step === "document" || step === "face" || step === "liveness")
+    return (isDocumentStep(step) || step === "face" || step === "liveness")
       ? STEP_COPY[step].facingMode
       : null;
   })();
@@ -299,7 +307,7 @@ export function VerificationWidget({
     try {
       // Documents are cropped to the on-screen card guide so the ID FILLS the
       // evidence photo (matches what the user aligned to; better OCR/review).
-      const { imageData, base64 } = step === "document"
+      const { imageData, base64 } = isDocumentStep(step)
         ? captureGuideFrame(videoRef.current, DOC_GUIDE)
         : captureFrame(videoRef.current);
       // Sharpness gating is per-step:
@@ -317,8 +325,8 @@ export function VerificationWidget({
         setFeedback(quality.issues.map((i) => ISSUE_COPY[i] || i).join(" "));
         return;
       }
-      if (step === "document") {
-        await client.uploadDocument(base64, "front");
+      if (isDocumentStep(step)) {
+        await client.uploadDocument(base64, step === "document_back" ? "back" : "front");
         flow.advance();
         // ID_ONLY has no face step — the document is the last capture, so THIS
         // branch must submit, or the session sits in "started" forever.
@@ -476,7 +484,7 @@ export function VerificationWidget({
   useEffect(() => {
     const step = flowState?.step;
     if (!cameraReady) return undefined;
-    if (!(step === "document" || step === "face" || step === "liveness")) return undefined;
+    if (!(isDocumentStep(step) || step === "face" || step === "liveness")) return undefined;
 
     setGreen(false);
     framingRef.current = null;
@@ -498,7 +506,7 @@ export function VerificationWidget({
     // Document step gate: "change-then-steady" — learns the EMPTY scene first,
     // then requires the ID to actually enter the frame (sustained scene change)
     // and be held still. A bare steadiness check photographed empty rooms.
-    const docGate = step === "document" ? createDocumentGate() : null;
+    const docGate = isDocumentStep(step) ? createDocumentGate() : null;
     let docState = { armed: false, present: false, steady: false, ready: false, shape: null };
     let lastDocSeen = false;
     let lastDocShapeOk = false;
@@ -603,7 +611,7 @@ export function VerificationWidget({
         // On the DOCUMENT step the detector serves the opposite purpose:
         // block capture while a LIVE face dominates the frame (people show
         // their face instead of the card).
-        const docDetect = step === "document" && !!faceModelUrl && detectorStatus === "ready" && !!detectorRef.current;
+        const docDetect = isDocumentStep(step) && !!faceModelUrl && detectorStatus === "ready" && !!detectorRef.current;
 
         if ((faceGate || docDetect) && !detecting && now - lastDetect > DETECT_MS && !capturingRef.current) {
           lastDetect = now;
@@ -828,8 +836,8 @@ export function VerificationWidget({
   const hint = isLiveness && livenessAction
     ? (ACTION_COPY[livenessAction] || livenessAction)
     : copy.hint;
-  const isDoc = step === "document";
-  const isCaptureStep = step === "document" || step === "face" || step === "liveness";
+  const isDoc = isDocumentStep(step);
+  const isCaptureStep = isDocumentStep(step) || step === "face" || step === "liveness";
   const frameW = isDoc ? 340 : 280;
   const frameH = isDoc ? 212 : 280;
   const pillText = isLiveness ? (ACTION_COPY[livenessAction] || livenessAction)
