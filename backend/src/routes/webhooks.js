@@ -47,7 +47,7 @@ router.put("/config", async (req, res, next) => {
 router.get("/deliveries", async (req, res, next) => {
   try {
     const where = req.query.status ? { status: req.query.status } : {};
-    const deliveries = await req.scopedDb.webhookDeliveries.list(where, { orderBy: { id: "desc" }, take: 100 });
+    const deliveries = await req.scopedDb.webhookDeliveries.list(where, { orderBy: { createdAt: "desc" }, take: 100 });
     res.json({
       success: true,
       deliveries: deliveries.map((d) => ({

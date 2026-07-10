@@ -93,3 +93,23 @@ test("createUser enforces role and password policy", async (t) => {
   await assert.rejects(() => createUser({ tenantId: 1, email: "a@b.c", password: "long-enough-password", role: "owner" }),
     (e) => e.code === "VALIDATION_ERROR");
 });
+
+test("userAuth middleware: JWT userId (string ObjectId) resolves the user — Mongo migration regression", async (t) => {
+  const db = createMockDb();
+  setDb(db);
+  t.after(() => setDb(null));
+
+  const { requireUser } = require("../src/middleware/userAuth");
+  const tenant = await db.tenant.create({ data: { tenantUid: "tnt_ua", companyName: "UA", status: "active" } });
+  const user = await db.user.create({
+    data: { tenantId: tenant.id, email: "ua@acme.ng", passwordHash: "x", role: "tenant_admin", status: "active" }
+  });
+  const token = signToken({ userId: String(user.id), role: user.role });
+
+  const req = { headers: { authorization: `Bearer ${token}` } };
+  let nextErr = "not called";
+  await requireUser()(req, {}, (err) => { nextErr = err; });
+
+  assert.equal(nextErr, undefined, "middleware must call next() without error");
+  assert.equal(String(req.user.id), String(user.id));
+});

@@ -50,7 +50,7 @@ router.get("/sessions", anyUser, requireTenant, tenantScope, async (req, res, ne
   try {
     const where = req.query.status ? { status: req.query.status } : {};
     const limit = Math.min(Number(req.query.limit || 50), 200);
-    const sessions = await req.scopedDb.sessions.list(where, { orderBy: { id: "desc" }, take: limit });
+    const sessions = await req.scopedDb.sessions.list(where, { orderBy: { createdAt: "desc" }, take: limit });
     res.json({
       success: true,
       sessions: sessions.map((s) => ({
@@ -138,7 +138,7 @@ router.get("/sessions/:sessionId", anyUser, requireTenant, tenantScope, async (r
 router.get("/webhook-deliveries", anyUser, requireTenant, tenantScope, async (req, res, next) => {
   try {
     const where = req.query.status ? { status: req.query.status } : {};
-    const deliveries = await req.scopedDb.webhookDeliveries.list(where, { orderBy: { id: "desc" }, take: 100 });
+    const deliveries = await req.scopedDb.webhookDeliveries.list(where, { orderBy: { createdAt: "desc" }, take: 100 });
     // Fetch webhook URL from tenant record (signing secret is never exposed to dashboard)
     const { getDb } = require("../lib/db");
     const tenant = await getDb().tenant.findFirst({ where: { id: req.tenant.id } });
@@ -171,7 +171,7 @@ router.get("/sessions/:sessionId/evidence", anyUser, requireTenant, tenantScope,
     const files = await getDb().evidenceFile.findMany({
       where: { sessionId: session.id },
       select: { id: true, fileType: true, label: true, createdAt: true, cloudinaryUrl: true, storagePath: true },
-      orderBy: { id: "asc" }
+      orderBy: { createdAt: "asc" }
     });
     const evidence = files.map((f) => {
       const { token } = signEvidenceAccess(String(f.id), { ttlSeconds: 15 * 60 });

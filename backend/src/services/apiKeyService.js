@@ -6,6 +6,17 @@ const { getDb } = require("../lib/db");
 
 const KEY_RE = /^vp_(pub|sec)_(live|test)_([A-Za-z0-9]{32})$/;
 
+// MongoDB ObjectId — 24 hex chars. Prisma THROWS (P2023 "Malformed ObjectID")
+// on invalid ids in @db.ObjectId filters, so a garbage :id path param would
+// surface as a 500. A non-ObjectId id can never exist → uniform NOT_FOUND.
+const OBJECT_ID_RE = /^[0-9a-f]{24}$/i;
+
+function assertKeyId(keyId) {
+  const id = String(keyId);
+  if (!OBJECT_ID_RE.test(id)) throw new AppError("NOT_FOUND", "API key not found");
+  return id;
+}
+
 function hashKey(key) {
   return crypto.createHash("sha256").update(key).digest("hex");
 }
@@ -70,6 +81,7 @@ async function resolveKey(key, expectedType) {
 
 /** Revoke a key (tenant-scoped: caller must pass the tenant id). */
 async function revokeKey(tenantId, keyId) {
+  keyId = assertKeyId(keyId);
   const db = getDb();
   const res = await db.apiKey.updateMany({
     where: { id: keyId, tenantId, status: "active" },
@@ -80,6 +92,7 @@ async function revokeKey(tenantId, keyId) {
 
 /** Rotate: issue replacement, then revoke old. Returns the new plaintext key. */
 async function rotateKey(tenantId, keyId) {
+  keyId = assertKeyId(keyId);
   const db = getDb();
   const old = await db.apiKey.findFirst({ where: { id: keyId, tenantId, status: "active" } });
   if (!old) throw new AppError("NOT_FOUND", "API key not found");
@@ -90,6 +103,7 @@ async function rotateKey(tenantId, keyId) {
 
 /** Delete a key permanently (only revoked keys may be deleted). */
 async function deleteKey(tenantId, keyId) {
+  keyId = assertKeyId(keyId);
   const db = getDb();
   const key = await db.apiKey.findFirst({ where: { id: keyId, tenantId } });
   if (!key) throw new AppError("NOT_FOUND", "API key not found");

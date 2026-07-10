@@ -23,7 +23,7 @@ router.get("/", reviewers, requireTenant, tenantScope, async (req, res, next) =>
   try {
     const status = req.query.status || "manual_review";
     const limit = Math.min(Number(req.query.limit || 50), 200);
-    const sessions = await req.scopedDb.sessions.list({ status }, { orderBy: { id: "desc" }, take: limit });
+    const sessions = await req.scopedDb.sessions.list({ status }, { orderBy: { createdAt: "desc" }, take: limit });
 
     const cases = await Promise.all(sessions.map(async (s) => {
       const r = await req.scopedDb.results.latestForSession(s.id);

@@ -38,7 +38,7 @@ function tenantScope(req, res, next) {
       latestForSession(sessionId) {
         return db.verificationResult.findFirst({
           where: { sessionId },
-          orderBy: { id: "desc" }
+          orderBy: { createdAt: "desc" }
         });
       }
     },
