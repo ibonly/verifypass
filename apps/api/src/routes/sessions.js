@@ -44,25 +44,44 @@ router.get("/:sessionId/result", async (req, res, next) => {
     if (!session) throw new AppError("SESSION_NOT_FOUND");
     const r = await req.scopedDb.results.latestForSession(session.id);
 
+    // ID verification and FACE verification are INDEPENDENT products:
+    //   FACE_ONLY  — liveness + selfie; there is no document and nothing to
+    //                extract, so no document section exists in the result.
+    //   ID_ONLY    — document capture + extraction; no liveness check runs,
+    //                so no liveness/faceMatch sections exist in the result.
+    //   ID_AND_FACE — both, plus the cross-check (face match).
+    // Sections are OMITTED (not null-filled) so consumers can't mistake
+    // "check not applicable" for "check ran and returned nothing".
+    const type = session.verificationType || "ID_AND_FACE";
+    const hasFace = type !== "ID_ONLY";
+    const hasDocument = type !== "FACE_ONLY";
+
     res.json({
       success: true,
       sessionId: session.sessionUid,
       customerReference: session.customerReference,
+      verificationType: type,
       status: session.status,
       riskLevel: session.riskLevel || null,
-      document: r ? {
-        status: r.documentStatus,
-        ocrConfidence: r.ocrConfidence != null ? Number(r.ocrConfidence) : null,
-        extractedData: r.extractedData || null
-      } : null,
-      liveness: r ? {
-        status: r.livenessStatus,
-        score: r.livenessScore != null ? Number(r.livenessScore) : null
-      } : null,
-      faceMatch: r ? {
-        status: r.faceMatchStatus,
-        similarityScore: r.faceMatchScore != null ? Number(r.faceMatchScore) : null
-      } : null,
+      ...(hasDocument ? {
+        document: r ? {
+          status: r.documentStatus,
+          ocrConfidence: r.ocrConfidence != null ? Number(r.ocrConfidence) : null,
+          extractedData: r.extractedData || null
+        } : null
+      } : {}),
+      ...(hasFace ? {
+        liveness: r ? {
+          status: r.livenessStatus,
+          score: r.livenessScore != null ? Number(r.livenessScore) : null
+        } : null
+      } : {}),
+      ...(hasFace && hasDocument ? {
+        faceMatch: r ? {
+          status: r.faceMatchStatus,
+          similarityScore: r.faceMatchScore != null ? Number(r.faceMatchScore) : null
+        } : null
+      } : {}),
       decision: {
         status: session.status,
         reasonCodes: session.decisionReason?.reasonCodes || []

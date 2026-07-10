@@ -74,6 +74,12 @@ router.get("/sessions/:sessionId", anyUser, requireTenant, tenantScope, async (r
     const session = await req.scopedDb.sessions.findByUid(req.params.sessionId);
     if (!session) throw new AppError("SESSION_NOT_FOUND", "Verification session not found");
     const r = await req.scopedDb.results.latestForSession(session.id);
+    // Independent products: FACE_ONLY has no document to show, ID_ONLY runs
+    // no liveness/face checks. Omit non-applicable sections entirely so the
+    // dashboard never renders "—" rows for checks that don't exist.
+    const vType = session.verificationType || "ID_AND_FACE";
+    const hasFace = vType !== "ID_ONLY";
+    const hasDocument = vType !== "FACE_ONLY";
     res.json({
       success: true,
       sessionId: session.sessionUid,
@@ -81,20 +87,26 @@ router.get("/sessions/:sessionId", anyUser, requireTenant, tenantScope, async (r
       status: session.status,
       riskLevel: session.riskLevel || null,
       isLive: session.isLive,
-      verificationType: session.verificationType,
-      document: r ? {
-        status: r.documentStatus,
-        ocrConfidence: r.ocrConfidence != null ? Number(r.ocrConfidence) : null,
-        extractedData: r.extractedData || null
-      } : null,
-      liveness: r ? {
-        status: r.livenessStatus,
-        score: r.livenessScore != null ? Number(r.livenessScore) : null
-      } : null,
-      faceMatch: r ? {
-        status: r.faceMatchStatus,
-        similarityScore: r.faceMatchScore != null ? Number(r.faceMatchScore) : null
-      } : null,
+      verificationType: vType,
+      ...(hasDocument ? {
+        document: r ? {
+          status: r.documentStatus,
+          ocrConfidence: r.ocrConfidence != null ? Number(r.ocrConfidence) : null,
+          extractedData: r.extractedData || null
+        } : null
+      } : {}),
+      ...(hasFace ? {
+        liveness: r ? {
+          status: r.livenessStatus,
+          score: r.livenessScore != null ? Number(r.livenessScore) : null
+        } : null
+      } : {}),
+      ...(hasFace && hasDocument ? {
+        faceMatch: r ? {
+          status: r.faceMatchStatus,
+          similarityScore: r.faceMatchScore != null ? Number(r.faceMatchScore) : null
+        } : null
+      } : {}),
       decision: {
         status: session.status,
         reasonCodes: session.decisionReason?.reasonCodes || []

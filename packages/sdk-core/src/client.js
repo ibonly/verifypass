@@ -89,8 +89,14 @@ class VerifyPassClient {
   }
 
   async _get(path) {
+    // Per-request timeout so a hung poll (dead socket after a network change)
+    // fails fast and the caller's retry logic can take over.
+    const signal = typeof AbortSignal !== "undefined" && AbortSignal.timeout
+      ? AbortSignal.timeout(15000)
+      : undefined;
     const res = await this.fetch(`${this.baseUrl}${path}`, {
-      headers: this._headers()
+      headers: this._headers(),
+      ...(signal ? { signal } : {})
     });
     const json = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -158,14 +164,36 @@ class VerifyPassClient {
     return this._get(`/v1/verification-sessions/${this.sessionId}/status?sdkToken=${encodeURIComponent(this.sdkToken)}`);
   }
 
-  /** Poll session status until terminal (PRD: SDK "session state polling"). */
+  /**
+   * Poll session status until terminal (PRD: SDK "session state polling").
+   *
+   * RESILIENT by design: a single failed poll must never abort a verification
+   * that is completing server-side. Mobile networks blip, dev servers
+   * restart, proxies drop sockets — "Failed to fetch" on one poll is noise.
+   * Transient failures (network errors, 5xx, 429, timeouts) are retried
+   * until the overall deadline; only definitive API answers (401/403/404 —
+   * bad token, revoked key, unknown session) abort immediately.
+   */
   async waitForResult({ intervalMs = 2500, timeoutMs = 120000, onTick } = {}) {
     const deadline = Date.now() + timeoutMs;
+    let lastError = null;
     for (;;) {
-      const status = await this.getStatus();
-      if (onTick) onTick(status);
-      if (TERMINAL_STATUSES.includes(status.status)) return status;
-      if (Date.now() > deadline) throw new VerifyPassApiError("SESSION_EXPIRED", "Timed out waiting for result", 408);
+      try {
+        const status = await this.getStatus();
+        lastError = null;
+        if (onTick) onTick(status);
+        if (TERMINAL_STATUSES.includes(status.status)) return status;
+      } catch (err) {
+        const definitive = err instanceof VerifyPassApiError
+          && typeof err.http === "number"
+          && err.http >= 400 && err.http < 500
+          && err.http !== 408 && err.http !== 429;
+        if (definitive) throw err;
+        lastError = err; // transient — keep polling until the deadline
+      }
+      if (Date.now() > deadline) {
+        throw lastError || new VerifyPassApiError("SESSION_EXPIRED", "Timed out waiting for result", 408);
+      }
       await new Promise((r) => setTimeout(r, intervalMs));
     }
   }

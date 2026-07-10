@@ -146,8 +146,26 @@ async function claimJob(db) {
   return claimed.count === 1 ? candidate : null; // lost race → try next tick
 }
 
+// Stale-lock reclaim is throttled — it's hygiene, not per-tick work.
+let lastReclaim = 0;
+const RECLAIM_EVERY_MS = 60_000;
+
 async function tick() {
   const db = getDb();
+  // Requeue jobs orphaned by a worker that died mid-run (dev restarts do
+  // this constantly) — otherwise their sessions sit in "submitted" forever.
+  if (Date.now() - lastReclaim > RECLAIM_EVERY_MS) {
+    lastReclaim = Date.now();
+    try {
+      const { reclaimStaleJobs } = require("./src/watchdog");
+      const r = await reclaimStaleJobs(db);
+      if (r.requeued || r.failed) {
+        console.log(`reclaimStaleJobs: requeued ${r.requeued}, failed ${r.failed} orphaned job(s)`);
+      }
+    } catch (err) {
+      console.error("RECLAIM_ERROR", err.message);
+    }
+  }
   const job = await claimJob(db);
   if (!job) return;
   const handler = HANDLERS[job.type];

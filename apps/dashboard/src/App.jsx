@@ -387,9 +387,11 @@ function SessionDetail({ sessionId, onClose }) {
             {(data.liveness || data.faceMatch || data.document) && (
               <div style={{ marginBottom: 16 }}>
                 <h4 style={{ margin: "0 0 10px", fontSize: 13, color: "#374151", textTransform: "uppercase", letterSpacing: 0.5 }}>Scores</h4>
-                <ScoreBar label="Liveness" value={data.liveness?.score} />
-                <ScoreBar label="Face Match" value={data.faceMatch?.similarityScore} />
-                <ScoreBar label="OCR Confidence" value={data.document?.ocrConfidence} />
+                {/* Sections are OMITTED by the API for non-applicable types:
+                    ID_ONLY has no liveness/face-match, FACE_ONLY no document */}
+                {data.liveness !== undefined && <ScoreBar label="Liveness" value={data.liveness?.score} />}
+                {data.faceMatch !== undefined && <ScoreBar label="Face Match" value={data.faceMatch?.similarityScore} />}
+                {data.document !== undefined && <ScoreBar label="OCR Confidence" value={data.document?.ocrConfidence} />}
 
                 {data.liveness && (
                   <div style={rowStyle}>

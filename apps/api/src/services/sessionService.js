@@ -241,9 +241,12 @@ async function recordConsent(scopedDb, sessionUid, sdkToken, { copyVersion = nul
   }
 
   const consentAt = new Date();
+  // x-forwarded-for is a comma-separated proxy chain — record the CLIENT ip
+  // (first hop), same normalization attachDeviceInfo uses.
+  const rawIp = req ? String(req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "") : "";
   const consentMeta = {
     copyVersion,
-    ip: req ? (req.headers["x-forwarded-for"] || req.socket?.remoteAddress || null) : null,
+    ip: rawIp.split(",")[0].trim() || null,
     userAgent: req ? (req.headers["user-agent"] || null) : null
   };
   await scopedDb.sessions.update(session.sessionUid, { consentAt, consentMeta });

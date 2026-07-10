@@ -324,7 +324,7 @@ export function VerificationWidget({
         // branch must submit, or the session sits in "started" forever.
         if (flow.state().step === "processing") {
           await client.submit();
-          const result = await client.waitForResult();
+          const result = await client.waitForResult({ timeoutMs: 300000 }); // 5 min — covers worker restarts + stale-job reclaim
           flow.finish(result);
           if (onCompleteRef.current) onCompleteRef.current(result);
         }
@@ -349,7 +349,7 @@ export function VerificationWidget({
         await client.uploadFace(base64);
         flow.advance(); // → processing
         await client.submit();
-        const result = await client.waitForResult();
+        const result = await client.waitForResult({ timeoutMs: 300000 }); // 5 min — covers worker restarts + stale-job reclaim
         flow.finish(result);
         if (onCompleteRef.current) onCompleteRef.current(result);
       }
@@ -424,7 +424,7 @@ export function VerificationWidget({
       flow.advance();
       if (flow.state().step === "processing") {
         await client.submit();
-        const result = await client.waitForResult();
+        const result = await client.waitForResult({ timeoutMs: 300000 }); // 5 min — covers worker restarts + stale-job reclaim
         flow.finish(result);
         if (onCompleteRef.current) onCompleteRef.current(result);
       }
