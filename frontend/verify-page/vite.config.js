@@ -8,7 +8,7 @@ export default defineConfig({
   },
   build: {
     commonjsOptions: {
-      include: [/node_modules/, /packages\/sdk-core/]
+      include: [/node_modules/, /sdk[\/]core/]
     }
   },
   define: {

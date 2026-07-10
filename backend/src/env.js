@@ -9,7 +9,7 @@
 const path = require("path");
 
 try {
-  require("dotenv").config({ path: path.resolve(__dirname, "../../.env") });
+  require("dotenv").config({ path: path.resolve(__dirname, "../.env") });
 } catch (_) {
   // dotenv not installed (e.g. minimal prod image) — rely on real env vars.
 }

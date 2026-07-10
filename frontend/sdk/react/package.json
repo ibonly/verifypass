@@ -7,7 +7,7 @@
     "react": ">=17"
   },
   "dependencies": {
-    "@verifypass/sdk-core": "*",
+    "@verifypass/sdk-core": "file:../core",
     "onnxruntime-web": "^1.19.2"
   },
   "license": "UNLICENSED"

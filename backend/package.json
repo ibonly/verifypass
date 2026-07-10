@@ -5,7 +5,7 @@
   "main": "app.js",
   "scripts": {
     "dev": "node server.js",
-    "test": "node --test tests/*.test.js",
+    "test": "node --test tests/*.test.js && node --test shared/tests/*.test.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:validate": "DATABASE_URL=${DATABASE_URL:-mysql://user:password@localhost:3306/verifypass} prisma validate --schema prisma/schema.prisma",
@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@prisma/client": "^5.16.0",
-    "@verifypass/shared": "*",
+    "@verifypass/shared": "file:./shared",
     "cloudinary": "^2.5.1",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",

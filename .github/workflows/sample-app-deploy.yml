@@ -11,8 +11,7 @@ on:
     branches: [main]
     paths:
       - "sample-app/**"
-      - "packages/sdk-core/**"
-      - "packages/sdk-react/**"
+      - "frontend/sdk/**"
       - ".github/workflows/sample-app-deploy.yml"
 
 concurrency: sample-app-deploy
@@ -26,12 +25,11 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 20 }
 
-      - run: npm ci
-
       - name: Build sample-app
+        working-directory: sample-app
         env:
           VP_API_BASE: ${{ secrets.VP_API_BASE }}
-        run: npm run build -w sample-app
+        run: npm install && npm run build
 
       - name: Upload to cPanel (FTPS)
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5

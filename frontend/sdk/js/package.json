@@ -7,7 +7,7 @@
     "build": "esbuild src/global.js --bundle --minify --format=iife --global-name=VerifyPass --outfile=dist/verifypass.js"
   },
   "dependencies": {
-    "@verifypass/sdk-core": "*"
+    "@verifypass/sdk-core": "file:../core"
   },
   "devDependencies": {
     "esbuild": "^0.21.0"

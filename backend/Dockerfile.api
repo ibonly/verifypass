@@ -1,21 +1,18 @@
-# Lambda container image for the VerifyPass API (backend service).
-# Build from the REPO ROOT: docker build -f backend/Dockerfile.api -t verifypass-api .
+# Lambda container image for the VerifyPass API.
+# Build from the backend/ folder: docker build -f Dockerfile.api -t verifypass-api .
 
 FROM public.ecr.aws/lambda/nodejs:20
 
-COPY package.json package-lock.json ${LAMBDA_TASK_ROOT}/
-COPY packages/shared ${LAMBDA_TASK_ROOT}/packages/shared
-COPY backend ${LAMBDA_TASK_ROOT}/backend
+COPY . ${LAMBDA_TASK_ROOT}/
 
 RUN cd ${LAMBDA_TASK_ROOT} && \
-    npm install --omit=dev --workspaces --include-workspace-root=false \
-      --workspace=backend --workspace=packages/shared && \
+    npm install --omit=dev && \
     npm install --no-save serverless-http @aws-sdk/client-s3 @aws-sdk/client-lambda && \
-    npx prisma generate --schema backend/prisma/schema.prisma
+    npx prisma generate --schema prisma/schema.prisma
 
 # Runtime env (set on the function): DATABASE_URL, API_PUBLIC_URL (https),
 # SDK_TOKEN_SECRET, AUTH_TOKEN_SECRET, EVIDENCE_ENCRYPTION_KEY,
 # EVIDENCE_BACKEND=s3 + S3_BUCKET/S3_REGION, QUEUE_BACKEND=db,
 # WORKER_LAMBDA_ARN (drain kick), RATE_LIMIT_BACKEND=db, NODE_ENV=production
 
-CMD ["backend/api.lambda.handler"]
+CMD ["api.lambda.handler"]

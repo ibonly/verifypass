@@ -22,7 +22,7 @@
 const path = require("path");
 const { spawn } = require("child_process");
 
-require("dotenv").config({ path: path.resolve(__dirname, "../.env") });
+require("dotenv").config({ path: path.resolve(__dirname, "../backend/.env") });
 
 const PORT = Number(process.env.PORT || 3000);
 const REPO = path.resolve(__dirname, "..");

@@ -18,7 +18,7 @@ on:
     # push-trigger is deliberate opt-in for a KYC product; uncomment when trusted:
     # push:
     #   branches: [main]
-    #   paths: ["backend/**", "packages/shared/**", "template.yaml", ".github/workflows/backend-deploy.yml"]
+    #   paths: ["backend/**", ".github/workflows/backend-deploy.yml"]
     inputs:
       stack_name:
         description: CloudFormation stack name
@@ -38,9 +38,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 20 }
-      - run: npm ci
-      - run: npm test --workspaces --if-present
-      - run: npm run lint --if-present
+      - name: Backend tests
+        working-directory: backend
+        run: |
+          npm install
+          npm test
 
   deploy:
     needs: test   # never ship a red build
@@ -53,9 +55,10 @@ jobs:
         with: { node-version: 20 }
 
       - name: Fetch ONNX models (baked into the worker image)
+        working-directory: backend
         run: |
-          npm ci
-          npm run models:fetch
+          npm install
+          node scripts/fetch-models.js
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -66,7 +69,7 @@ jobs:
         with: { use-installer: true }
 
       - name: SAM build (container images for both functions)
-        run: sam build --use-container=false
+        run: sam build --use-container=false -t backend/template.yaml
 
       - name: SAM deploy
         run: |
