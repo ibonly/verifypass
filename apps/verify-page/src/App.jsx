@@ -33,7 +33,11 @@ export default function App() {
   }
 
   function handleComplete(result) {
-    if (redirectUrl) {
+    // Retryable outcomes stay ON the page: the widget's result screen offers
+    // "Try again" (+ manual ID upload after 3 attempts). Auto-redirecting
+    // 1.5s after a rejection yanked users away before they could retry.
+    const retryable = ["rejected", "manual_review", "failed"].includes(result.status);
+    if (redirectUrl && !retryable) {
       try {
         const u = new URL(redirectUrl);
         u.searchParams.set("sessionId", sessionId);

@@ -124,6 +124,28 @@ class VerifyPassClient {
     return this._get(`/v1/verification-sessions/${this.sessionId}/challenge?sdkToken=${encodeURIComponent(this.sdkToken)}`);
   }
 
+  /**
+   * Record the user's biometric-processing consent (set-once, idempotent,
+   * audit-logged server-side). Production refuses uploads until recorded.
+   */
+  recordConsent(copyVersion = null) {
+    return this._post(`/v1/verification-sessions/${this.sessionId}/consent`, {
+      sdkToken: this.sdkToken, copyVersion
+    });
+  }
+
+  /**
+   * Reopen a rejected/review session for another attempt (server enforces the
+   * attempt cap and audit-logs every retry).
+   * @returns {{attempts:number, maxAttempts:number, manualUploadSuggested:boolean,
+   *            livenessChallenge:{actions:string[]}|null}}
+   */
+  retrySession() {
+    return this._post(`/v1/verification-sessions/${this.sessionId}/retry`, {
+      sdkToken: this.sdkToken
+    });
+  }
+
   submit() {
     const { collectDeviceSignals } = require("./device");
     return this._post(`/v1/verification-sessions/${this.sessionId}/verify`, {

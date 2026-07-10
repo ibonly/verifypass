@@ -13,5 +13,8 @@
     "dotenv": "^16.4.5",
     "onnxruntime-node": "^1.19.2",
     "sharp": "^0.33.5"
+  },
+  "optionalDependencies": {
+    "tesseract.js": "^6.0.0"
   }
 }

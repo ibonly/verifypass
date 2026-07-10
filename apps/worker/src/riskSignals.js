@@ -14,10 +14,14 @@ const HOUR_MS = 3600 * 1000;
  * @param {object} thresholds full resolveThresholds() output
  *   (uses .risk.* windows plus top-level .maxFailedAttempts)
  * @param {Date} [now]
+ * @param {object} [opts] { env } — NODE_ENV of the worker. The device-sharing
+ *   signal is DISABLED in development: every local test session comes from
+ *   the same machine, so the signal is pure noise there (product decision
+ *   2026-07-06). Staging/production (and unspecified env) keep it on.
  * @returns {{repeatedFailedAttempts:boolean, deviceSharedAcrossIdentities:boolean,
  *            ipVelocityExceeded:boolean, counts:object}}
  */
-async function computeRiskSignals(db, session, thresholds, now = new Date()) {
+async function computeRiskSignals(db, session, thresholds, now = new Date(), opts = {}) {
   const t = { ...thresholds.risk, maxFailedAttempts: thresholds.maxFailedAttempts };
   const out = {
     repeatedFailedAttempts: false,
@@ -42,8 +46,10 @@ async function computeRiskSignals(db, session, thresholds, now = new Date()) {
     if (prior.length >= (t.maxFailedAttempts ?? 3)) out.repeatedFailedAttempts = true;
   }
 
-  // 2. Same device fingerprint across many distinct identities (identity farming)
-  if (session.deviceFingerprint) {
+  // 2. Same device fingerprint across many distinct identities (identity
+  //    farming). Skipped in development — one dev machine legitimately
+  //    creates dozens of throwaway identities.
+  if (session.deviceFingerprint && opts.env !== "development") {
     const since = new Date(now.getTime() - t.deviceWindowDays * 24 * HOUR_MS);
     const rows = await db.verificationSession.findMany({
       where: {

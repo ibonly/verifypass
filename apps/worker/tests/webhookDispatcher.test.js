@@ -32,6 +32,35 @@ async function seed(db, { webhookUrl = "https://client.example/hook", webhookSec
   return { tenant, session };
 }
 
+test("payload carries attempt number — consumers can order events across retries", async () => {
+  const db = createMockDb();
+  const { tenant, session } = await seed(db);
+  // two prior end-user retries on this session
+  for (let i = 0; i < 2; i++) {
+    await db.auditLog.create({
+      data: { tenantId: tenant.id, sessionId: session.id, actorType: "api", action: "session.retry", metadata: { attempt: i + 2 } }
+    });
+  }
+  const fetch = mockFetch(() => ({ status: 200 }));
+  await sendWebhook(
+    { tenantId: String(tenant.id), sessionUid: "vps_WH1", event: "verification.approved" },
+    { db, fetchImpl: fetch }
+  );
+  const body = JSON.parse(fetch.calls[0].opts.body);
+  assert.equal(body.attempt, 3, "initial attempt + 2 retries");
+});
+
+test("fresh session payload has attempt 1", async () => {
+  const db = createMockDb();
+  const { tenant } = await seed(db);
+  const fetch = mockFetch(() => ({ status: 200 }));
+  await sendWebhook(
+    { tenantId: String(tenant.id), sessionUid: "vps_WH1", event: "verification.approved" },
+    { db, fetchImpl: fetch }
+  );
+  assert.equal(JSON.parse(fetch.calls[0].opts.body).attempt, 1);
+});
+
 test("delivers signed webhook; receiver can verify signature", async () => {
   const db = createMockDb();
   const { tenant } = await seed(db);

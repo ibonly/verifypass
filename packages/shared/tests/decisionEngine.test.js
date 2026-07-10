@@ -32,6 +32,8 @@ const GOLDEN = [
   ["OCR failed, faces fine → manual_review", { document: { ocrConfidence: null, expired: false } }, "manual_review", ["DOCUMENT_OCR_FAILED"]],
   ["document expired → manual_review", { document: { ocrConfidence: 0.9, expired: true } }, "manual_review", ["DOCUMENT_EXPIRED"]],
   ["selfie submitted as 'ID front' (passes passive liveness) → manual_review", { document: { ocrConfidence: 0.9, expired: false, liveFaceAsDocument: true } }, "manual_review", ["DOCUMENT_IS_LIVE_FACE"]],
+  ["extraction-only OCR (validated:false) PASSES — verification is a later phase", { document: { ocrConfidence: 0.8, expired: false, validated: false } }, "approved", []],
+  ["validated OCR service (no validated flag) unchanged → approved", { document: { ocrConfidence: 0.9, expired: false } }, "approved", []],
   ["reject beats review: liveness fail + expired doc → rejected", { liveness: { score: 0.3 }, document: { ocrConfidence: 0.9, expired: true } }, "rejected", ["LIVENESS_FAILED", "DOCUMENT_EXPIRED"]],
   ["multiple review reasons accumulate", { liveness: { score: 0.8 }, faceMatch: { score: 0.7 } }, "manual_review", ["LIVENESS_BORDERLINE", "FACE_MATCH_BORDERLINE"]],
   ["FACE_ONLY: no document sections at all → approved", { idFace: undefined, faceMatch: undefined, document: undefined }, "approved", []]

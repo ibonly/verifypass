@@ -36,6 +36,12 @@ module.exports = {
   // per environment; sandbox and production deployments each set their own.
   apiPublicUrl: requireApiPublicUrl(),
   sessionTtlMinutes: Number(process.env.SESSION_TTL_MINUTES || 30),
+  // Refuse biometric uploads until consent is recorded (NDPA). ON in
+  // production; override with REQUIRE_CONSENT=true|false (dev default off so
+  // scripts/e2e that upload directly keep working).
+  requireConsent: process.env.REQUIRE_CONSENT
+    ? process.env.REQUIRE_CONSENT === "true"
+    : (process.env.NODE_ENV || "development") === "production",
   sdkTokenSecret: requireSecret("SDK_TOKEN_SECRET", "dev-only-secret"),
   authTokenSecret: requireSecret("AUTH_TOKEN_SECRET", "dev-only-auth-secret"),
   evidenceDir: process.env.EVIDENCE_DIR || "./evidence-store",

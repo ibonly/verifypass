@@ -21,6 +21,8 @@ const REASON_LABELS = {
   NO_FACE_ON_DOCUMENT: "No face detected on ID document",
   MULTIPLE_FACES_DETECTED: "Multiple faces detected",
   DOCUMENT_OCR_FAILED: "Could not read ID document text",
+  DOCUMENT_UNVERIFIED: "Document text extracted but not verified — confirm against the photo",
+  DOCUMENT_IS_LIVE_FACE: "The 'ID' image appears to be a live face, not a document",
   DOCUMENT_EXPIRED: "ID document appears expired",
   DEVICE_SHARED_ACROSS_IDENTITIES: "Device flagged for multiple identities",
   TOO_MANY_FAILED_ATTEMPTS: "Too many failed attempts from this user",
@@ -436,6 +438,14 @@ function SessionDetail({ sessionId, onClose }) {
                 Judged by pipeline {data.diagnostics.pipelineVersion}
               </p>
             )}
+            <div style={rowStyle}>
+              <span style={labelStyle}>Consent</span>
+              <span style={valStyle}>
+                {data.consent
+                  ? `Recorded ${new Date(data.consent.at).toLocaleString()}${data.consent.copyVersion ? ` (v${data.consent.copyVersion})` : ""}`
+                  : "Not recorded"}
+              </span>
+            </div>
 
             {/* Extracted document data */}
             {data.document && (
@@ -443,18 +453,34 @@ function SessionDetail({ sessionId, onClose }) {
                 <h4 style={{ margin: "0 0 8px", fontSize: 13, color: "#374151", textTransform: "uppercase", letterSpacing: 0.5 }}>
                   ID Details
                 </h4>
+                {typeof data.document.extractedData?.source === "string" && data.document.extractedData.source.includes("not validated") && (
+                  <p style={{ fontSize: 12, color: "#B45309", margin: "0 0 8px" }}>
+                    Extraction-only OCR: the fields below were read off the image but
+                    not verified against any authority (verification phase pending).
+                  </p>
+                )}
                 {data.document.extractedData && typeof data.document.extractedData === "object" ? (
-                  Object.entries(data.document.extractedData).map(([k, v]) => (
-                    <div key={k} style={rowStyle}>
-                      <span style={labelStyle}>{k.replace(/[_-]/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2").replace(/^./, (c) => c.toUpperCase())}</span>
-                      <span style={valStyle}>{v == null ? "—" : typeof v === "object" ? JSON.stringify(v) : String(v)}</span>
-                    </div>
-                  ))
+                  <>
+                    {Object.entries(data.document.extractedData).filter(([k]) => k !== "rawText").map(([k, v]) => (
+                      <div key={k} style={rowStyle}>
+                        <span style={labelStyle}>{k.replace(/[_-]/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2").replace(/^./, (c) => c.toUpperCase())}</span>
+                        <span style={valStyle}>{v == null ? "—" : typeof v === "object" ? JSON.stringify(v) : String(v)}</span>
+                      </div>
+                    ))}
+                    {data.document.extractedData.rawText && (
+                      <details style={{ marginTop: 8 }}>
+                        <summary style={{ fontSize: 12, color: "#6B7280", cursor: "pointer" }}>Raw OCR text</summary>
+                        <pre style={{ background: "#F9FAFB", padding: 10, borderRadius: 6, fontSize: 11, overflow: "auto", margin: "6px 0 0", whiteSpace: "pre-wrap" }}>
+                          {data.document.extractedData.rawText}
+                        </pre>
+                      </details>
+                    )}
+                  </>
                 ) : (
                   <p style={{ fontSize: 12, color: "#9CA3AF", margin: 0 }}>
-                    No text extracted from this document — the ID OCR service
-                    (FACEPLUGIN_IDOCR_URL) is not configured, or the image was
-                    unreadable. Scores and evidence photos are unaffected.
+                    {data.diagnostics?.document?.available === false
+                      ? "No text extracted from this document because ID OCR is not available in the current worker provider/configuration. Configure FACEPLUGIN_IDOCR_URL with the Faceplugin ID OCR service to extract document text. Scores and evidence photos are unaffected."
+                      : "No text extracted from this document. The ID OCR service could not read the image. Scores and evidence photos are unaffected."}
                   </p>
                 )}
               </div>

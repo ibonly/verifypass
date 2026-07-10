@@ -60,13 +60,16 @@ async function createSession(scopedDb, body, isLive, options = {}) {
   const sessionUid = uid("vps");
   const { token, tokenHash } = signSdkToken(sessionUid, options.publicApiUrl);
   const expiresAt = new Date(Date.now() + config.sessionTtlMinutes * 60 * 1000);
-  const livenessChallenge = generateLivenessChallenge();
+  // ID_ONLY has NO liveness step — issuing a challenge it can never complete
+  // guarantees LIVENESS_CHALLENGE_INCOMPLETE hard-rejects at verification.
+  const verificationType = body.verificationType || "ID_AND_FACE";
+  const livenessChallenge = verificationType === "ID_ONLY" ? null : generateLivenessChallenge();
 
   await scopedDb.sessions.create({
     sessionUid,
     status: "created",
     customerReference: body.customerReference || null,
-    verificationType: body.verificationType || "ID_AND_FACE",
+    verificationType,
     documentTypes: body.documentTypes || null,
     callbackUrl: body.callbackUrl || null,
     metadata: body.metadata || null,
@@ -83,7 +86,10 @@ async function createSession(scopedDb, body, isLive, options = {}) {
     sdkToken: token,
     // Active-liveness actions the client SDK must guide the user through, in
     // order. Verified server-side on the uploaded frames (never client-trusted).
-    livenessChallenge: { actions: livenessChallenge.actions, nonce: livenessChallenge.nonce },
+    // null for ID_ONLY — that flow has no liveness step.
+    livenessChallenge: livenessChallenge
+      ? { actions: livenessChallenge.actions, nonce: livenessChallenge.nonce }
+      : null,
     // token travels in the URL FRAGMENT — browsers never send fragments to
     // servers, so it stays out of access logs and referrers
     hostedUrl: `${config.hostedBaseUrl}/session/${sessionUid}#t=${token}`,
@@ -142,4 +148,114 @@ async function attachDeviceInfo(scopedDb, tenantUid, sessionUid, device, clientI
   return true;
 }
 
-module.exports = { createSession, getSession, signSdkToken, verifySdkToken, validateCreatePayload, attachDeviceInfo };
+// --- Retry flow (end-user "try again" after rejected/review/failed) --------
+
+const RETRY_MAX_ATTEMPTS = 5;        // total attempts (1 initial + 4 retries)
+const RETRY_MANUAL_UPLOAD_AFTER = 3; // camera attempts before offering file upload
+
+/**
+ * Reopen a terminal-but-retryable session for another attempt.
+ * - New captures supersede old ones; prior results + evidence remain as the
+ *   attempt log (verificationResult rows accumulate per run).
+ * - Attempt count derives from `session.retry` audit rows — the log IS the
+ *   counter, and every retry is audit-logged here.
+ * - The liveness challenge is REISSUED (a retry must not replay frames
+ *   recorded against the previous action sequence); ID_ONLY has none.
+ * @returns response payload for the SDK
+ */
+async function retrySession(scopedDb, sessionUid, sdkToken, { tenantId, actorId = null, req = null } = {}) {
+  const { audit } = require("./auditLogger");
+  const session = await scopedDb.sessions.findByUid(sessionUid);
+  if (!session) throw new AppError("SESSION_NOT_FOUND");
+  if (!sdkToken || !verifySdkToken(session.sessionUid, sdkToken, session.sdkTokenHash)) {
+    throw new AppError("INVALID_API_KEY", "invalid SDK token for this session");
+  }
+  if (!["rejected", "manual_review", "failed"].includes(session.status)) {
+    throw new AppError("VALIDATION_ERROR", `cannot retry a session in status '${session.status}'`);
+  }
+
+  const priorRetries = (await scopedDb.auditLogs.list({
+    sessionId: session.id, action: "session.retry"
+  })).length;
+  const attemptsUsed = priorRetries + 1; // the initial attempt + prior retries
+  if (attemptsUsed >= RETRY_MAX_ATTEMPTS) {
+    throw new AppError("RETRY_LIMIT_REACHED", `all ${RETRY_MAX_ATTEMPTS} verification attempts used`);
+  }
+
+  // Capture BEFORE the update — the fetched row may be a live reference.
+  const previousStatus = session.status;
+  const previousReasonCodes = session.decisionReason?.reasonCodes || [];
+
+  const livenessChallenge = session.verificationType === "ID_ONLY" ? null : generateLivenessChallenge();
+  const expiresAt = new Date(Date.now() + config.sessionTtlMinutes * 60 * 1000);
+
+  await scopedDb.sessions.update(session.sessionUid, {
+    status: "started",
+    completedAt: null,
+    decisionReason: null,
+    livenessChallenge,
+    expiresAt
+  });
+
+  await audit({
+    tenantId, sessionId: session.id, actorType: "api", actorId,
+    action: "session.retry", req,
+    metadata: {
+      attempt: attemptsUsed + 1,
+      previousStatus,
+      previousReasonCodes
+    }
+  });
+
+  return {
+    success: true,
+    sessionId: session.sessionUid,
+    status: "started",
+    attempts: attemptsUsed + 1,
+    maxAttempts: RETRY_MAX_ATTEMPTS,
+    attemptsRemaining: RETRY_MAX_ATTEMPTS - attemptsUsed - 1,
+    // 3 camera attempts exhausted → client should offer document file upload
+    manualUploadSuggested: attemptsUsed + 1 > RETRY_MANUAL_UPLOAD_AFTER,
+    livenessChallenge: livenessChallenge
+      ? { actions: livenessChallenge.actions, nonce: livenessChallenge.nonce }
+      : null,
+    expiresAt: expiresAt.toISOString()
+  };
+}
+
+/**
+ * Record the end user's biometric-processing consent (NDPA lawful basis;
+ * CBN-aligned CDD proof). Set-once and idempotent: the FIRST acceptance is
+ * the legal record — later calls return it unchanged. Audit-logged with
+ * IP/user-agent so "prove this customer consented" has a real answer.
+ */
+async function recordConsent(scopedDb, sessionUid, sdkToken, { copyVersion = null, tenantId, req = null } = {}) {
+  const { audit } = require("./auditLogger");
+  const session = await scopedDb.sessions.findByUid(sessionUid);
+  if (!session) throw new AppError("SESSION_NOT_FOUND");
+  if (!sdkToken || !verifySdkToken(session.sessionUid, sdkToken, session.sdkTokenHash)) {
+    throw new AppError("INVALID_API_KEY", "invalid SDK token for this session");
+  }
+  if (session.consentAt) {
+    return { success: true, sessionId: session.sessionUid, consentAt: new Date(session.consentAt).toISOString(), alreadyRecorded: true };
+  }
+
+  const consentAt = new Date();
+  const consentMeta = {
+    copyVersion,
+    ip: req ? (req.headers["x-forwarded-for"] || req.socket?.remoteAddress || null) : null,
+    userAgent: req ? (req.headers["user-agent"] || null) : null
+  };
+  await scopedDb.sessions.update(session.sessionUid, { consentAt, consentMeta });
+  await audit({
+    tenantId, sessionId: session.id, actorType: "api", action: "session.consent", req,
+    metadata: { copyVersion }
+  });
+  return { success: true, sessionId: session.sessionUid, consentAt: consentAt.toISOString(), alreadyRecorded: false };
+}
+
+module.exports = {
+  createSession, getSession, signSdkToken, verifySdkToken, validateCreatePayload, attachDeviceInfo,
+  retrySession, RETRY_MAX_ATTEMPTS, RETRY_MANUAL_UPLOAD_AFTER,
+  recordConsent
+};

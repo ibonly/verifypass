@@ -99,12 +99,18 @@ router.get("/sessions/:sessionId", anyUser, requireTenant, tenantScope, async (r
         status: session.status,
         reasonCodes: session.decisionReason?.reasonCodes || []
       },
+      // NDPA consent proof — when the user accepted, and which copy version
+      consent: session.consentAt ? {
+        at: new Date(session.consentAt).toISOString(),
+        copyVersion: session.consentMeta?.copyVersion || null
+      } : null,
       // Which pipeline judged this session + what evidence it saw — settles
       // "the photo is right there!" confusion (stale worker, type mismatch).
       diagnostics: r ? {
         pipelineVersion: r.rawResult?.pipelineVersion || null,
         missing: r.rawResult?.missing || null,
-        evidenceTypesSeen: r.rawResult?.evidenceTypesSeen || null
+        evidenceTypesSeen: r.rawResult?.evidenceTypesSeen || null,
+        document: r.rawResult?.document || null
       } : null,
       createdAt: session.createdAt ? new Date(session.createdAt).toISOString() : null,
       completedAt: session.completedAt ? new Date(session.completedAt).toISOString() : null,

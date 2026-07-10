@@ -63,6 +63,15 @@ function createFlow(verificationType = "ID_AND_FACE") {
       return state();
     },
 
+    /** Start over from the first capture step (server-approved retry). */
+    reset() {
+      index = 0;
+      error = null;
+      result = null;
+      emit();
+      return state();
+    },
+
     /** Terminal result from the API ends the flow. */
     finish(apiResult) {
       result = apiResult;

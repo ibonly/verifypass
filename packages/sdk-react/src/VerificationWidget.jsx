@@ -80,6 +80,9 @@ const RESULT_REASON_LABELS = {
 
 
 const DEFAULT_CONSENT_COPY = "I consent to VerifyPass capturing and processing my ID images, selfie, and biometric data for identity verification.";
+// Bump when the consent wording changes — recorded server-side with each
+// consent so audits know WHICH text the user accepted.
+const CONSENT_COPY_VERSION = "2026-07-09.1";
 const FACE_FOCUS_MIN = 12;
 
 function cropImageData(imageData, box, padRatio = 0.12) {
@@ -157,6 +160,9 @@ export function VerificationWidget({
   const [docShapeOk, setDocShapeOk] = useState(false);
   // Document step: a LIVE face is filling the frame instead of a card
   const [docFaceBlocked, setDocFaceBlocked] = useState(false);
+  // Retry flow: attempt counter from the server (audit-logged there). After 3
+  // camera attempts the server suggests manual file upload for the document.
+  const [attemptInfo, setAttemptInfo] = useState({ attempts: 1, manualUpload: false, exhausted: false });
 
   // init: create client, fetch the server-issued challenge, build the flow
   useEffect(() => {
@@ -171,6 +177,15 @@ export function VerificationWidget({
         const c = await client.getChallenge();
         verificationType = c.verificationType || "ID_AND_FACE";
         challengeActions = Array.isArray(c.livenessActions) ? c.livenessActions : [];
+        // Rehydrate attempt state — a refresh mid-retry must not reset the
+        // counter or hide the manual-upload option the server already granted.
+        if (typeof c.attempts === "number") {
+          setAttemptInfo({
+            attempts: c.attempts,
+            manualUpload: !!c.manualUploadSuggested,
+            exhausted: c.attempts >= (c.maxAttempts || 5)
+          });
+        }
       } catch (err) {
         if (onErrorRef.current) onErrorRef.current(err);
       }
@@ -300,6 +315,76 @@ export function VerificationWidget({
   // Keep a live ref to capture() so the auto-capture loop always calls the latest.
   const captureRef = useRef(capture);
   captureRef.current = capture;
+
+  // Try again after a rejected / review / failed outcome. The server reopens
+  // the session, reissues the challenge, logs the attempt, and enforces the cap.
+  const retryVerification = useCallback(async () => {
+    const client = clientRef.current;
+    const flow = flowRef.current;
+    if (!client || !flow || busy) return;
+    setBusy(true);
+    setFeedback(null);
+    try {
+      const r = await client.retrySession();
+      const acts = r.livenessChallenge?.actions || [];
+      actionsRef.current = acts;
+      setActions(acts);
+      actionIdxRef.current = 0;
+      setActionIdx(0);
+      setAttemptInfo({
+        attempts: r.attempts,
+        manualUpload: !!r.manualUploadSuggested,
+        exhausted: (r.attemptsRemaining ?? 1) <= 0
+      });
+      flow.reset();
+    } catch (err) {
+      if (err && err.code === "RETRY_LIMIT_REACHED") {
+        setAttemptInfo((s) => ({ ...s, exhausted: true }));
+      }
+      setFeedback(err.message || String(err));
+    } finally {
+      setBusy(false);
+    }
+  }, [busy]);
+
+  // Manual file upload for the DOCUMENT after repeated camera failures.
+  // Deliberately document-only: selfie and liveness must stay live captures
+  // or the anti-spoofing guarantees are meaningless.
+  const onDocumentFile = useCallback(async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = ""; // allow picking the same file again
+    if (!file || capturingRef.current) return;
+    capturingRef.current = true;
+    setBusy(true);
+    setFeedback(null);
+    try {
+      if (file.size > 8 * 1024 * 1024) throw new Error("Image is larger than 8MB — choose a smaller photo.");
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error("Could not read the selected file."));
+        reader.readAsDataURL(file);
+      });
+      if (!/^data:image\/(jpeg|jpg|png|webp)/i.test(base64)) {
+        throw new Error("Choose a JPEG or PNG photo of your ID.");
+      }
+      const flow = flowRef.current;
+      const client = clientRef.current;
+      await client.uploadDocument(base64, "front");
+      flow.advance();
+      if (flow.state().step === "processing") {
+        await client.submit();
+        const result = await client.waitForResult();
+        flow.finish(result);
+        if (onCompleteRef.current) onCompleteRef.current(result);
+      }
+    } catch (err) {
+      setFeedback(err.message || String(err));
+    } finally {
+      setBusy(false);
+      capturingRef.current = false;
+    }
+  }, []);
 
   // Load the browser face model (optional). If it fails, we fall back to
   // motion-based auto-capture and the frame won't gate on face framing.
@@ -718,7 +803,16 @@ export function VerificationWidget({
         </label>
         <button
           type="button"
-          onClick={() => setConsented(true)}
+          onClick={() => {
+            // Persist the consent record server-side (set-once, audit-logged;
+            // production refuses uploads without it). Fire-and-forget: a
+            // transient failure here surfaces as a clear upload error later
+            // rather than blocking the user at the consent screen.
+            if (clientRef.current) {
+              clientRef.current.recordConsent(CONSENT_COPY_VERSION).catch(() => {});
+            }
+            setConsented(true);
+          }}
           disabled={!consentChecked}
           style={{
             width: "100%", marginTop: 16, padding: "12px 0", borderRadius: 8,
@@ -851,6 +945,23 @@ export function VerificationWidget({
           >
             Capture manually
           </button>
+
+          {isDoc && attemptInfo.manualUpload && (
+            <label style={{
+              display: "block", width: "100%", marginTop: 10, padding: "10px 0", borderRadius: 8,
+              background: primary, color: "#fff", fontSize: 14, textAlign: "center",
+              cursor: busy ? "wait" : "pointer", opacity: busy ? 0.5 : 1, boxSizing: "border-box"
+            }}>
+              Upload a photo of your ID instead
+              <input
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                onChange={onDocumentFile}
+                disabled={busy}
+                style={{ display: "none" }}
+              />
+            </label>
+          )}
         </div>
       )}
 
@@ -873,7 +984,7 @@ export function VerificationWidget({
           </p>
           <p style={{ fontSize: 16, margin: "8px 0" }}>
             {result.status === "approved" && "Verification approved."}
-            {result.status === "manual_review" && "Your verification is under review. You'll be notified shortly."}
+            {result.status === "manual_review" && "Your verification is under review. You can wait to be notified — or try again now."}
             {["rejected", "failed", "expired"].includes(result.status) && "Verification was not successful."}
           </p>
           {["rejected", "failed"].includes(result.status) && result.decision?.reasonCodes?.length > 0 && (
@@ -888,6 +999,37 @@ export function VerificationWidget({
                 </div>
               ))}
             </div>
+          )}
+
+          {/* Try again — reopens the SAME session (attempts audit-logged
+              server-side, cap enforced). After 3 camera attempts the document
+              step also offers manual file upload. */}
+          {["rejected", "manual_review", "failed"].includes(result.status) && !attemptInfo.exhausted && (
+            <div style={{ marginTop: 16 }}>
+              <button
+                onClick={retryVerification}
+                disabled={busy}
+                style={{
+                  padding: "10px 28px", borderRadius: 8, border: 0, fontSize: 14,
+                  background: primary, color: "#fff",
+                  cursor: busy ? "wait" : "pointer", opacity: busy ? 0.6 : 1
+                }}
+              >
+                {busy ? "Restarting…" : "Try again"}
+              </button>
+              <p style={{ fontSize: 12, color: "#9CA3AF", margin: "8px 0 0" }}>
+                Attempt {attemptInfo.attempts} of 5
+                {attemptInfo.attempts >= 3 ? " — you can also upload a photo of your ID on the next try" : ""}
+              </p>
+            </div>
+          )}
+          {attemptInfo.exhausted && ["rejected", "manual_review", "failed"].includes(result.status) && (
+            <p style={{ fontSize: 13, color: "#6B7280", margin: "14px 0 0" }}>
+              All attempts have been used. Please contact support to continue.
+            </p>
+          )}
+          {feedback && (
+            <p style={{ color: "#B45309", fontSize: 13, margin: "8px 0 0" }}>{feedback}</p>
           )}
         </div>
       )}

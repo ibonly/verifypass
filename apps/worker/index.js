@@ -15,12 +15,45 @@ const { runVerification, defaultEvidenceKey, PIPELINE_VERSION } = require("./src
 const POLL_MS = config.pollMs;
 const WORKER_ID = `worker-${process.pid}`;
 
-function createProvider() {
-  if (config.provider === "faceplugin") {
-    return createFacepluginProvider(config.faceplugin);
+// ID OCR resolution chain — independent of which biometric engine is in use:
+//   1. FACEPLUGIN_IDOCR_URL  — dedicated ID OCR HTTP service (best quality)
+//   2. tesseract.js          — local extraction-only OCR (optional npm dep);
+//                              results carry validated:false → sessions land
+//                              in review with data prefilled, never auto-valid
+//   3. provider default      — no OCR → DOCUMENT_OCR_FAILED review
+// Failures at any tier degrade to the next instead of crashing the job.
+function attachOcr(provider) {
+  const { createTesseractOcr } = require("./src/providers/tesseractOcr");
+  const tesseract = createTesseractOcr();
+  const fallback = tesseract
+    ? (buf) => tesseract.extractDocument(buf)
+    : provider.extractDocument.bind(provider);
+
+  if (config.faceplugin.idOcrUrl) {
+    const ocr = createFacepluginProvider(config.faceplugin);
+    provider.extractDocument = async (buf) => {
+      try {
+        return await ocr.extractDocument(buf);
+      } catch (err) {
+        console.warn(`ID OCR service failed (${err.message}) — falling back to ${tesseract ? "tesseract.js" : "manual review"}`);
+        return fallback(buf);
+      }
+    };
+    provider.ocrEngine = "faceplugin-idocr";
+  } else if (tesseract) {
+    provider.extractDocument = fallback;
+    provider.ocrEngine = "tesseract.js (extraction only)";
+  } else {
+    provider.ocrEngine = "none (install tesseract.js or set FACEPLUGIN_IDOCR_URL)";
   }
-  // default: server-side ONNX (no license/Docker)
-  return createOnnxProvider({ modelsDir: config.onnx.modelsDir, matchThreshold: config.onnx.matchThreshold });
+  return provider;
+}
+
+function createProvider() {
+  const provider = config.provider === "faceplugin"
+    ? createFacepluginProvider(config.faceplugin)
+    : createOnnxProvider({ modelsDir: config.onnx.modelsDir, matchThreshold: config.onnx.matchThreshold });
+  return attachOcr(provider);
 }
 
 let deps = null;
@@ -29,9 +62,12 @@ function getDeps() {
     deps = {
       db: getDb(),
       provider: createProvider(),
-      evidenceKey: defaultEvidenceKey(config)
+      evidenceKey: defaultEvidenceKey(config),
+      // development disables the device-sharing risk signal (dev machines
+      // legitimately create many throwaway identities)
+      env: config.env
     };
-    console.log(`verification provider: ${deps.provider.name}`);
+    console.log(`verification provider: ${deps.provider.name} · ID OCR: ${deps.provider.ocrEngine}`);
   }
   return deps;
 }
@@ -47,6 +83,11 @@ const HANDLERS = {
       where: { status: { in: ["created", "started"] }, expiresAt: { lt: new Date() } },
       data: { status: "expired" }
     });
+    // Watchdog: sessions stuck in "submitted" (worker died mid-job / job
+    // retries exhausted) get a terminal SESSION_TIMEOUT instead of silence.
+    const { failStuckSubmitted } = require("./src/watchdog");
+    const timedOut = await failStuckSubmitted(db);
+    if (timedOut) console.log(`expire_sessions: ${timedOut} stuck submitted session(s) → SESSION_TIMEOUT`);
   },
   retention_cleanup: async () => {
     const fs = require("fs/promises");
@@ -69,6 +110,14 @@ const HANDLERS = {
       await db.evidenceFile.delete({ where: { id: file.id } });
     }
     if (expired.length) console.log(`retention_cleanup: removed ${expired.length} files`);
+    // Sweep expired rate-limit windows (DB-backed limiter counters)
+    try {
+      if (db.rateLimitCounter) {
+        await db.rateLimitCounter.deleteMany({ where: { windowEndsAt: { lt: new Date(Date.now() - 3600_000) } } });
+      }
+    } catch (err) {
+      console.warn(`retention_cleanup: rate-limit sweep failed (${err.message})`);
+    }
   }
 };
 

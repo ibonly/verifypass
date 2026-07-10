@@ -17,6 +17,7 @@ const ERROR_CODES = {
   MANUAL_REVIEW_REQUIRED: { http: 200, message: "Case requires review" },
   WEBHOOK_FAILED: { http: 502, message: "Webhook delivery failed" },
   VALIDATION_ERROR: { http: 400, message: "Request validation failed" },
+  RETRY_LIMIT_REACHED: { http: 409, message: "Maximum verification attempts reached" },
   RATE_LIMITED: { http: 429, message: "Too many requests" },
   FORBIDDEN: { http: 403, message: "Not allowed" },
   NOT_FOUND: { http: 404, message: "Resource not found" },

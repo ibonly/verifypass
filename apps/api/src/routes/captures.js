@@ -84,6 +84,45 @@ router.post("/:sessionId/verify", bigBody, ...sdkAuth, async (req, res, next) =>
   }
 });
 
+// POST /v1/verification-sessions/:sessionId/retry — end-user retry after a
+// rejected / manual_review / failed outcome. Reopens the SAME session (new
+// captures supersede old ones; prior results + evidence stay as the attempt
+// log), reissues the liveness challenge, extends expiry, and audit-logs every
+// attempt. The attempt count is derived from those audit rows — no schema
+// change, and the log IS the counter. After 3 camera attempts the client is
+// told to offer manual file upload for the document. Logic lives in
+// sessionService.retrySession (unit-tested there).
+router.post("/:sessionId/retry", bigBody, ...sdkAuth, async (req, res, next) => {
+  try {
+    const { retrySession } = require("../services/sessionService");
+    const payload = await retrySession(req.scopedDb, req.params.sessionId, req.body?.sdkToken, {
+      tenantId: req.tenant.id,
+      actorId: `key:${req.apiKey.prefix}`,
+      req
+    });
+    res.json(payload);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /v1/verification-sessions/:sessionId/consent — record the user's
+// biometric-processing consent (set-once, idempotent, audit-logged). In
+// production uploads are refused until this has been called.
+router.post("/:sessionId/consent", bigBody, ...sdkAuth, async (req, res, next) => {
+  try {
+    const { recordConsent } = require("../services/sessionService");
+    const payload = await recordConsent(req.scopedDb, req.params.sessionId, req.body?.sdkToken, {
+      copyVersion: req.body?.copyVersion || null,
+      tenantId: req.tenant.id,
+      req
+    });
+    res.json(payload);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /v1/verification-sessions/:sessionId/status?sdkToken=... — SDK polling.
 // Returns status only (never scores/extracted data — those need the secret key).
 router.get("/:sessionId/status", ...sdkAuth, async (req, res, next) => {
@@ -111,11 +150,20 @@ router.get("/:sessionId/challenge", ...sdkAuth, async (req, res, next) => {
     if (!req.query.sdkToken || !verifySdkToken(session.sessionUid, req.query.sdkToken, session.sdkTokenHash)) {
       throw new AppError("INVALID_API_KEY", "invalid SDK token for this session");
     }
+    // Attempt state travels with the challenge so a page refresh mid-retry
+    // doesn't lose the counter / manual-upload eligibility client-side.
+    const { RETRY_MAX_ATTEMPTS, RETRY_MANUAL_UPLOAD_AFTER } = require("../services/sessionService");
+    const priorRetries = (await req.scopedDb.auditLogs.list({
+      sessionId: session.id, action: "session.retry"
+    })).length;
     res.json({
       success: true,
       sessionId: session.sessionUid,
       verificationType: session.verificationType || "ID_AND_FACE",
-      livenessActions: Array.isArray(session.livenessChallenge?.actions) ? session.livenessChallenge.actions : []
+      livenessActions: Array.isArray(session.livenessChallenge?.actions) ? session.livenessChallenge.actions : [],
+      attempts: priorRetries + 1,
+      maxAttempts: RETRY_MAX_ATTEMPTS,
+      manualUploadSuggested: priorRetries + 1 > RETRY_MANUAL_UPLOAD_AFTER
     });
   } catch (err) {
     next(err);

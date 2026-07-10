@@ -25,7 +25,7 @@ function defaultEvidenceKey(config) {
  * @param {object} payload {sessionUid}
  * @param {object} deps {db, provider, evidenceKey}
  */
-async function runVerification(payload, { db, provider, evidenceKey }) {
+async function runVerification(payload, { db, provider, evidenceKey, env }) {
   const { sessionUid } = payload;
   const session = await db.verificationSession.findFirst({ where: { sessionUid } });
   if (!session) throw new Error(`run_verification: session ${sessionUid} not found`);
@@ -86,17 +86,37 @@ async function runVerification(payload, { db, provider, evidenceKey }) {
 
   // --- Decision ---
   const thresholds = resolveThresholds(tenant?.settings || {});
+  // A LIVE FACE shown as the "document" must satisfy BOTH signals when the
+  // provider reports face size: (1) passive liveness says Real, (2) the face
+  // DOMINATES the image. A genuine card's printed portrait is a small
+  // fraction of the (card-cropped) image, so a liveness misfire on a clean
+  // card photo can't flag on its own. Providers without faceRatio (Faceplugin
+  // returns no image dims) rely on their true anti-spoof verdict alone.
   const liveFaceAsDocument = !!docLiveness && docLiveness.verdict === "Real"
-    && (typeof docLiveness.score === "number" ? docLiveness.score : 0) >= thresholds.liveness.reject;
+    && (typeof docLiveness.score === "number" ? docLiveness.score : 0) >= thresholds.liveness.reject
+    && (typeof docLiveness.faceRatio !== "number" || docLiveness.faceRatio >= 0.35);
 
   // Active liveness challenge: score each captured challenge frame server-side
   // and verify the unpredictable, server-issued action sequence. Client scores
   // are never trusted here — only these server-computed results.
   let challenge = { ok: true, aggregateScore: null, reasonCodes: [], perAction: {} };
-  const hasChallenge = session.livenessChallenge && Array.isArray(session.livenessChallenge.actions) && session.livenessChallenge.actions.length > 0;
+  const hasChallenge = needsSelfie && session.livenessChallenge && Array.isArray(session.livenessChallenge.actions) && session.livenessChallenge.actions.length > 0;
   if (hasChallenge) {
+    // Only frames uploaded FOR THIS CHALLENGE count. Retries reissue the
+    // challenge (fresh nonce + issuedAt) exactly so an earlier attempt's
+    // frames can't be replayed — but the verifier matches by action label,
+    // so without this time fence attempt-1 frames would satisfy attempt-2's
+    // actions. 5s grace covers issue/upload ordering on the same box.
+    const issuedAt = session.livenessChallenge.issuedAt
+      ? new Date(session.livenessChallenge.issuedAt).getTime() - 5000
+      : 0;
+    const currentFrames = livenessFrames.filter((fr) => {
+      if (!issuedAt || !fr.createdAt) return true; // legacy rows: no fence possible
+      return new Date(fr.createdAt).getTime() >= issuedAt;
+    });
+
     const frames = [];
-    for (const fr of livenessFrames) {
+    for (const fr of currentFrames) {
       const buf = await loadDecrypted(fr);
       const lv = await provider.checkLiveness(buf);
       frames.push({ action: fr.label, liveness: { score: lv.score, faceCount: lv.faceCount }, pose: lv.pose || null });
@@ -115,7 +135,7 @@ async function runVerification(payload, { db, provider, evidenceKey }) {
     challenge = verifyLivenessChallenge(session.livenessChallenge, frames, thresholds, challengeOpts);
   }
 
-  const risk = await computeRiskSignals(db, session, thresholds);
+  const risk = await computeRiskSignals(db, session, thresholds, new Date(), { env });
   const signals = {
     // ID_ONLY has no selfie: omit selfie/liveness sections entirely — the
     // decision engine treats absent sections as not-applicable (fail-closed
@@ -123,7 +143,15 @@ async function runVerification(payload, { db, provider, evidenceKey }) {
     ...(liveness ? { selfie: { faceCount: liveness.faceCount }, liveness: { score: liveness.score } } : {}),
     ...(hasChallenge ? { livenessChallenge: { ok: challenge.ok, reasonCodes: challenge.reasonCodes } } : {}),
     ...(faceMatch ? { idFace: { found: faceMatch.idFaceFound }, faceMatch: { score: faceMatch.score } } : {}),
-    ...(doc ? { document: { ocrConfidence: doc.ocrConfidence, expired: doc.expired === true, liveFaceAsDocument } } : {}),
+    ...(doc ? {
+      document: {
+        ocrConfidence: doc.ocrConfidence,
+        expired: doc.expired === true,
+        liveFaceAsDocument,
+        // false = extraction-only OCR (data read, never verified) → review
+        validated: doc.validated !== false
+      }
+    } : {}),
     risk
   };
   const decision = decide(signals, thresholds);
@@ -155,6 +183,8 @@ async function runVerification(payload, { db, provider, evidenceKey }) {
       document: doc ? {
         available: doc.available,
         expired: doc.expired,
+        validated: doc.validated !== false,
+        ocrEngine: doc.raw?.engine || null,
         liveness: docLiveness ? { verdict: docLiveness.verdict ?? null, score: docLiveness.score, faceCount: docLiveness.faceCount } : null,
         liveFaceAsDocument
       } : null,

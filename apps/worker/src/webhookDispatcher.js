@@ -96,6 +96,18 @@ async function createDelivery({ tenantId, sessionUid, event }, { db, now }) {
   const session = await db.verificationSession.findFirst({ where: { sessionUid } });
   const eventUid = `evt_${crypto.randomBytes(12).toString("hex")}`;
 
+  // Attempt number: the end-user retry flow re-verifies the SAME session, so
+  // consumers can receive several terminal events for one sessionId (e.g.
+  // verification.rejected then verification.approved). `attempt` lets them
+  // order and de-duplicate; the latest attempt always supersedes.
+  let attempt = 1;
+  if (session) {
+    const retries = await db.auditLog.findMany({
+      where: { sessionId: session.id, action: "session.retry" }
+    });
+    attempt = retries.length + 1;
+  }
+
   // Payload per PRD §9.11
   const body = {
     event,
@@ -104,6 +116,7 @@ async function createDelivery({ tenantId, sessionUid, event }, { db, now }) {
     customerReference: session?.customerReference || null,
     status: session?.status || null,
     riskLevel: session?.riskLevel || null,
+    attempt,
     createdAt: session?.createdAt ? new Date(session.createdAt).toISOString() : null,
     completedAt: session?.completedAt ? new Date(session.completedAt).toISOString() : null
   };

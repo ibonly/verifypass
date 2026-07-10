@@ -219,6 +219,11 @@ function createOnnxProvider({ modelsDir, matchThreshold = 0.6, livenessThreshold
         // Same vocabulary as Faceplugin's face_state.result — the pipeline's
         // document validation (liveFaceAsDocument) keys off "Real".
         verdict: score >= 0.5 ? "Real" : "Spoof",
+        // Face width as a fraction of image width. Discriminates a LIVE face
+        // filling the frame (≥~0.35) from an ID card's printed portrait
+        // (≤~0.28 of a card-cropped image) when the liveness verdict alone
+        // misfires on a clean card photo.
+        faceRatio: det.width > 0 ? (det.best.x2 - det.best.x1) / det.width : null,
         faceCount: det.count,
         occluded: false,
         quality: null,

@@ -112,6 +112,14 @@ async function handleUpload({ scopedDb, tenantUid, sessionUid, sdkToken, kind, s
     throw new AppError("VALIDATION_ERROR", `cannot upload to a session in status '${session.status}'`);
   }
 
+  // NDPA: no biometric processing without recorded consent. Enforced in
+  // production (config.requireConsent); the SDK records consent at its
+  // consent screen before any capture, so legitimate flows never hit this.
+  const config = require("../config");
+  if (config.requireConsent && !session.consentAt) {
+    throw new AppError("VALIDATION_ERROR", "consent has not been recorded for this session (POST /consent first)");
+  }
+
   // Liveness challenge frames are tagged with the action they capture.
   let label = null;
   if (kind === "liveness") {

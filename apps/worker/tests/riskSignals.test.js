@@ -84,6 +84,35 @@ test("device reuse: distinct identities over threshold flags; same identity reus
   assert.equal(risk2.deviceSharedAcrossIdentities, false);
 });
 
+test("device reuse is DISABLED in development, active in staging/production", async () => {
+  const now = new Date();
+  const FP = "fp_dev_machine";
+
+  // One dev machine, five throwaway SAMPLE-* identities — over the threshold.
+  async function seedFarm() {
+    const db = createMockDb();
+    await seedSessions(db, 1, [
+      { uid: "d1", ref: "SAMPLE-1", fp: FP, at: new Date(now - 1 * HOUR) },
+      { uid: "d2", ref: "SAMPLE-2", fp: FP, at: new Date(now - 2 * HOUR) },
+      { uid: "d3", ref: "SAMPLE-3", fp: FP, at: new Date(now - 3 * HOUR) },
+      { uid: "d4", ref: "SAMPLE-4", fp: FP, at: new Date(now - 4 * HOUR) }
+    ]);
+    const [cur] = await seedSessions(db, 1, [{ uid: "cur", ref: "SAMPLE-5", fp: FP, at: now }]);
+    return { db, cur };
+  }
+
+  const dev = await seedFarm();
+  const devRisk = await computeRiskSignals(dev.db, dev.cur, T, now, { env: "development" });
+  assert.equal(devRisk.deviceSharedAcrossIdentities, false, "dev machines legitimately create many identities");
+  assert.equal(devRisk.counts.deviceIdentities, 0, "check skipped entirely in development");
+
+  for (const env of ["staging", "production", undefined]) {
+    const { db, cur } = await seedFarm();
+    const risk = await computeRiskSignals(db, cur, T, now, { env });
+    assert.equal(risk.deviceSharedAcrossIdentities, true, `must stay armed for env=${env}`);
+  }
+});
+
 test("ip velocity: bursts flag, spread-out traffic doesn't; null ip skips", async () => {
   const db = createMockDb();
   const now = new Date();

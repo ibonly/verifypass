@@ -102,6 +102,10 @@ model VerificationSession {
   deviceFingerprint String?       @map("device_fingerprint") @db.VarChar(64)
   deviceMeta        Json?         @map("device_meta")
   clientIp          String?       @map("client_ip") @db.VarChar(64)
+  // Biometric-processing consent (NDPA lawful basis; CBN-aligned CDD proof).
+  // Set once by the SDK when the user accepts the consent screen.
+  consentAt         DateTime?     @map("consent_at")
+  consentMeta       Json?         @map("consent_meta") // {copyVersion, ip, userAgent}
   status            SessionStatus @default(created)
   riskLevel         RiskLevel?    @map("risk_level")
   decisionReason    Json?         @map("decision_reason")
@@ -281,4 +285,16 @@ model JobQueue {
 
   @@index([status, runAfter])
   @@map("job_queue")
+}
+
+// Shared fixed-window rate-limit counters — one row per limiter+key+window so
+// the cap holds across ALL API processes (Passenger spawns several). Expired
+// windows are swept by the worker's retention_cleanup job.
+model RateLimitCounter {
+  key          String   @id @db.VarChar(191) // "<limiter>:<identifier>:<windowBucket>"
+  count        Int      @default(0)
+  windowEndsAt DateTime @map("window_ends_at")
+
+  @@index([windowEndsAt])
+  @@map("rate_limit_counters")
 }

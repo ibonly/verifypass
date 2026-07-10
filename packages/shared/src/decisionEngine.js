@@ -105,6 +105,11 @@ function decide(signals, thresholds = DEFAULT_THRESHOLDS) {
     if (document.ocrConfidence == null || document.ocrConfidence === 0) {
       reviews.push(R.DOCUMENT_OCR_FAILED);
     }
+    // NOTE (product decision 2026-07-06): extraction-only OCR
+    // (document.validated === false) does NOT flag review — extraction is
+    // informational, and identity verification happens in a later phase
+    // (government DB lookup). The flag is still recorded in rawResult; when
+    // the verification phase lands, gate on ITS result, not on OCR.
   }
 
   if (rejects.length) {

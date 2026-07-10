@@ -26,6 +26,9 @@ function inferApiBase() {
 const API_BASE = inferApiBase();
 
 const PRIMARY = "#6D28D9";
+// Outcomes the WIDGET can recover from itself (its result screen offers
+// "Try again" + manual ID upload) — the host must keep it mounted for these.
+const RETRYABLE_STATUSES = ["rejected", "manual_review", "failed"];
 
 export default function App() {
   const [secretKey, setSecretKey] = useState(PREFILL_SECRET);
@@ -144,7 +147,10 @@ export default function App() {
           </Card>
         )}
 
-        {session && !result && (
+        {/* Keep the widget MOUNTED for retryable outcomes — its result screen
+            owns "Try again" (+ manual ID upload after 3 attempts). Unmounting
+            on every onComplete was hiding that UI entirely. */}
+        {session && (!result || RETRYABLE_STATUSES.includes(result.status)) && (
           <Card>
             <div style={{ fontSize: 12, color: "#6B7280", marginBottom: 8 }}>
               Session <code>{session.sessionId}</code>
@@ -158,6 +164,10 @@ export default function App() {
                 sessionId={session.sessionId}
                 sdkToken={session.sdkToken}
                 onComplete={(r) => setResult(r)}
+                onStepChange={(s) => {
+                  // a retry reset the flow — clear the stale result
+                  if (s !== "complete" && s !== "processing") setResult(null);
+                }}
                 onError={(err) => setError(err.message || String(err))}
               />
             </VerifyPassProvider>
@@ -166,7 +176,7 @@ export default function App() {
           </Card>
         )}
 
-        {result && (
+        {result && !RETRYABLE_STATUSES.includes(result.status) && (
           <Card>
             <h2 style={{ marginTop: 0 }}>
               {result.status === "approved" ? "✅ Approved"
