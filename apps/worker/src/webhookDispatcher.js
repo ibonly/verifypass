@@ -17,8 +17,12 @@ const TIMEOUT_MS = 10000;
  *   retry:       {deliveryId}
  * @param {object} deps {db, fetchImpl, now}
  */
-async function sendWebhook(payload, { db, fetchImpl, now = () => new Date() } = {}) {
+async function sendWebhook(payload, { db, fetchImpl, now = () => new Date(), enqueueJob } = {}) {
   const doFetch = fetchImpl || fetch;
+  // Retry scheduling goes through the injected dispatch in Lambda/SQS
+  // topologies; the polling worker keeps using job_queue rows.
+  const dispatch = enqueueJob || ((type, jobPayload, { runAfter = now(), maxAttempts = 1 } = {}) =>
+    db.jobQueue.create({ data: { type, payload: jobPayload, status: "pending", runAfter, maxAttempts } }));
 
   let delivery;
   if (payload.deliveryId) {
@@ -75,15 +79,8 @@ async function sendWebhook(payload, { db, fetchImpl, now = () => new Date() } = 
     }
   });
   if (!exhausted) {
-    await db.jobQueue.create({
-      data: {
-        type: "send_webhook",
-        payload: { deliveryId: delivery.id },
-        status: "pending",
-        runAfter: nextAt,
-        maxAttempts: 1 // scheduling is managed here, not by generic job retry
-      }
-    });
+    // scheduling is managed here, not by generic job retry
+    await dispatch("send_webhook", { deliveryId: delivery.id }, { runAfter: nextAt, maxAttempts: 1 });
   }
   return { delivered: false, attempts, exhausted };
 }

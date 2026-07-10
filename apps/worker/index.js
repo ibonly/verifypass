@@ -92,7 +92,7 @@ const HANDLERS = {
     if (timedOut) console.log(`expire_sessions: ${timedOut} stuck submitted session(s) → SESSION_TIMEOUT`);
   },
   retention_cleanup: async () => {
-    const fs = require("fs/promises");
+    const { storage } = require("@verifypass/shared");
     const db = getDb();
     // Phase 1: cap retention for evidence of dead sessions per tenant policy
     const { capFailedSessionRetention } = require("./src/retention");
@@ -104,11 +104,7 @@ const HANDLERS = {
       take: 500
     });
     for (const file of expired) {
-      try {
-        await fs.unlink(file.storagePath);
-      } catch (err) {
-        if (err.code !== "ENOENT") throw err;
-      }
+      await storage.removeStored(file.storagePath); // fs or s3://, idempotent
       await db.evidenceFile.delete({ where: { id: file.id } });
     }
     if (expired.length) console.log(`retention_cleanup: removed ${expired.length} files`);
@@ -200,4 +196,4 @@ async function main() {
 
 if (require.main === module) main();
 
-module.exports = { claimJob, HANDLERS };
+module.exports = { claimJob, HANDLERS, createProviderForLambda: createProvider };

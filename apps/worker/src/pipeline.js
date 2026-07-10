@@ -4,8 +4,7 @@
 // Dependencies are injected so the whole pipeline is testable without
 // Prisma or a live Faceplugin container.
 
-const fs = require("fs/promises");
-const { decide, resolveThresholds, decryptBuffer, resolveEvidenceKey, verifyLivenessChallenge } = require("@verifypass/shared");
+const { decide, resolveThresholds, decryptBuffer, resolveEvidenceKey, verifyLivenessChallenge, storage } = require("@verifypass/shared");
 const { computeRiskSignals } = require("./riskSignals");
 
 // Stamped into every rawResult + logged at worker startup. When a decision
@@ -25,7 +24,16 @@ function defaultEvidenceKey(config) {
  * @param {object} payload {sessionUid}
  * @param {object} deps {db, provider, evidenceKey}
  */
-async function runVerification(payload, { db, provider, evidenceKey, env, modelVersion = null }) {
+/** Default job dispatch: a row in job_queue (polling-worker topology). The
+ *  Lambda entry injects an SQS-backed dispatcher instead — follow-up jobs
+ *  (webhooks) must reach whatever queue actually has a consumer. */
+function dbEnqueue(db) {
+  return (type, jobPayload, { runAfter = new Date(), maxAttempts = 5 } = {}) =>
+    db.jobQueue.create({ data: { type, payload: jobPayload, status: "pending", runAfter, maxAttempts } });
+}
+
+async function runVerification(payload, { db, provider, evidenceKey, env, modelVersion = null, enqueueJob }) {
+  const dispatch = enqueueJob || dbEnqueue(db);
   const { sessionUid } = payload;
   const session = await db.verificationSession.findFirst({ where: { sessionUid } });
   if (!session) throw new Error(`run_verification: session ${sessionUid} not found`);
@@ -40,7 +48,8 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
   const livenessFrames = evidence.filter((e) => e.fileType === "liveness_frame");
 
   async function loadDecrypted(file) {
-    const raw = await fs.readFile(file.storagePath);
+    // storage-backend aware: local fs path or s3:// URI (Lambda/split deploys)
+    const raw = await storage.readStored(file.storagePath);
     return decryptBuffer(raw, evidenceKey);
   }
 
@@ -50,6 +59,7 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
   const needsId = session.verificationType !== "FACE_ONLY";
   if ((needsSelfie && !selfie) || (needsId && !idFront)) {
     await finalize(db, session, {
+      dispatch,
       decision: { status: "failed", riskLevel: "high", reasonCodes: ["MISSING_CAPTURES"] },
       // Record WHICH capture was missing — "MISSING_CAPTURES" alone told a
       // reviewer nothing when the evidence gallery clearly showed a photo.
@@ -200,11 +210,12 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
     }
   };
 
-  await finalize(db, session, { decision, resultRow });
+  await finalize(db, session, { decision, resultRow, dispatch });
   return { status: decision.status, reasonCodes: decision.reasonCodes };
 }
 
-async function finalize(db, session, { decision, resultRow }) {
+async function finalize(db, session, { decision, resultRow, dispatch }) {
+  const send = dispatch || dbEnqueue(db);
   await db.verificationResult.create({ data: { sessionId: session.id, ...resultRow } });
   await db.verificationSession.updateMany({
     where: { id: session.id },
@@ -227,19 +238,12 @@ async function finalize(db, session, { decision, resultRow }) {
         ["REPEATED_FAILED_ATTEMPTS", "DEVICE_SHARED_ACROSS_IDENTITIES", "IP_VELOCITY_EXCEEDED"].includes(c))
     }
   });
-  // M4 webhook dispatcher consumes this
-  await db.jobQueue.create({
-    data: {
-      type: "send_webhook",
-      payload: {
-        tenantId: String(session.tenantId),
-        sessionUid: session.sessionUid,
-        event: `verification.${decision.status}`
-      },
-      status: "pending",
-      runAfter: new Date(),
-      maxAttempts: 5
-    }
+  // M4 webhook dispatcher consumes this (via the injected dispatch in
+  // Lambda/SQS topologies, or the job_queue table for the polling worker)
+  await send("send_webhook", {
+    tenantId: String(session.tenantId),
+    sessionUid: session.sessionUid,
+    event: `verification.${decision.status}`
   });
 }
 

@@ -10,7 +10,7 @@ const crypto = require("crypto");
 const fs = require("fs/promises");
 const path = require("path");
 const config = require("../config");
-const { encryptBuffer, decryptBuffer, resolveEvidenceKey } = require("@verifypass/shared");
+const { encryptBuffer, decryptBuffer, resolveEvidenceKey, storage } = require("@verifypass/shared");
 
 const SIGNED_URL_TTL_SECONDS = 15 * 60;
 
@@ -27,13 +27,20 @@ function resolveKey(explicitKey) {
  * @returns {{storagePath: string, checksum: string, retentionExpiresAt: Date}}
  */
 async function saveEvidence({ tenantUid, sessionUid, fileType, buffer, retentionDays = 30, baseDir, key }) {
-  const dir = path.join(baseDir || config.evidenceDir, tenantUid, sessionUid);
-  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-
   const checksum = crypto.createHash("sha256").update(buffer).digest("hex");
   const fileName = `${fileType}_${Date.now()}_${crypto.randomBytes(4).toString("hex")}.enc`;
-  const storagePath = path.join(dir, fileName);
-  await fs.writeFile(storagePath, encryptBuffer(buffer, resolveKey(key)), { mode: 0o600 });
+  const encrypted = encryptBuffer(buffer, resolveKey(key));
+
+  // Backend-agnostic persistence: encryption ALWAYS happens here, before the
+  // ciphertext reaches any backend. Local mode keeps the original on-disk
+  // layout; s3 mode stores under the same tenant/session key structure.
+  let localPath = null;
+  if (storage.storageBackend() !== "s3") {
+    const dir = path.join(baseDir || config.evidenceDir, tenantUid, sessionUid);
+    await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+    localPath = path.join(dir, fileName);
+  }
+  const storagePath = await storage.writeStored(`${tenantUid}/${sessionUid}/${fileName}`, encrypted, { localPath });
 
   const retentionExpiresAt = new Date(Date.now() + retentionDays * 24 * 60 * 60 * 1000);
   return { storagePath, checksum, retentionExpiresAt };
@@ -41,19 +48,13 @@ async function saveEvidence({ tenantUid, sessionUid, fileType, buffer, retention
 
 /** Read and decrypt an evidence file. Throws on tampering (GCM auth failure). */
 async function readEvidence(storagePath, { key } = {}) {
-  const raw = await fs.readFile(storagePath);
+  const raw = await storage.readStored(storagePath);
   return decryptBuffer(raw, resolveKey(key));
 }
 
 /** Delete evidence (retention job / §12.8 biometric deletion). */
 async function deleteEvidence(storagePath) {
-  try {
-    await fs.unlink(storagePath);
-    return true;
-  } catch (err) {
-    if (err.code === "ENOENT") return false;
-    throw err;
-  }
+  return storage.removeStored(storagePath);
 }
 
 /** HMAC-signed, expiring access token for one evidence file id. */

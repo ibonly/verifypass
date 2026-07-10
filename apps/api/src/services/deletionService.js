@@ -1,7 +1,6 @@
 "use strict";
 
-const fs = require("fs/promises");
-const { AppError } = require("@verifypass/shared");
+const { AppError, storage } = require("@verifypass/shared");
 const { getDb } = require("../lib/db");
 
 /**
@@ -18,11 +17,7 @@ async function deleteBiometricData(scopedDb, customerReference) {
   for (const session of sessions) {
     const files = await db.evidenceFile.findMany({ where: { sessionId: session.id } });
     for (const file of files) {
-      try {
-        await fs.unlink(file.storagePath);
-      } catch (err) {
-        if (err.code !== "ENOENT") throw err;
-      }
+      await storage.removeStored(file.storagePath); // fs or s3://, idempotent
       await db.evidenceFile.delete({ where: { id: file.id } });
       filesDeleted++;
     }

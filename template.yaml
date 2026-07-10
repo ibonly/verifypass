@@ -1,0 +1,133 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  VerifyPass — serverless deployment (API + verification worker on Lambda).
+  Queue backend: db (job_queue table stays the source of truth). The API
+  async-invokes the worker after each enqueue ("kick"); EventBridge drains
+  every minute as the guarantee and runs the maintenance crons.
+
+Parameters:
+  DatabaseUrl:
+    Type: String
+    NoEcho: true
+    Description: mysql://user:pass@host:3306/verifypass (TLS strongly advised)
+  ApiPublicUrl:
+    Type: String
+    Description: Public https origin of the API (embedded in SDK tokens). Set to the Function URL or your custom domain.
+  SdkTokenSecret:
+    Type: String
+    NoEcho: true
+  AuthTokenSecret:
+    Type: String
+    NoEcho: true
+  EvidenceEncryptionKey:
+    Type: String
+    NoEcho: true
+    Description: 64 hex chars (AES-256 key for evidence at rest)
+  HostedBaseUrl:
+    Type: String
+    Default: https://verify.verifypass.com
+  ProviderModelVersion:
+    Type: String
+    Default: onnx-2026-07
+    Description: Version label for the deployed biometric models (scores are only comparable within one version)
+
+Globals:
+  Function:
+    Architectures: [x86_64]
+    Environment:
+      Variables:
+        NODE_ENV: production
+        QUEUE_BACKEND: db
+        RATE_LIMIT_BACKEND: db
+        EVIDENCE_BACKEND: s3
+        S3_BUCKET: !Ref EvidenceBucket
+        S3_REGION: !Ref AWS::Region
+        DATABASE_URL: !Ref DatabaseUrl
+        SDK_TOKEN_SECRET: !Ref SdkTokenSecret
+        EVIDENCE_ENCRYPTION_KEY: !Ref EvidenceEncryptionKey
+
+Resources:
+  # Encrypted evidence objects. The app encrypts (AES-256-GCM) BEFORE upload;
+  # bucket-level SSE + private access are defense in depth.
+  EvidenceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  WorkerFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      Dockerfile: apps/worker/Dockerfile.lambda
+      DockerContext: .
+      DockerTag: worker
+    Properties:
+      PackageType: Image
+      MemorySize: 3008        # Lambda CPU scales with memory — ONNX needs it
+      Timeout: 120
+      Environment:
+        Variables:
+          VP_PROVIDER: onnx
+          PROVIDER_MODEL_VERSION: !Ref ProviderModelVersion
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref EvidenceBucket
+      Events:
+        DrainSchedule:        # baseline queue latency guarantee (~60s worst case)
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 minute)
+            Input: '{"type":"drain"}'
+        ExpireSchedule:       # session expiry + stuck-submitted watchdog
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+            Input: '{"type":"expire_sessions"}'
+        RetentionSchedule:    # evidence retention + rate-limit window sweep
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 hour)
+            Input: '{"type":"retention_cleanup"}'
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      Dockerfile: apps/api/Dockerfile.lambda
+      DockerContext: .
+      DockerTag: api
+    Properties:
+      PackageType: Image
+      MemorySize: 1024
+      Timeout: 30
+      FunctionUrlConfig:
+        AuthType: NONE        # app-level auth (API keys / SDK tokens / JWT)
+      Environment:
+        Variables:
+          API_PUBLIC_URL: !Ref ApiPublicUrl
+          AUTH_TOKEN_SECRET: !Ref AuthTokenSecret
+          HOSTED_BASE_URL: !Ref HostedBaseUrl
+          WORKER_LAMBDA_ARN: !GetAtt WorkerFunction.Arn
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref EvidenceBucket
+        - LambdaInvokePolicy:
+            FunctionName: !Ref WorkerFunction
+
+Outputs:
+  ApiUrl:
+    Description: API Function URL — point API_PUBLIC_URL/custom domain here. NOTE Lambda's ~6MB request cap → ~4MB max binary image via base64 uploads.
+    Value: !GetAtt ApiFunctionUrl.FunctionUrl
+  EvidenceBucketName:
+    Value: !Ref EvidenceBucket
+  WorkerFunctionArn:
+    Value: !GetAtt WorkerFunction.Arn

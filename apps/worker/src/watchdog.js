@@ -47,7 +47,9 @@ async function reclaimStaleJobs(db, { staleMs = STALE_LOCK_MS, now = new Date() 
   return { requeued, failed };
 }
 
-async function failStuckSubmitted(db, { staleMinutes = 30, now = new Date() } = {}) {
+async function failStuckSubmitted(db, { staleMinutes = 30, now = new Date(), enqueueJob } = {}) {
+  const dispatch = enqueueJob || ((type, jobPayload, opts = {}) =>
+    db.jobQueue.create({ data: { type, payload: jobPayload, status: "pending", runAfter: opts.runAfter || now, maxAttempts: opts.maxAttempts || 5 } }));
   const cutoff = new Date(now.getTime() - staleMinutes * 60 * 1000);
   const stuck = await db.verificationSession.findMany({
     where: { status: "submitted", updatedAt: { lt: cutoff } },
@@ -90,14 +92,8 @@ async function failStuckSubmitted(db, { staleMinutes = 30, now = new Date() } = 
         riskEvent: false
       }
     });
-    await db.jobQueue.create({
-      data: {
-        type: "send_webhook",
-        payload: { tenantId: String(s.tenantId), sessionUid: s.sessionUid, event: "verification.failed" },
-        status: "pending",
-        runAfter: now,
-        maxAttempts: 5
-      }
+    await dispatch("send_webhook", {
+      tenantId: String(s.tenantId), sessionUid: s.sessionUid, event: "verification.failed"
     });
     failed++;
   }

@@ -1,0 +1,23 @@
+# Lambda container image for the VerifyPass API.
+# Build from the REPO ROOT: docker build -f apps/api/Dockerfile.lambda -t verifypass-api .
+
+FROM public.ecr.aws/lambda/nodejs:20
+
+COPY package.json package-lock.json ${LAMBDA_TASK_ROOT}/
+COPY packages/shared ${LAMBDA_TASK_ROOT}/packages/shared
+COPY apps/api ${LAMBDA_TASK_ROOT}/apps/api
+
+# Install production deps (sharp resolves its linux-x64 binary in this image,
+# not on your Mac), plus the Lambda-topology optionals.
+RUN cd ${LAMBDA_TASK_ROOT} && \
+    npm install --omit=dev --workspaces --include-workspace-root=false \
+      --workspace=apps/api --workspace=packages/shared && \
+    npm install --no-save serverless-http @aws-sdk/client-s3 @aws-sdk/client-lambda && \
+    npx prisma generate --schema apps/api/prisma/schema.prisma
+
+# Runtime env (set on the function): DATABASE_URL, API_PUBLIC_URL (https),
+# SDK_TOKEN_SECRET, AUTH_TOKEN_SECRET, EVIDENCE_ENCRYPTION_KEY,
+# EVIDENCE_BACKEND=s3 + S3_BUCKET/S3_REGION, QUEUE_BACKEND=db,
+# WORKER_LAMBDA_ARN (drain kick), RATE_LIMIT_BACKEND=db, NODE_ENV=production
+
+CMD ["apps/api/lambda.handler"]

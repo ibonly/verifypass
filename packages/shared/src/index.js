@@ -6,5 +6,6 @@ module.exports = {
   ...require("./decisionEngine"),
   ...require("./evidenceCrypto"),
   ...require("./webhookSigner"),
-  ...require("./livenessChallenge")
+  ...require("./livenessChallenge"),
+  storage: require("./storage")
 };
