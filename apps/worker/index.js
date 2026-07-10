@@ -65,7 +65,9 @@ function getDeps() {
       evidenceKey: defaultEvidenceKey(config),
       // development disables the device-sharing risk signal (dev machines
       // legitimately create many throwaway identities)
-      env: config.env
+      env: config.env,
+      // recorded with every result — scores across model versions are not comparable
+      modelVersion: config.modelVersion
     };
     console.log(`verification provider: ${deps.provider.name} · ID OCR: ${deps.provider.ocrEngine}`);
   }

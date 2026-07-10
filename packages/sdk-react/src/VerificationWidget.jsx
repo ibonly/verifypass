@@ -33,6 +33,49 @@ const STEP_COPY = {
 // displayAspect must equal frameW/frameH of the document preview (340/212).
 const DOC_GUIDE = { displayAspect: 340 / 212, widthFrac: 0.88, regionAspect: 1.586 };
 
+// Directional arrow overlay per head action. Shown over the (mirrored)
+// preview while the user performs the movement. Mirror math: a selfie
+// preview behaves like a MIRROR — lateral movement keeps its screen
+// direction (turn your head left → your image turns toward screen-left) —
+// so a screen-left arrow correctly means "YOUR left"; no flipping needed.
+// rotate: degrees applied to a right-pointing arrow. pos: placement inside
+// the circular frame. Expression actions (smile) have no direction.
+const ACTION_ARROWS = {
+  turn_left: { rotate: 180, pos: { left: 6, top: "50%", transform: "translateY(-50%)" }, label: "Turn left" },
+  turn_right: { rotate: 0, pos: { right: 6, top: "50%", transform: "translateY(-50%)" }, label: "Turn right" },
+  look_up: { rotate: -90, pos: { top: 6, left: "50%", transform: "translateX(-50%)" }, label: "Look up" },
+  look_down: { rotate: 90, pos: { bottom: 6, left: "50%", transform: "translateX(-50%)" }, label: "Look down" }
+};
+
+/** Pulsing directional arrow rendered over the camera preview. */
+function ActionArrow({ action }) {
+  const spec = ACTION_ARROWS[action];
+  if (!spec) return null;
+  return (
+    <div
+      role="img"
+      aria-label={spec.label}
+      style={{ position: "absolute", zIndex: 2, pointerEvents: "none", ...spec.pos }}
+    >
+      <div style={{ transform: `rotate(${spec.rotate}deg)` }}>
+        {/* right-pointing arrow; rotation + the nudge animation (translateX
+            AFTER rotation) make it point and pulse toward the direction */}
+        <svg width="52" height="52" viewBox="0 0 52 52" style={{ animation: "vp-arrow-nudge 0.9s ease-in-out infinite", display: "block", filter: "drop-shadow(0 1px 4px rgba(0,0,0,0.6))" }}>
+          <path
+            d="M6 26 H34 M24 12 L40 26 L24 40"
+            fill="none"
+            stroke="#FFFFFF"
+            strokeWidth="7"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </div>
+      <style>{"@keyframes vp-arrow-nudge { 0%,100% { transform: translateX(0) } 50% { transform: translateX(10px) } }"}</style>
+    </div>
+  );
+}
+
 // Prompts for each server-issued challenge action.
 const ACTION_COPY = {
   blink: "Blink your eyes",
@@ -259,10 +302,17 @@ export function VerificationWidget({
       const { imageData, base64 } = step === "document"
         ? captureGuideFrame(videoRef.current, DOC_GUIDE)
         : captureFrame(videoRef.current);
-      // During liveness actions the head is MOVING — motion blur is expected
-      // and desired evidence. Gating those frames on sharpness silently dropped
-      // them (→ LIVENESS_CHALLENGE_INCOMPLETE). Server verifies authoritatively.
-      const quality = assessFrame(imageData, step === "liveness" ? { minSharpness: 0 } : undefined);
+      // Sharpness gating is per-step:
+      //   liveness — skipped: the head is MOVING, motion blur is evidence.
+      //   face     — skipped WHEN the detector is active: the detect loop
+      //              already enforces Laplacian focus on the FACE CROP before
+      //              the ring goes green. Re-measuring the FULL frame here
+      //              graded the background (a sharp face against a smooth
+      //              wall scores "blurry" forever → capture never fired).
+      //   document — full-frame gate kept (the card should fill the crop).
+      // Brightness is always checked. The server judges authoritatively.
+      const skipSharpness = step === "liveness" || (step === "face" && !!detectorRef.current);
+      const quality = assessFrame(imageData, skipSharpness ? { minSharpness: 0 } : undefined);
       if (!quality.ok) {
         setFeedback(quality.issues.map((i) => ISSUE_COPY[i] || i).join(" "));
         return;
@@ -462,7 +512,7 @@ export function VerificationWidget({
     setDocFaceBlocked(false);
     const HOLD_MS = 550;
     const SETTLE_DELTA = 3;
-    const DETECT_MS = 140;
+    const DETECT_MS = 110; // faster sampling → triggers fire ~1 frame sooner
     // Liveness three-phase capture:
     //   align     — lock a frontal face (baseline box recorded)
     //   await     — instruction shown; WAIT until the face-box dynamics (or a
@@ -470,14 +520,14 @@ export function VerificationWidget({
     //               being performed. No timer-based capture: nothing uploads
     //               until the user moves.
     //   capturing — short burst (3 frames over ~700ms) at the action's peak.
-    const ALIGN_LOCK_MS = 500;
+    const ALIGN_LOCK_MS = 350;
     // Burst timing: FIRST frame fires AT the trigger, while the turning face
     // is still detectable by the server's frontal-biased detector — every
     // action needs at least one face-bearing frame or it's INCOMPLETE. Later
     // frames catch the pose peak for the (calibration/pose) evidence.
-    const BURST_AT = [0, 450, 900]; // offsets from the trigger moment
-    const BURST_TOTAL = 1100;       // progress bar duration
-    const AWAIT_HINT_MS = 5000;     // no movement detected → coach the user
+    const BURST_AT = [0, 350, 700]; // offsets from the trigger moment
+    const BURST_TOTAL = 800;        // progress bar duration
+    const AWAIT_HINT_MS = 3500;     // no movement detected → coach the user
     const AWAIT_FACE_LOST_MS = 4000; // face gone this long → back to align
     // Document step: if something is present, lit and face-clear this long but
     // the strict card-shape gate hasn't passed (hand/forearm in the mask,
@@ -671,12 +721,17 @@ export function VerificationWidget({
             // blink/smile are momentary, so their shots follow the schedule.
             setGreen(true);
             const holdRequired = currentAction !== "blink" && currentAction !== "smile";
-            const canShoot = !holdRequired || actionState.holding;
+            // Hold is required only for the FIRST shot (fired AT the trigger,
+            // inherently mid-action). Demanding it for later shots stalled the
+            // whole burst whenever the user snapped back to frontal quickly —
+            // the early faced-frame + trigger frame already carry the action
+            // evidence, and the server tolerates mid-return frames.
+            const canShoot = shots > 0 || !holdRequired || actionState.holding;
             if (shots < BURST_AT.length && now - triggerAt >= BURST_AT[shots] && !capturingRef.current && facePresent && canShoot) {
               const isLast = shots === BURST_AT.length - 1;
               shots++;
               captureRef.current({ livenessAdvance: isLast });
-            } else if (!capturingRef.current && now - triggerAt > BURST_TOTAL + 2500) {
+            } else if (!capturingRef.current && now - triggerAt > BURST_TOTAL + 1500) {
               // Burst stalled (pose released mid-burst, or an upload was
               // rejected by the quality gate) — return to await with a FRESH
               // detector so the user redoes the movement; a stale latched
@@ -891,6 +946,9 @@ export function VerificationWidget({
                   }}
                 />
               )}
+              {/* directional cue for head actions — visible from the moment
+                  the instruction shows until the burst completes */}
+              {isLiveness && performing && <ActionArrow action={livenessAction} />}
             </div>
           </div>
 

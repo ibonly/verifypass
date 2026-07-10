@@ -25,7 +25,7 @@ function defaultEvidenceKey(config) {
  * @param {object} payload {sessionUid}
  * @param {object} deps {db, provider, evidenceKey}
  */
-async function runVerification(payload, { db, provider, evidenceKey, env }) {
+async function runVerification(payload, { db, provider, evidenceKey, env, modelVersion = null }) {
   const { sessionUid } = payload;
   const session = await db.verificationSession.findFirst({ where: { sessionUid } });
   if (!session) throw new Error(`run_verification: session ${sessionUid} not found`);
@@ -174,6 +174,9 @@ async function runVerification(payload, { db, provider, evidenceKey, env }) {
     rawResult: {
       pipelineVersion: PIPELINE_VERSION,
       provider: provider.name,
+      // Scores are only comparable within one model version — calibration
+      // and analytics MUST group by this before aggregating similarity scores.
+      modelVersion,
       thresholds,
       liveness: liveness ? { score: liveness.score, faceCount: liveness.faceCount, occluded: liveness.occluded } : null,
       livenessChallenge: hasChallenge

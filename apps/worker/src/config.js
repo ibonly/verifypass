@@ -27,6 +27,11 @@ module.exports = {
   //   "onnx"       — server-side ONNX models (onnxruntime-node), no license/Docker
   //   "faceplugin" — Faceplugin on-prem Docker services (licensed)
   provider: (process.env.VP_PROVIDER || "onnx").toLowerCase(),
+  // Version label for the deployed biometric models (container tag, model
+  // file hash — whatever identifies the exact models). Recorded with every
+  // result: scores from DIFFERENT model versions are NOT comparable, and
+  // face-match thresholds must be recalibrated on every model upgrade.
+  modelVersion: process.env.PROVIDER_MODEL_VERSION || null,
   onnx: {
     modelsDir: process.env.ONNX_MODELS_DIR || null, // defaults to apps/worker/models
     matchThreshold: Number(process.env.ONNX_MATCH_THRESHOLD || 0.6)

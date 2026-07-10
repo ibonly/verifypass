@@ -18,18 +18,23 @@
 // (jitter can't fire it), and turns/tilts report `holding` so the burst only
 // captures while the pose is actually held.
 
+// Tuned for LATENCY (2026-07-09): thresholds sit just above the false-trigger
+// cases the tests pin (jitter dx≈4%, lean-back, body slide) so real movements
+// trigger one or two detection frames sooner. Safe to be this permissive now:
+// the server verifier is tolerant of early/mid-action frames (faced-frame
+// early shot, magnitude pose, selfie-strong floor disarm).
 const GEO = Object.freeze({
-  turnShift: 0.08,      // |Δcx| / baseline width (lateral signature)
+  turnShift: 0.06,      // |Δcx| / baseline width (lateral signature)
   turnDominance: 1.2,   // horizontal shift must dominate vertical
   turnMaxWidth: 0.97,   // lateral signature also needs SOME narrowing —
                         //   a pure sideways body slide keeps full width
-  turnNarrowWidth: 0.88, // narrowing signature: width ≤88% of baseline...
-  turnAspectGap: 0.06,   // ...while height stays ≥6pts fuller (lean shrinks both)
-  tiltShift: 0.12,      // |Δcy| / baseline height
-  tiltDominance: 1.4,   // vertical shift must dominate horizontal
+  turnNarrowWidth: 0.91, // narrowing signature: width ≤91% of baseline...
+  turnAspectGap: 0.05,   // ...while height stays fuller (lean shrinks both)
+  tiltShift: 0.09,      // |Δcy| / baseline height
+  tiltDominance: 1.25,  // vertical shift must dominate horizontal
   bandFloor: 4,         // mean |Δgray| a band must reach (0..255 scale)
   bandDominance: 1.5,   // target band must beat the other band by this factor
-  missMinShift: 0.05,   // pre-disappearance shift for the "turned out of
+  missMinShift: 0.04,   // pre-disappearance shift for the "turned out of
                         //   detection range" clause
   missMaxStreak: 4      // how many missed detections still count as mid-turn
 });
