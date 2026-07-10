@@ -5,7 +5,7 @@
 > **QUEUE_BACKEND=db** — the `job_queue` table stays the source of truth,
 > preserving the retry semantics, dashboards and tooling you already have.
 >
-> - **API**: Express wrapped by serverless-http (`apps/api/lambda.js`),
+> - **API**: Express wrapped by serverless-http (`backend/api.lambda.js`),
 >   exposed via a Lambda Function URL. ⚠️ Lambda caps request bodies at
 >   ~6MB → effective binary image cap ≈ 4MB via base64 uploads (camera
 >   captures are ~0.1–1MB; only large manual file uploads are affected).
@@ -64,7 +64,7 @@ Browser SDK ──► API (anywhere: VPS/cPanel/Fargate)
 4. **Build + push the image** (from repo root, on x86_64 or with buildx):
    ```bash
    npm run models:fetch
-   docker build -f apps/worker/Dockerfile.lambda -t verifypass-worker .
+   docker build -f backend/Dockerfile.worker -t verifypass-worker .
    docker tag verifypass-worker:latest <acct>.dkr.ecr.<region>.amazonaws.com/verifypass-worker:latest
    docker push <acct>.dkr.ecr.<region>.amazonaws.com/verifypass-worker:latest
    ```

@@ -3,20 +3,20 @@
 ## API (`api.` subdomain)
 
 1. cPanel → **Setup Node.js App** (Application Manager / Passenger):
-   - Application root: `verifypass/apps/api`
+   - Application root: `verifypass/backend`
    - Application startup file: `app.js` (exports the Express app — do not use `server.js`; Passenger binds the port)
    - Node version: 18+
-2. Deploy the full GitHub repository, not only `apps/api`; workspace packages resolve from the repo root.
+2. Deploy the full GitHub repository, not only `backend`; workspace packages resolve from the repo root.
 3. From the cPanel terminal, run dependency and Prisma commands at the repo root:
    ```bash
    cd ~/verifypass
    npm ci --omit=dev
-   npm run prisma:generate -w apps/api
-   npx prisma migrate deploy --schema apps/api/prisma/schema.prisma
+   npm run prisma:generate -w backend
+   npx prisma migrate deploy --schema backend/prisma/schema.prisma
    ```
    Use plain `npm ci` instead of `--omit=dev` if the same cPanel account also builds dashboard, verify-page, or SDK assets.
 4. Set env vars in the Node.js App UI (see `.env.example`). `EVIDENCE_DIR` must point outside `public_html`; production will refuse weak/missing token secrets and invalid evidence keys.
-5. Seed first tenant: `cd ~/verifypass/apps/api && node scripts/seedTenant.js "Company Name"`.
+5. Seed first tenant: `cd ~/verifypass/backend && node scripts/seedTenant.js "Company Name"`.
 
 ## GitHub Actions CI
 
@@ -29,20 +29,20 @@ Build static assets before uploading to their cPanel subdomain document roots:
 ```bash
 cd ~/verifypass
 npm ci
-npm run build -w apps/dashboard
-npm run build -w apps/verify-page
+npm run build -w frontend/dashboard
+npm run build -w frontend/verify-page
 npm run build -w packages/sdk-js
 ```
 
-Publish `apps/dashboard/dist` to `app.`, `apps/verify-page/dist` to `verify.`, and `packages/sdk-js/dist` to `sdk.`.
+Publish `frontend/dashboard/dist` to `app.`, `frontend/verify-page/dist` to `verify.`, and `packages/sdk-js/dist` to `sdk.`.
 
 ## Worker
 
-Run `apps/worker/index.js` as a long-lived process. On shared cPanel without
+Run `backend/index.js` as a long-lived process. On shared cPanel without
 daemon support, use a cron keep-alive:
 
 ```
-* * * * * cd ~/verifypass/apps/worker && flock -n /tmp/vp-worker.lock node index.js >> ~/logs/worker.log 2>&1
+* * * * * cd ~/verifypass/backend && flock -n /tmp/vp-worker.lock node index.js >> ~/logs/worker.log 2>&1
 ```
 
 When verification load grows (p95 > 15s or sustained CPU > 70%), move this

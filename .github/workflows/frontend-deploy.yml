@@ -1,0 +1,70 @@
+# Deploy the FRONTEND (dashboard + verify-page static builds) to cPanel.
+#
+# Path-filtered: only runs when frontend or SDK code changes — a backend
+# commit never redeploys the frontend, and vice versa.
+#
+# cPanel target: static dist/ folders uploaded over FTPS to the subdomain
+# document roots (see deploy/cpanel.md). Required repo secrets:
+#   CPANEL_FTP_SERVER      e.g. ftp.yourdomain.com
+#   CPANEL_FTP_USERNAME
+#   CPANEL_FTP_PASSWORD
+#   VP_API_BASE            https API origin baked into the builds
+# Optional: CPANEL_DASHBOARD_DIR (default public_html/app),
+#           CPANEL_VERIFY_DIR    (default public_html/verify)
+
+name: frontend-deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - "packages/sdk-core/**"
+      - "packages/sdk-react/**"
+      - ".github/workflows/frontend-deploy.yml"
+
+concurrency: frontend-deploy
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+
+      - run: npm ci
+
+      - name: Test the SDK packages the frontend ships
+        run: |
+          npm test -w packages/sdk-core
+          npm run lint --if-present
+
+      - name: Build dashboard + verify-page
+        env:
+          VP_API_BASE: ${{ secrets.VP_API_BASE }}
+        run: |
+          npm run build -w frontend/dashboard
+          npm run build -w frontend/verify-page
+
+      - name: Upload dashboard to cPanel (FTPS)
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.CPANEL_FTP_SERVER }}
+          username: ${{ secrets.CPANEL_FTP_USERNAME }}
+          password: ${{ secrets.CPANEL_FTP_PASSWORD }}
+          protocol: ftps
+          local-dir: frontend/dashboard/dist/
+          server-dir: ${{ vars.CPANEL_DASHBOARD_DIR || 'public_html/app/' }}
+
+      - name: Upload verify-page to cPanel (FTPS)
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.CPANEL_FTP_SERVER }}
+          username: ${{ secrets.CPANEL_FTP_USERNAME }}
+          password: ${{ secrets.CPANEL_FTP_PASSWORD }}
+          protocol: ftps
+          local-dir: frontend/verify-page/dist/
+          server-dir: ${{ vars.CPANEL_VERIFY_DIR || 'public_html/verify/' }}

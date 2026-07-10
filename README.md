@@ -7,15 +7,23 @@ See `IMPLEMENTATION_PLAN.md` (repo root's parent folder) for architecture decisi
 ## Layout
 
 ```
-apps/
-  api/          Express API (cPanel/Passenger-compatible)
-  worker/       Verification worker (polls job_queue, calls Faceplugin)
-  dashboard/    Tenant + super-admin dashboard (React/Vite)
-  verify-page/  Hosted verification flow (React/Vite)
-packages/
-  shared/       Error codes, reason codes, decision engine
-deploy/         cPanel + Faceplugin deployment notes
-scripts/        dev-stack, in-house setup, e2e smoke test
+backend/            ONE service: Express API + verification worker
+  api.lambda.js       API Lambda entry (serverless-http)
+  worker.lambda.js    Worker Lambda entry (drain/crons)
+  server.js           API server entry (VPS/cPanel/dev)
+  worker.js           Polling worker entry (VPS/cPanel/dev)
+  src/                API code; src/worker/ = pipeline, providers, watchdog
+frontend/           Deployed to cPanel as static builds
+  dashboard/          Tenant + super-admin dashboard (React/Vite)
+  verify-page/        Hosted verification flow (React/Vite)
+sample-app/         Integration demo app (cPanel)
+packages/           Independent libraries
+  shared/             Error codes, decision engine, storage, crypto
+  sdk-core/           Framework-agnostic SDK internals
+  sdk-react/          React widget          sdk-js/  CDN bundle
+template.yaml       SAM — backend on AWS Lambda
+deploy/             cPanel + Faceplugin deployment notes
+scripts/            dev-stack, in-house setup, e2e smoke test
 ```
 
 ## Run the real stack (MySQL + Faceplugin)
@@ -60,8 +68,8 @@ app still works).
 
 ```bash
 npm run dev                                                        # API :3000 + real worker + MySQL
-VP_API_BASE=http://localhost:3000 npm run dev -w apps/dashboard    # → :5173
-VP_API_BASE=http://localhost:3000 npm run dev -w apps/verify-page  # → :5174
+VP_API_BASE=http://localhost:3000 npm run dev -w frontend/dashboard    # → :5173
+VP_API_BASE=http://localhost:3000 npm run dev -w frontend/verify-page  # → :5174
 ```
 
 `npm run dev` ensures a demo tenant + admin/reviewer users + API keys exist
@@ -92,7 +100,7 @@ Camera access needs a secure context — `localhost` qualifies.
 ### Adding a tenant (per internal product)
 
 ```bash
-node apps/api/scripts/seedTenant.js "Product Name"   # prints its public/secret keys once
+node backend/scripts/seedTenant.js "Product Name"   # prints its public/secret keys once
 ```
 
 ## Production (cPanel)

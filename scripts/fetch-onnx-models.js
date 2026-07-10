@@ -1,6 +1,6 @@
 "use strict";
 
-// Fetch the MIT-licensed Faceplugin ONNX models into apps/worker/models/.
+// Fetch the MIT-licensed Faceplugin ONNX models into backend/models/.
 // These power the server-side ONNX provider (no license/activation, no Docker).
 //
 //   node scripts/fetch-onnx-models.js
@@ -12,7 +12,7 @@ const path = require("path");
 const https = require("https");
 
 const BASE = "https://raw.githubusercontent.com/Faceplugin-ltd/FaceRecognition-LivenessDetection-Javascript/main/model";
-const OUT_DIR = path.resolve(__dirname, "../apps/worker/models");
+const OUT_DIR = path.resolve(__dirname, "../backend/models");
 
 // Required by the ONNX provider; eye/expression/age/gender are optional extras.
 const MODELS = [

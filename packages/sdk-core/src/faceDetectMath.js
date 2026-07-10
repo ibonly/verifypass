@@ -3,7 +3,7 @@
 // Browser-safe face-detection math (RetinaFace priorbox + decode + NMS),
 // ported from Faceplugin's fr_detect post-processing. Pure functions only —
 // no Node or DOM deps — so the same logic runs in the browser detector and is
-// unit-testable. Mirrors apps/worker/src/providers/onnxMath.js.
+// unit-testable. Mirrors backend/src/worker/providers/onnxMath.js.
 
 const DETECT_CONFIG = Object.freeze({
   inputSize: [320, 240], // [W, H]

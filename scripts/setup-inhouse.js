@@ -14,10 +14,10 @@ const path = require("path");
 
 require("dotenv").config({ path: path.resolve(__dirname, "../.env") });
 
-const { getDb } = require("../apps/api/src/lib/db");
-const { issueKey } = require("../apps/api/src/services/apiKeyService");
-const { createUser } = require("../apps/api/src/services/userService");
-const { uid } = require("../apps/api/src/lib/ids");
+const { getDb } = require("../backend/src/lib/db");
+const { issueKey } = require("../backend/src/services/apiKeyService");
+const { createUser } = require("../backend/src/services/userService");
+const { uid } = require("../backend/src/lib/ids");
 
 const CRED_FILE = path.resolve(__dirname, "../.dev-credentials.json");
 const DEMO_COMPANY = "In-House Demo Tenant";

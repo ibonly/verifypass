@@ -68,7 +68,7 @@ Resources:
   WorkerFunction:
     Type: AWS::Serverless::Function
     Metadata:
-      Dockerfile: apps/worker/Dockerfile.lambda
+      Dockerfile: backend/Dockerfile.worker
       DockerContext: .
       DockerTag: worker
     Properties:
@@ -102,7 +102,7 @@ Resources:
   ApiFunction:
     Type: AWS::Serverless::Function
     Metadata:
-      Dockerfile: apps/api/Dockerfile.lambda
+      Dockerfile: backend/Dockerfile.api
       DockerContext: .
       DockerTag: api
     Properties:

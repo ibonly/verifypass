@@ -16,8 +16,8 @@
 //      (Without them, verify jobs fail closed — everything else still works.)
 //
 // Then, in two more terminals (point the SPAs at this API):
-//   VP_API_BASE=http://localhost:3000 npm run dev -w apps/dashboard
-//   VP_API_BASE=http://localhost:3000 npm run dev -w apps/verify-page
+//   VP_API_BASE=http://localhost:3000 npm run dev -w frontend/dashboard
+//   VP_API_BASE=http://localhost:3000 npm run dev -w frontend/verify-page
 
 const path = require("path");
 const { spawn } = require("child_process");
@@ -27,7 +27,7 @@ require("dotenv").config({ path: path.resolve(__dirname, "../.env") });
 const PORT = Number(process.env.PORT || 3000);
 const REPO = path.resolve(__dirname, "..");
 
-const { getDb } = require("../apps/api/src/lib/db");
+const { getDb } = require("../backend/src/lib/db");
 const { setupInHouse } = require("./setup-inhouse");
 
 async function main() {
@@ -47,14 +47,14 @@ async function main() {
   const creds = await setupInHouse({ log: (m) => console.log(`[setup] ${m}`) });
 
   // Start the real verification worker as a child process.
-  const worker = spawn(process.execPath, [path.join(REPO, "apps/worker/index.js")], {
+  const worker = spawn(process.execPath, [path.join(REPO, "backend/worker.js")], {
     stdio: ["ignore", "inherit", "inherit"],
     env: process.env
   });
   worker.on("exit", (code) => console.log(`[worker] exited with code ${code}`));
 
   // Start the real API in this process.
-  const app = require("../apps/api/src/app");
+  const app = require("../backend/src/app");
   const server = app.listen(PORT, () => {
     const fp = process.env.FACEPLUGIN_LIVENESS_URL || "http://127.0.0.1:8888";
     const provider = (process.env.VP_PROVIDER || "onnx").toLowerCase();
@@ -75,8 +75,8 @@ async function main() {
  Reviewer user   ${creds.reviewerEmail} / ${creds.password}
 
  SPAs (two more terminals):
-   VP_API_BASE=http://localhost:${PORT} npm run dev -w apps/dashboard
-   VP_API_BASE=http://localhost:${PORT} npm run dev -w apps/verify-page
+   VP_API_BASE=http://localhost:${PORT} npm run dev -w frontend/dashboard
+   VP_API_BASE=http://localhost:${PORT} npm run dev -w frontend/verify-page
 
  Create a session:
    curl -s http://localhost:${PORT}/v1/verification-sessions \\

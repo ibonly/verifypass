@@ -64,4 +64,4 @@ Face compare returns `{ result: { similarity (0..1), status: "Same Person" |
 container returns `status: null` with `message: "Failed to extract feature on
 image1|image2"`; `image2` (the ID face) missing maps to `NO_FACE_ON_DOCUMENT`.
 If a licensed build changes these shapes, update
-`apps/worker/src/providers/faceplugin.js` (tests in `apps/worker/tests/faceplugin.test.js`).
+`backend/src/providers/faceplugin.js` (tests in `backend/tests/faceplugin.test.js`).

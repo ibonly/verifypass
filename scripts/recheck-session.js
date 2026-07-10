@@ -5,13 +5,13 @@
 // changes — without needing a fresh webcam capture.
 //   node scripts/recheck-session.js [sessionUid]
 
-require("../apps/api/src/env");
+require("../backend/src/env");
 
 const fs = require("fs/promises");
-const config = require("../apps/worker/src/config");
-const { getDb } = require("../apps/api/src/lib/db");
-const { createOnnxProvider } = require("../apps/worker/src/providers/onnx");
-const { defaultEvidenceKey } = require("../apps/worker/src/pipeline");
+const config = require("../backend/src/config");
+const { getDb } = require("../backend/src/lib/db");
+const { createOnnxProvider } = require("../backend/src/providers/onnx");
+const { defaultEvidenceKey } = require("../backend/src/worker/pipeline");
 const { decryptBuffer } = require("@verifypass/shared");
 
 async function main() {

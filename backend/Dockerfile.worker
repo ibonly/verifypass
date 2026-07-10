@@ -1,0 +1,23 @@
+# Lambda container image for the VerifyPass verification worker (backend service).
+# Build from the REPO ROOT (fetch models first: npm run models:fetch):
+#   docker build -f backend/Dockerfile.worker -t verifypass-worker .
+
+FROM public.ecr.aws/lambda/nodejs:20
+
+COPY package.json package-lock.json ${LAMBDA_TASK_ROOT}/
+COPY packages/shared ${LAMBDA_TASK_ROOT}/packages/shared
+COPY backend ${LAMBDA_TASK_ROOT}/backend
+
+# onnxruntime-node / sharp resolve their linux-x64 binaries in this image.
+RUN cd ${LAMBDA_TASK_ROOT} && \
+    npm install --omit=dev --workspaces --include-workspace-root=false \
+      --workspace=backend --workspace=packages/shared && \
+    npm install --no-save @aws-sdk/client-s3 @aws-sdk/client-sqs @aws-sdk/client-lambda tesseract.js && \
+    npx prisma generate --schema backend/prisma/schema.prisma
+
+# Runtime env: DATABASE_URL, EVIDENCE_BACKEND=s3, S3_BUCKET, S3_REGION,
+# QUEUE_BACKEND=db, EVIDENCE_ENCRYPTION_KEY, SDK_TOKEN_SECRET,
+# VP_PROVIDER=onnx, ONNX_MODELS_DIR (default backend/models),
+# PROVIDER_MODEL_VERSION, NODE_ENV=production
+
+CMD ["backend/worker.lambda.handler"]

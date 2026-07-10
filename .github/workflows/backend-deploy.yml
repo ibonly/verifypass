@@ -1,0 +1,98 @@
+# Deploy the BACKEND (one service: Lambda API + Lambda worker, db queue) to AWS with SAM.
+#
+# Trigger: manual (workflow_dispatch) — deliberate for a KYC product; switch
+# to `push: tags: ["v*"]` once you trust the pipeline.
+#
+# Auth: GitHub OIDC → an IAM role (no long-lived AWS keys in secrets).
+# Required repo secrets:
+#   AWS_DEPLOY_ROLE_ARN   IAM role trusting this repo via OIDC
+#   DATABASE_URL          mysql://... (TLS advised)
+#   API_PUBLIC_URL        https origin the SDK tokens embed
+#   SDK_TOKEN_SECRET, AUTH_TOKEN_SECRET, EVIDENCE_ENCRYPTION_KEY
+# Optional: AWS_REGION (default us-east-1), HOSTED_BASE_URL
+
+name: backend-deploy
+
+on:
+  workflow_dispatch:
+    # push-trigger is deliberate opt-in for a KYC product; uncomment when trusted:
+    # push:
+    #   branches: [main]
+    #   paths: ["backend/**", "packages/shared/**", "template.yaml", ".github/workflows/backend-deploy.yml"]
+    inputs:
+      stack_name:
+        description: CloudFormation stack name
+        default: verifypass
+        required: true
+
+permissions:
+  id-token: write   # OIDC federation
+  contents: read
+
+concurrency: deploy-aws   # never two deploys racing a shared stack
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm ci
+      - run: npm test --workspaces --if-present
+      - run: npm run lint --if-present
+
+  deploy:
+    needs: test   # never ship a red build
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+
+      - name: Fetch ONNX models (baked into the worker image)
+        run: |
+          npm ci
+          npm run models:fetch
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - uses: aws-actions/setup-sam@v2
+        with: { use-installer: true }
+
+      - name: SAM build (container images for both functions)
+        run: sam build --use-container=false
+
+      - name: SAM deploy
+        run: |
+          sam deploy \
+            --stack-name "${{ inputs.stack_name }}" \
+            --resolve-s3 \
+            --resolve-image-repos \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --capabilities CAPABILITY_IAM \
+            --parameter-overrides \
+              DatabaseUrl="${{ secrets.DATABASE_URL }}" \
+              ApiPublicUrl="${{ secrets.API_PUBLIC_URL }}" \
+              SdkTokenSecret="${{ secrets.SDK_TOKEN_SECRET }}" \
+              AuthTokenSecret="${{ secrets.AUTH_TOKEN_SECRET }}" \
+              EvidenceEncryptionKey="${{ secrets.EVIDENCE_ENCRYPTION_KEY }}" \
+              HostedBaseUrl="${{ secrets.HOSTED_BASE_URL || 'https://verify.verifypass.com' }}"
+
+      - name: Run database migrations
+        run: |
+          DATABASE_URL="${{ secrets.DATABASE_URL }}" \
+            npx prisma migrate deploy --schema backend/prisma/schema.prisma
+
+      - name: Smoke check
+        run: |
+          URL=$(aws cloudformation describe-stacks --stack-name "${{ inputs.stack_name }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text)
+          echo "API deployed at $URL"
+          curl -fsS "${URL%/}/health" && echo " — health OK"
