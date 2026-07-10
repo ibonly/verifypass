@@ -1,7 +1,7 @@
 "use strict";
 
 // In-house setup: ensures a demo tenant + admin/reviewer users + API keys exist
-// in the REAL MySQL database. Idempotent — safe to run repeatedly.
+// in the REAL MongoDB database. Idempotent — safe to run repeatedly.
 //
 //   node scripts/setup-inhouse.js
 //

@@ -86,8 +86,9 @@ async function sendWebhook(payload, { db, fetchImpl, now = () => new Date(), enq
 }
 
 async function createDelivery({ tenantId, sessionUid, event }, { db, now }) {
-  // tenantId arrives as string in job payloads; Prisma accepts number for BigInt ids
-  const tenant = await db.tenant.findFirst({ where: { id: Number(tenantId) } });
+  // tenantId travels through job payloads as a string — MongoDB ObjectId ids
+  // are strings end to end, no coercion needed.
+  const tenant = await db.tenant.findFirst({ where: { id: String(tenantId) } });
   if (!tenant?.webhookUrl || !tenant?.webhookSecret) return null;
 
   const session = await db.verificationSession.findFirst({ where: { sessionUid } });

@@ -18,11 +18,14 @@ function matches(row, where = {}) {
 }
 
 function makeTable(rows, name) {
+  // MongoDB-style ids: strings end to end (real DB issues ObjectId hex
+  // strings). Deterministic 24-hex-char strings keep tests reproducible and
+  // surface any code that still coerces ids to numbers.
   let autoId = 1;
   return {
     rows,
     create({ data }) {
-      const row = { id: autoId++, createdAt: new Date(), ...data };
+      const row = { id: (autoId++).toString(16).padStart(24, "0"), createdAt: new Date(), ...data };
       rows.push(row);
       return Promise.resolve(row);
     },

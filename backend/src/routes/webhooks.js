@@ -74,7 +74,7 @@ router.post("/:eventId/retry", async (req, res, next) => {
     if (!delivery) throw new AppError("NOT_FOUND", "Delivery not found");
     if (delivery.status === "delivered") throw new AppError("VALIDATION_ERROR", "Already delivered");
 
-    await enqueue("send_webhook", { deliveryId: Number(delivery.id) });
+    await enqueue("send_webhook", { deliveryId: String(delivery.id) });
     await audit({
       tenantId: req.tenant.id, actorType: "api", actorId: `key:${req.apiKey.prefix}`,
       action: "webhook.manual_retry", req, metadata: { eventId: req.params.eventId }

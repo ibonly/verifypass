@@ -1,21 +1,29 @@
-// VerifyPass MVP schema (PRD §11 + queue/webhook/user tables)
+// VerifyPass MVP schema (PRD §11 + queue/webhook/user tables) — MongoDB.
+//
+// MongoDB notes:
+//  - ids are ObjectId strings (@default(auto())); no autoincrement.
+//  - Prisma's MongoDB connector has no Decimal — scores are Float (they are
+//    0..1 confidence values; Float precision is more than sufficient).
+//  - No migrations on MongoDB: apply the schema with `prisma db push`
+//    (creates collections + indexes). Prisma requires the server to be a
+//    REPLICA SET (Atlas always is; local: mongod --replSet rs0).
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "mysql"
+  provider = "mongodb"
   url      = env("DATABASE_URL")
 }
 
 model Tenant {
-  id             BigInt    @id @default(autoincrement())
-  tenantUid      String    @unique @map("tenant_uid") @db.VarChar(64)
-  companyName    String    @map("company_name") @db.VarChar(255)
+  id             String    @id @default(auto()) @map("_id") @db.ObjectId
+  tenantUid      String    @unique @map("tenant_uid")
+  companyName    String    @map("company_name")
   status         TenantStatus @default(sandbox)
-  webhookUrl     String?   @map("webhook_url") @db.Text
-  webhookSecret  String?   @map("webhook_secret") @db.VarChar(128)
+  webhookUrl     String?   @map("webhook_url")
+  webhookSecret  String?   @map("webhook_secret")
   allowedDomains Json?     @map("allowed_domains")
   settings       Json?
   createdAt      DateTime  @default(now()) @map("created_at")
@@ -36,12 +44,12 @@ enum TenantStatus {
 }
 
 model ApiKey {
-  id        BigInt       @id @default(autoincrement())
-  tenantId  BigInt       @map("tenant_id")
+  id        String       @id @default(auto()) @map("_id") @db.ObjectId
+  tenantId  String       @map("tenant_id") @db.ObjectId
   keyType   ApiKeyType   @map("key_type")
   isLive    Boolean      @default(false) @map("is_live")
-  keyHash   String       @map("key_hash") @db.VarChar(255)
-  prefix    String       @db.VarChar(32)
+  keyHash   String       @map("key_hash")
+  prefix    String
   status    ApiKeyStatus @default(active)
   expiresAt DateTime?    @map("expires_at")
   createdAt DateTime     @default(now()) @map("created_at")
@@ -65,13 +73,13 @@ enum ApiKeyStatus {
 }
 
 model User {
-  id           BigInt   @id @default(autoincrement())
-  tenantId     BigInt?  @map("tenant_id") // null = platform super admin
-  email        String   @unique @db.VarChar(255)
-  passwordHash String   @map("password_hash") @db.VarChar(255)
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  tenantId     String?  @map("tenant_id") @db.ObjectId // null = platform super admin
+  email        String   @unique
+  passwordHash String   @map("password_hash")
   role         UserRole
-  mfaSecret    String?  @map("mfa_secret") @db.VarChar(128)
-  status       String   @default("active") @db.VarChar(32)
+  mfaSecret    String?  @map("mfa_secret")
+  status       String   @default("active")
   createdAt    DateTime @default(now()) @map("created_at")
 
   tenant Tenant? @relation(fields: [tenantId], references: [id])
@@ -89,19 +97,19 @@ enum UserRole {
 }
 
 model VerificationSession {
-  id                BigInt        @id @default(autoincrement())
-  sessionUid        String        @unique @map("session_uid") @db.VarChar(64)
-  tenantId          BigInt        @map("tenant_id")
-  customerReference String?       @map("customer_reference") @db.VarChar(128)
-  verificationType  String?       @map("verification_type") @db.VarChar(64)
+  id                String        @id @default(auto()) @map("_id") @db.ObjectId
+  sessionUid        String        @unique @map("session_uid")
+  tenantId          String        @map("tenant_id") @db.ObjectId
+  customerReference String?       @map("customer_reference")
+  verificationType  String?       @map("verification_type")
   documentTypes     Json?         @map("document_types")
-  callbackUrl       String?       @map("callback_url") @db.Text
+  callbackUrl       String?       @map("callback_url")
   metadata          Json?
-  sdkTokenHash      String?       @map("sdk_token_hash") @db.VarChar(255)
+  sdkTokenHash      String?       @map("sdk_token_hash")
   livenessChallenge Json?         @map("liveness_challenge")
-  deviceFingerprint String?       @map("device_fingerprint") @db.VarChar(64)
+  deviceFingerprint String?       @map("device_fingerprint")
   deviceMeta        Json?         @map("device_meta")
-  clientIp          String?       @map("client_ip") @db.VarChar(64)
+  clientIp          String?       @map("client_ip")
   // Biometric-processing consent (NDPA lawful basis; CBN-aligned CDD proof).
   // Set once by the SDK when the user accepts the consent screen.
   consentAt         DateTime?     @map("consent_at")
@@ -146,14 +154,14 @@ enum RiskLevel {
 }
 
 model VerificationResult {
-  id              BigInt    @id @default(autoincrement())
-  sessionId       BigInt    @map("session_id")
-  livenessScore   Decimal?  @map("liveness_score") @db.Decimal(5, 4)
+  id              String    @id @default(auto()) @map("_id") @db.ObjectId
+  sessionId       String    @map("session_id") @db.ObjectId
+  livenessScore   Float?    @map("liveness_score")
   livenessStatus  CheckStatus? @map("liveness_status")
-  faceMatchScore  Decimal?  @map("face_match_score") @db.Decimal(5, 4)
+  faceMatchScore  Float?    @map("face_match_score")
   faceMatchStatus MatchStatus? @map("face_match_status")
   documentStatus  DocStatus? @map("document_status")
-  ocrConfidence   Decimal?  @map("ocr_confidence") @db.Decimal(5, 4)
+  ocrConfidence   Float?    @map("ocr_confidence")
   extractedData   Json?     @map("extracted_data")
   rawResult       Json?     @map("raw_result")
   createdAt       DateTime  @default(now()) @map("created_at")
@@ -183,14 +191,14 @@ enum DocStatus {
 }
 
 model EvidenceFile {
-  id                 BigInt   @id @default(autoincrement())
-  sessionId          BigInt   @map("session_id")
+  id                 String   @id @default(auto()) @map("_id") @db.ObjectId
+  sessionId          String   @map("session_id") @db.ObjectId
   fileType           EvidenceType @map("file_type")
-  label              String?  @db.VarChar(64)
-  storagePath        String   @map("storage_path") @db.Text
-  checksum           String?  @db.VarChar(128)
-  cloudinaryUrl      String?  @map("cloudinary_url") @db.Text
-  cloudinaryPublicId String?  @map("cloudinary_public_id") @db.VarChar(255)
+  label              String?
+  storagePath        String   @map("storage_path")
+  checksum           String?
+  cloudinaryUrl      String?  @map("cloudinary_url")
+  cloudinaryPublicId String?  @map("cloudinary_public_id")
   encrypted          Boolean  @default(true)
   retentionExpiresAt DateTime? @map("retention_expires_at")
   createdAt          DateTime @default(now()) @map("created_at")
@@ -211,11 +219,11 @@ enum EvidenceType {
 }
 
 model ManualReviewNote {
-  id        BigInt   @id @default(autoincrement())
-  sessionId BigInt   @map("session_id")
-  userId    BigInt   @map("user_id")
-  decision  String?  @db.VarChar(32) // approved | rejected | recapture
-  note      String?  @db.Text
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  sessionId String   @map("session_id") @db.ObjectId
+  userId    String   @map("user_id") @db.ObjectId
+  decision  String?  // approved | rejected | recapture
+  note      String?
   createdAt DateTime @default(now()) @map("created_at")
 
   session VerificationSession @relation(fields: [sessionId], references: [id])
@@ -225,14 +233,14 @@ model ManualReviewNote {
 }
 
 model AuditLog {
-  id        BigInt   @id @default(autoincrement())
-  tenantId  BigInt?  @map("tenant_id")
-  sessionId BigInt?  @map("session_id")
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  tenantId  String?  @map("tenant_id") @db.ObjectId
+  sessionId String?  @map("session_id") @db.ObjectId
   actorType ActorType @map("actor_type")
-  actorId   String?  @map("actor_id") @db.VarChar(128)
-  action    String   @db.VarChar(128)
-  ipAddress String?  @map("ip_address") @db.VarChar(64)
-  userAgent String?  @map("user_agent") @db.Text
+  actorId   String?  @map("actor_id")
+  action    String
+  ipAddress String?  @map("ip_address")
+  userAgent String?  @map("user_agent")
   metadata  Json?
   riskEvent Boolean  @default(false) @map("risk_event")
   createdAt DateTime @default(now()) @map("created_at")
@@ -250,17 +258,17 @@ enum ActorType {
 }
 
 model WebhookDelivery {
-  id           BigInt   @id @default(autoincrement())
-  eventUid     String   @unique @map("event_uid") @db.VarChar(64)
-  tenantId     BigInt   @map("tenant_id")
-  sessionId    BigInt?  @map("session_id")
-  event        String   @db.VarChar(64)
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  eventUid     String   @unique @map("event_uid")
+  tenantId     String   @map("tenant_id") @db.ObjectId
+  sessionId    String?  @map("session_id") @db.ObjectId
+  event        String
   payload      Json
-  url          String   @db.Text
-  status       String   @default("pending") @db.VarChar(32) // pending|delivered|failed|exhausted
+  url          String
+  status       String   @default("pending") // pending|delivered|failed|exhausted
   attempts     Int      @default(0)
   lastStatusCode Int?   @map("last_status_code")
-  lastError    String?  @map("last_error") @db.Text
+  lastError    String?  @map("last_error")
   nextAttemptAt DateTime? @map("next_attempt_at")
   deliveredAt  DateTime? @map("delivered_at")
   createdAt    DateTime @default(now()) @map("created_at")
@@ -271,27 +279,28 @@ model WebhookDelivery {
 }
 
 model JobQueue {
-  id        BigInt   @id @default(autoincrement())
-  type      String   @db.VarChar(64)
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  type      String
   payload   Json
-  status    String   @default("pending") @db.VarChar(32) // pending|running|done|failed
+  status    String   @default("pending") // pending|running|done|failed
   attempts  Int      @default(0)
   maxAttempts Int    @default(5) @map("max_attempts")
   runAfter  DateTime @default(now()) @map("run_after")
-  lockedBy  String?  @map("locked_by") @db.VarChar(64)
+  lockedBy  String?  @map("locked_by")
   lockedAt  DateTime? @map("locked_at")
-  lastError String?  @map("last_error") @db.Text
+  lastError String?  @map("last_error")
   createdAt DateTime @default(now()) @map("created_at")
 
   @@index([status, runAfter])
   @@map("job_queue")
 }
 
-// Shared fixed-window rate-limit counters — one row per limiter+key+window so
-// the cap holds across ALL API processes (Passenger spawns several). Expired
-// windows are swept by the worker's retention_cleanup job.
+// Shared fixed-window rate-limit counters — one document per
+// limiter+key+window so the cap holds across ALL API processes/Lambda
+// containers. Expired windows are swept by the worker's retention job.
+// The composite key doubles as the document _id.
 model RateLimitCounter {
-  key          String   @id @db.VarChar(191) // "<limiter>:<identifier>:<windowBucket>"
+  key          String   @id @map("_id") // "<limiter>:<identifier>:<windowBucket>"
   count        Int      @default(0)
   windowEndsAt DateTime @map("window_ends_at")
 

@@ -200,7 +200,7 @@ router.get("/evidence/:evidenceId/image", async (req, res, next) => {
       return res.status(403).json({ success: false, error: "Invalid or expired evidence token" });
     }
     const { getDb } = require("../lib/db");
-    const file = await getDb().evidenceFile.findFirst({ where: { id: BigInt(evidenceId) } });
+    const file = await getDb().evidenceFile.findFirst({ where: { id: String(evidenceId) } });
     if (!file) return res.status(404).json({ success: false, error: "Evidence file not found" });
 
     // readEvidence calls resolveKey(key) internally, so key must be a hex string (not a Buffer).

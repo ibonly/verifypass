@@ -23,7 +23,7 @@ router.get("/", async (req, res, next) => {
 // POST /v1/api-keys/:id/rotate
 router.post("/:id/rotate", async (req, res, next) => {
   try {
-    const issued = await rotateKey(req.tenant.id, BigInt(req.params.id));
+    const issued = await rotateKey(req.tenant.id, String(req.params.id));
     await audit({
       tenantId: req.tenant.id, actorType: "api", actorId: `key:${req.apiKey.prefix}`,
       action: "api_key.rotated", req, metadata: { oldKeyId: req.params.id }
@@ -37,7 +37,7 @@ router.post("/:id/rotate", async (req, res, next) => {
 // POST /v1/api-keys/:id/revoke
 router.post("/:id/revoke", async (req, res, next) => {
   try {
-    await revokeKey(req.tenant.id, BigInt(req.params.id));
+    await revokeKey(req.tenant.id, String(req.params.id));
     await audit({
       tenantId: req.tenant.id, actorType: "api", actorId: `key:${req.apiKey.prefix}`,
       action: "api_key.revoked", req, metadata: { keyId: req.params.id }

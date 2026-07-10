@@ -10,7 +10,7 @@ Parameters:
   DatabaseUrl:
     Type: String
     NoEcho: true
-    Description: mysql://user:pass@host:3306/verifypass (TLS strongly advised)
+    Description: mongodb+srv://user:pass@cluster.mongodb.net/verifypass (Atlas; TLS built in)
   ApiPublicUrl:
     Type: String
     Description: Public https origin of the API (embedded in SDK tokens). Set to the Function URL or your custom domain.

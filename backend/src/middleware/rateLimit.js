@@ -2,7 +2,7 @@
 
 // Rate limiting (PRD §16.1), two backends:
 //   memory — sliding window, dependency-free, PER-PROCESS. Used in dev/test.
-//   db     — fixed-window counters in MySQL, shared across ALL processes.
+//   db     — fixed-window counters in MongoDB, shared across ALL processes.
 //            Default in production/staging (Passenger spawns N processes; the
 //            in-memory limiter would silently multiply every cap by N).
 // Select explicitly with RATE_LIMIT_BACKEND=db|memory.
@@ -49,7 +49,7 @@ function createRateLimiter({ windowMs, max, keyFn, name = "default", now = Date.
 }
 
 /**
- * MySQL-backed fixed-window limiter — one shared counter per key+window, so
+ * MongoDB-backed fixed-window limiter — one shared counter per key+window, so
  * the cap holds regardless of how many API processes are running.
  * Counter increments are atomic (upsert with increment; unique-race retried).
  * FAIL-OPEN on database errors: rate limiting protects capacity, and refusing

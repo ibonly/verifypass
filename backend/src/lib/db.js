@@ -1,7 +1,7 @@
 "use strict";
 
-// Lazy Prisma singleton — MySQL (DATABASE_URL) is the ONLY runtime database.
-// setDb() exists exclusively for unit tests (in-memory mock, no MySQL needed);
+// Lazy Prisma singleton — MongoDB (DATABASE_URL) is the ONLY runtime database.
+// setDb() exists exclusively for unit tests (in-memory mock, no MongoDB needed);
 // it refuses to run outside test/development so no environment can ever be
 // switched onto a fake database by accident.
 let client = null;

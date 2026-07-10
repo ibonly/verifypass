@@ -1,16 +1,16 @@
 "use strict";
 
-// One-command REAL stack — MySQL (Prisma) + real Faceplugin provider.
+// One-command REAL stack — MongoDB (Prisma) + real Faceplugin provider.
 //
 //   node scripts/dev-stack.js
 //
-// Boots the real Express API against MySQL, ensures a demo tenant/admin/keys
+// Boots the real Express API against MongoDB, ensures a demo tenant/admin/keys
 // exist (persisted to .dev-credentials.json), and runs the REAL verification
 // worker as a child process. There is NO stub provider and NO in-memory DB.
 //
 // Prerequisites:
-//   1. MySQL running and DATABASE_URL set in .env
-//   2. `npm run db:migrate` (or db:push) already applied the schema
+//   1. MongoDB running as a replica set (mongod --replSet rs0) and DATABASE_URL set in .env
+//   2. `npm run prisma:push` (backend/) already applied the schema — Mongo has no migrations
 //   3. Faceplugin containers running for actual liveness/match scoring:
 //        docker compose -f deploy/faceplugin-compose.yml up -d
 //      (Without them, verify jobs fail closed — everything else still works.)
@@ -37,9 +37,9 @@ async function main() {
   try {
     await db.$queryRaw`SELECT 1`;
   } catch (err) {
-    console.error("\n[dev-stack] Cannot reach MySQL via DATABASE_URL.");
-    console.error("            Check .env DATABASE_URL and that MySQL is running,");
-    console.error("            then apply the schema:  npm run db:migrate\n");
+    console.error("\n[dev-stack] Cannot reach MongoDB via DATABASE_URL.");
+    console.error("            Check .env DATABASE_URL and that mongod runs as a replica set (--replSet rs0),");
+    console.error("            then apply the schema:  npm run prisma:push --prefix backend\n");
     console.error(err.message);
     process.exit(1);
   }
@@ -63,7 +63,7 @@ async function main() {
       : `Provider        onnx (server-side onnxruntime-node · no license/Docker)`;
     console.log(`
 ──────────────────────────────────────────────────────────────
- VerifyPass STACK  (MySQL · ${provider} provider)
+ VerifyPass STACK  (MongoDB · ${provider} provider)
 ──────────────────────────────────────────────────────────────
  API             http://localhost:${PORT}          (/health)
  Database        ${process.env.DATABASE_URL}

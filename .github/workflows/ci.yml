@@ -19,7 +19,7 @@ jobs:
       - run: npm install
       - run: npm test
       - name: Validate Prisma schema
-        run: DATABASE_URL="mysql://user:password@localhost:3306/verifypass" npx prisma validate --schema prisma/schema.prisma
+        run: DATABASE_URL="mongodb://localhost:27017/verifypass" npx prisma validate --schema prisma/schema.prisma
 
   sdk:
     runs-on: ubuntu-latest

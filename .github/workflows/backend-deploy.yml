@@ -6,7 +6,7 @@
 # Auth: GitHub OIDC → an IAM role (no long-lived AWS keys in secrets).
 # Required repo secrets:
 #   AWS_DEPLOY_ROLE_ARN   IAM role trusting this repo via OIDC
-#   DATABASE_URL          mysql://... (TLS advised)
+#   DATABASE_URL          mongodb+srv://... (Atlas; replica set required)
 #   API_PUBLIC_URL        https origin the SDK tokens embed
 #   SDK_TOKEN_SECRET, AUTH_TOKEN_SECRET, EVIDENCE_ENCRYPTION_KEY
 # Optional: AWS_REGION (default us-east-1), HOSTED_BASE_URL
@@ -88,10 +88,10 @@ jobs:
               EvidenceEncryptionKey="${{ secrets.EVIDENCE_ENCRYPTION_KEY }}" \
               HostedBaseUrl="${{ secrets.HOSTED_BASE_URL || 'https://verify.verifypass.com' }}"
 
-      - name: Run database migrations
+      - name: Sync database schema (MongoDB — collections + indexes)
         run: |
           DATABASE_URL="${{ secrets.DATABASE_URL }}" \
-            npx prisma migrate deploy --schema backend/prisma/schema.prisma
+            npx prisma db push --schema backend/prisma/schema.prisma --skip-generate
 
       - name: Smoke check
         run: |

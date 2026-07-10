@@ -1,7 +1,7 @@
 "use strict";
 
 // Verification worker. Polls job_queue; runs the real verification pipeline
-// (Faceplugin liveness + face compare + optional OCR) against MySQL. Designed
+// (Faceplugin liveness + face compare + optional OCR) against MongoDB. Designed
 // to run on the cPanel box now and move to a VPS later with zero code change
 // (communicates only via DB + shared storage).
 

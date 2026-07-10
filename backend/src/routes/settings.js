@@ -86,7 +86,7 @@ router.post("/api-keys", async (req, res, next) => {
 // POST /v1/settings/api-keys/:id/rotate
 router.post("/api-keys/:id/rotate", async (req, res, next) => {
   try {
-    const issued = await rotateKey(req.tenant.id, BigInt(req.params.id));
+    const issued = await rotateKey(req.tenant.id, String(req.params.id));
     await audit({
       tenantId: req.tenant.id, actorType: "tenant_user", actorId: `user:${req.user.id}`,
       action: "api_key.rotated", req, metadata: { oldKeyId: req.params.id }
@@ -98,7 +98,7 @@ router.post("/api-keys/:id/rotate", async (req, res, next) => {
 // POST /v1/settings/api-keys/:id/revoke
 router.post("/api-keys/:id/revoke", async (req, res, next) => {
   try {
-    await revokeKey(req.tenant.id, BigInt(req.params.id));
+    await revokeKey(req.tenant.id, String(req.params.id));
     await audit({
       tenantId: req.tenant.id, actorType: "tenant_user", actorId: `user:${req.user.id}`,
       action: "api_key.revoked", req, metadata: { keyId: req.params.id }
@@ -110,7 +110,7 @@ router.post("/api-keys/:id/revoke", async (req, res, next) => {
 // DELETE /v1/settings/api-keys/:id — permanently removes a revoked key
 router.delete("/api-keys/:id", async (req, res, next) => {
   try {
-    await deleteKey(req.tenant.id, BigInt(req.params.id));
+    await deleteKey(req.tenant.id, String(req.params.id));
     await audit({
       tenantId: req.tenant.id, actorType: "tenant_user", actorId: `user:${req.user.id}`,
       action: "api_key.deleted", req, metadata: { keyId: req.params.id }

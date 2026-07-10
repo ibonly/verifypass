@@ -14,7 +14,7 @@ frontend/      cPanel static builds
   dashboard/   tenant + admin dashboard      verify-page/  hosted verification flow
   sdk/         core / react / js — the client SDKs (file: deps)
 sample-app/    integration demo (cPanel)
-scripts/       dev-stack (local MySQL + API + worker)
+scripts/       dev-stack (local MongoDB + API + worker)
 ```
 
 ## Setup
@@ -26,7 +26,9 @@ scripts/       dev-stack (local MySQL + API + worker)
 (cd frontend/verify-page && npm install) # links frontend/sdk/react → core
 (cd sample-app && npm install)
 cp backend/.env.example backend/.env     # fill in DATABASE_URL + secrets
-(cd backend && npx prisma migrate dev --schema prisma/schema.prisma)
+# MongoDB: Prisma needs a replica set — Atlas is one already; locally run
+#   mongod --replSet rs0   (then once: mongosh --eval 'rs.initiate()')
+(cd backend && npx prisma db push --schema prisma/schema.prisma)
 (cd backend && node scripts/fetch-models.js)
 node scripts/dev-stack.js                # API :3000 + worker + seeded tenant
 ```
