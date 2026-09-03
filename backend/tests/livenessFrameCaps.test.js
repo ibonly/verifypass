@@ -70,3 +70,58 @@ test("FV-3: selfie cap is enforced", async (t) => {
     (err) => err.code === "VALIDATION_ERROR" && /too many selfie captures/.test(err.message)
   );
 });
+
+test("FV-3: frames from a superseded challenge don't eat the new attempt's budget", async (t) => {
+  const { scope, tenant, created, session } = await setup();
+  t.after(() => setDb(null));
+
+  // Two frames recorded BEFORE the current challenge was issued (an earlier
+  // attempt). The worker already ignores them (issuedAt fence in pipeline.js);
+  // the upload budget must ignore them too, or a retried session rejects every
+  // fresh frame and can never complete.
+  const before = new Date(Date.now() - 3600 * 1000);
+  for (let i = 0; i < 2; i++) {
+    await scope.evidence.create({
+      sessionId: session.id, fileType: "liveness_frame", label: "smile",
+      storagePath: `old${i}`, encrypted: true, createdAt: before
+    });
+  }
+
+  await assert.rejects(
+    () => handleUpload({
+      scopedDb: scope, tenantUid: tenant.tenantUid, sessionUid: created.sessionId,
+      sdkToken: created.sdkToken, kind: "liveness", action: "smile",
+      imageBase64: "data:image/jpeg;base64,AAAA"
+    }),
+    // must get PAST the cap (fails later on the bogus image instead)
+    (err) => !/too many liveness frames/.test(err.message)
+  );
+});
+
+test("FV-3: current-attempt frames still enforce the cap after a retry fence", async (t) => {
+  const { scope, tenant, created, session } = await setup();
+  t.after(() => setDb(null));
+
+  // One superseded frame + two current ones (cap is 2 in this file): the
+  // superseded frame is ignored, the two fresh ones exhaust the budget.
+  const before = new Date(Date.now() - 3600 * 1000);
+  await scope.evidence.create({
+    sessionId: session.id, fileType: "liveness_frame", label: "smile",
+    storagePath: "old", encrypted: true, createdAt: before
+  });
+  for (let i = 0; i < 2; i++) {
+    await scope.evidence.create({
+      sessionId: session.id, fileType: "liveness_frame", label: "smile",
+      storagePath: `cur${i}`, encrypted: true
+    });
+  }
+
+  await assert.rejects(
+    () => handleUpload({
+      scopedDb: scope, tenantUid: tenant.tenantUid, sessionUid: created.sessionId,
+      sdkToken: created.sdkToken, kind: "liveness", action: "smile",
+      imageBase64: "data:image/jpeg;base64,AAAA"
+    }),
+    (err) => err.code === "VALIDATION_ERROR" && /too many liveness frames/.test(err.message)
+  );
+});

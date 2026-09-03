@@ -148,13 +148,26 @@ async function handleUpload({ scopedDb, tenantUid, sessionUid, sdkToken, kind, s
   if (existing.length >= MAX_EVIDENCE_PER_SESSION) {
     throw new AppError("VALIDATION_ERROR", `evidence upload limit reached for this session (max ${MAX_EVIDENCE_PER_SESSION})`);
   }
+  // Per-action / selfie budgets count only frames belonging to the CURRENT
+  // attempt. Retries reissue the liveness challenge (fresh issuedAt) and the
+  // worker ignores frames older than it (see worker/pipeline.js) — so those
+  // superseded frames must not eat the new attempt's budget either, or a
+  // retried session rejects every fresh frame with "too many liveness frames"
+  // and can never complete. Same 5s grace as the worker's fence; rows with no
+  // createdAt count toward the budget (conservative). The whole-session
+  // MAX_EVIDENCE_PER_SESSION cap above stays unfenced: it is the storage/DoS
+  // backstop across all attempts.
+  const fenceAt = session.livenessChallenge?.issuedAt
+    ? new Date(session.livenessChallenge.issuedAt).getTime() - 5000
+    : 0;
+  const inAttempt = (e) => !fenceAt || !e.createdAt || new Date(e.createdAt).getTime() >= fenceAt;
   if (fileType === "liveness_frame") {
-    const forAction = existing.filter((e) => e.fileType === "liveness_frame" && e.label === label).length;
+    const forAction = existing.filter((e) => e.fileType === "liveness_frame" && e.label === label && inAttempt(e)).length;
     if (forAction >= MAX_LIVENESS_FRAMES_PER_ACTION) {
       throw new AppError("VALIDATION_ERROR", `too many liveness frames for action '${label}' (max ${MAX_LIVENESS_FRAMES_PER_ACTION})`);
     }
   } else if (fileType === "selfie") {
-    const selfies = existing.filter((e) => e.fileType === "selfie").length;
+    const selfies = existing.filter((e) => e.fileType === "selfie" && inAttempt(e)).length;
     if (selfies >= MAX_SELFIES_PER_SESSION) {
       throw new AppError("VALIDATION_ERROR", `too many selfie captures for this session (max ${MAX_SELFIES_PER_SESSION})`);
     }

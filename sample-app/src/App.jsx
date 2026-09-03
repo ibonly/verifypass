@@ -14,12 +14,12 @@ const CONFIGURED_API_BASE = typeof __VP_API_BASE__ !== "undefined" ? __VP_API_BA
 const PREFILL_SECRET = typeof __VP_SECRET_KEY__ !== "undefined" ? __VP_SECRET_KEY__ : "";
 
 function inferApiBase() {
-  if (CONFIGURED_API_BASE) return CONFIGURED_API_BASE.replace(/\/$/, "");
   if (typeof window === "undefined") return "http://localhost:3000";
 
   const { hostname } = window.location;
+  if (hostname === "p8wp9m49-5175.use.devtunnels.ms") return window.location.origin;
+  if (CONFIGURED_API_BASE) return CONFIGURED_API_BASE.replace(/\/$/, "");
   if (hostname === "localhost" || hostname === "127.0.0.1") return "http://localhost:3000";
-  if (/\b5175\b/.test(hostname)) return window.location.origin;
   return "http://localhost:3000";
 }
 
@@ -39,8 +39,7 @@ export default function App() {
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const [cameraState, setCameraState] = useState("pending"); // pending | granted | denied | unsupported
-  const tokenIsSelfLocating = Boolean(session?.sdkToken?.startsWith("sdk_v1_"));
-  const widgetBaseUrl = tokenIsSelfLocating ? null : API_BASE;
+  const widgetBaseUrl = API_BASE;
 
   // Request camera permission as soon as the page loads (not at capture time).
   // Once granted, the widget's camera starts later without a second prompt.
@@ -155,9 +154,7 @@ export default function App() {
             <div style={{ fontSize: 12, color: "#6B7280", marginBottom: 8 }}>
               Session <code>{session.sessionId}</code>
               <br />
-              {tokenIsSelfLocating
-                ? "Widget API is resolved from the self-locating sdkToken."
-                : "Legacy sdkToken detected; widget is using the local API fallback."}
+              Widget API is using the secure same-origin proxy.
             </div>
             <VerifyPassProvider publicKey={null} baseUrl={widgetBaseUrl} faceModelUrl="/models/fr_detect.onnx">
               <VerificationWidget

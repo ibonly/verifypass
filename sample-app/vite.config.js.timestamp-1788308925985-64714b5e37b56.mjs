@@ -1,0 +1,45 @@
+// vite.config.js
+import path from "path";
+import { fileURLToPath } from "url";
+import { defineConfig } from "file:///sessions/rcw-015pjrppm7etpzth8gfuyajk/mnt/verifypass/sample-app/node_modules/vite/dist/node/index.js";
+import react from "file:///sessions/rcw-015pjrppm7etpzth8gfuyajk/mnt/verifypass/sample-app/node_modules/@vitejs/plugin-react/dist/index.js";
+var __vite_injected_original_import_meta_url = "file:///sessions/rcw-015pjrppm7etpzth8gfuyajk/mnt/verifypass/sample-app/vite.config.js";
+var __dirname = path.dirname(fileURLToPath(__vite_injected_original_import_meta_url));
+var vite_config_default = defineConfig({
+  plugins: [react()],
+  resolve: {
+    dedupe: ["react", "react-dom"],
+    alias: {
+      "@verifypass/sdk-core": path.resolve(__dirname, "../frontend/sdk/core/src/index.js"),
+      "@verifypass/react": path.resolve(__dirname, "../frontend/sdk/react/src/index.js")
+    }
+  },
+  server: {
+    proxy: {
+      "/v1": {
+        target: process.env.VP_API_PROXY_TARGET || "http://localhost:3000",
+        changeOrigin: false,
+        xfwd: true
+      }
+    }
+  },
+  optimizeDeps: {
+    // sdk-core is a linked CommonJS workspace package; force pre-bundling so it
+    // exposes proper ESM named exports to the dev server.
+    include: ["@verifypass/sdk-core"]
+  },
+  build: {
+    commonjsOptions: {
+      include: [/node_modules/, /sdk[\/]core/]
+    }
+  },
+  define: {
+    __VP_API_BASE__: JSON.stringify(process.env.VP_API_BASE || ""),
+    // Optional convenience for local testing only — never ship a secret key to a browser.
+    __VP_SECRET_KEY__: JSON.stringify(process.env.VP_SECRET_KEY || "")
+  }
+});
+export {
+  vite_config_default as default
+};
+//# sourceMappingURL=data:application/json;base64,ewogICJ2ZXJzaW9uIjogMywKICAic291cmNlcyI6IFsidml0ZS5jb25maWcuanMiXSwKICAic291cmNlc0NvbnRlbnQiOiBbImNvbnN0IF9fdml0ZV9pbmplY3RlZF9vcmlnaW5hbF9kaXJuYW1lID0gXCIvc2Vzc2lvbnMvcmN3LTAxNXBqcnBwbTdldHB6dGg4Z2Z1eWFqay9tbnQvdmVyaWZ5cGFzcy9zYW1wbGUtYXBwXCI7Y29uc3QgX192aXRlX2luamVjdGVkX29yaWdpbmFsX2ZpbGVuYW1lID0gXCIvc2Vzc2lvbnMvcmN3LTAxNXBqcnBwbTdldHB6dGg4Z2Z1eWFqay9tbnQvdmVyaWZ5cGFzcy9zYW1wbGUtYXBwL3ZpdGUuY29uZmlnLmpzXCI7Y29uc3QgX192aXRlX2luamVjdGVkX29yaWdpbmFsX2ltcG9ydF9tZXRhX3VybCA9IFwiZmlsZTovLy9zZXNzaW9ucy9yY3ctMDE1cGpycHBtN2V0cHp0aDhnZnV5YWprL21udC92ZXJpZnlwYXNzL3NhbXBsZS1hcHAvdml0ZS5jb25maWcuanNcIjtpbXBvcnQgcGF0aCBmcm9tIFwicGF0aFwiO1xuaW1wb3J0IHsgZmlsZVVSTFRvUGF0aCB9IGZyb20gXCJ1cmxcIjtcbmltcG9ydCB7IGRlZmluZUNvbmZpZyB9IGZyb20gXCJ2aXRlXCI7XG5pbXBvcnQgcmVhY3QgZnJvbSBcIkB2aXRlanMvcGx1Z2luLXJlYWN0XCI7XG5cbmNvbnN0IF9fZGlybmFtZSA9IHBhdGguZGlybmFtZShmaWxlVVJMVG9QYXRoKGltcG9ydC5tZXRhLnVybCkpO1xuXG4vLyBTYW1wbGUgd2ViY2FtIHRlc3QgYXBwLiBQb2ludCBpdCBhdCB5b3VyIHJ1bm5pbmcgQVBJIGFuZCBwYXN0ZSBhIHNlY3JldCBrZXlcbi8vIGZyb20gdGhlIGRldiBzdGFjay4gQ2FtZXJhIGNhcHR1cmUgcmVxdWlyZXMgYSBzZWN1cmUgY29udGV4dCBcdTIwMTQgbG9jYWxob3N0IGlzXG4vLyB0cmVhdGVkIGFzIHNlY3VyZSBieSBicm93c2Vycywgc28gYHZpdGUgZGV2YCBvbiBodHRwOi8vbG9jYWxob3N0IHdvcmtzLlxuZXhwb3J0IGRlZmF1bHQgZGVmaW5lQ29uZmlnKHtcbiAgcGx1Z2luczogW3JlYWN0KCldLFxuICByZXNvbHZlOiB7XG4gICAgZGVkdXBlOiBbXCJyZWFjdFwiLCBcInJlYWN0LWRvbVwiXSxcbiAgICBhbGlhczoge1xuICAgICAgXCJAdmVyaWZ5cGFzcy9zZGstY29yZVwiOiBwYXRoLnJlc29sdmUoX19kaXJuYW1lLCBcIi4uL2Zyb250ZW5kL3Nkay9jb3JlL3NyYy9pbmRleC5qc1wiKSxcbiAgICAgIFwiQHZlcmlmeXBhc3MvcmVhY3RcIjogcGF0aC5yZXNvbHZlKF9fZGlybmFtZSwgXCIuLi9mcm9udGVuZC9zZGsvcmVhY3Qvc3JjL2luZGV4LmpzXCIpXG4gICAgfVxuICB9LFxuICBzZXJ2ZXI6IHtcbiAgICBwcm94eToge1xuICAgICAgXCIvdjFcIjoge1xuICAgICAgICB0YXJnZXQ6IHByb2Nlc3MuZW52LlZQX0FQSV9QUk9YWV9UQVJHRVQgfHwgXCJodHRwOi8vbG9jYWxob3N0OjMwMDBcIixcbiAgICAgICAgY2hhbmdlT3JpZ2luOiBmYWxzZSxcbiAgICAgICAgeGZ3ZDogdHJ1ZVxuICAgICAgfVxuICAgIH1cbiAgfSxcbiAgb3B0aW1pemVEZXBzOiB7XG4gICAgLy8gc2RrLWNvcmUgaXMgYSBsaW5rZWQgQ29tbW9uSlMgd29ya3NwYWNlIHBhY2thZ2U7IGZvcmNlIHByZS1idW5kbGluZyBzbyBpdFxuICAgIC8vIGV4cG9zZXMgcHJvcGVyIEVTTSBuYW1lZCBleHBvcnRzIHRvIHRoZSBkZXYgc2VydmVyLlxuICAgIGluY2x1ZGU6IFtcIkB2ZXJpZnlwYXNzL3Nkay1jb3JlXCJdXG4gIH0sXG4gIGJ1aWxkOiB7XG4gICAgY29tbW9uanNPcHRpb25zOiB7XG4gICAgICBpbmNsdWRlOiBbL25vZGVfbW9kdWxlcy8sIC9zZGtbXFwvXWNvcmUvXVxuICAgIH1cbiAgfSxcbiAgZGVmaW5lOiB7XG4gICAgX19WUF9BUElfQkFTRV9fOiBKU09OLnN0cmluZ2lmeShwcm9jZXNzLmVudi5WUF9BUElfQkFTRSB8fCBcIlwiKSxcbiAgICAvLyBPcHRpb25hbCBjb252ZW5pZW5jZSBmb3IgbG9jYWwgdGVzdGluZyBvbmx5IFx1MjAxNCBuZXZlciBzaGlwIGEgc2VjcmV0IGtleSB0byBhIGJyb3dzZXIuXG4gICAgX19WUF9TRUNSRVRfS0VZX186IEpTT04uc3RyaW5naWZ5KHByb2Nlc3MuZW52LlZQX1NFQ1JFVF9LRVkgfHwgXCJcIilcbiAgfVxufSk7XG4iXSwKICAibWFwcGluZ3MiOiAiO0FBQWtYLE9BQU8sVUFBVTtBQUNuWSxTQUFTLHFCQUFxQjtBQUM5QixTQUFTLG9CQUFvQjtBQUM3QixPQUFPLFdBQVc7QUFIc04sSUFBTSwyQ0FBMkM7QUFLelIsSUFBTSxZQUFZLEtBQUssUUFBUSxjQUFjLHdDQUFlLENBQUM7QUFLN0QsSUFBTyxzQkFBUSxhQUFhO0FBQUEsRUFDMUIsU0FBUyxDQUFDLE1BQU0sQ0FBQztBQUFBLEVBQ2pCLFNBQVM7QUFBQSxJQUNQLFFBQVEsQ0FBQyxTQUFTLFdBQVc7QUFBQSxJQUM3QixPQUFPO0FBQUEsTUFDTCx3QkFBd0IsS0FBSyxRQUFRLFdBQVcsbUNBQW1DO0FBQUEsTUFDbkYscUJBQXFCLEtBQUssUUFBUSxXQUFXLG9DQUFvQztBQUFBLElBQ25GO0FBQUEsRUFDRjtBQUFBLEVBQ0EsUUFBUTtBQUFBLElBQ04sT0FBTztBQUFBLE1BQ0wsT0FBTztBQUFBLFFBQ0wsUUFBUSxRQUFRLElBQUksdUJBQXVCO0FBQUEsUUFDM0MsY0FBYztBQUFBLFFBQ2QsTUFBTTtBQUFBLE1BQ1I7QUFBQSxJQUNGO0FBQUEsRUFDRjtBQUFBLEVBQ0EsY0FBYztBQUFBO0FBQUE7QUFBQSxJQUdaLFNBQVMsQ0FBQyxzQkFBc0I7QUFBQSxFQUNsQztBQUFBLEVBQ0EsT0FBTztBQUFBLElBQ0wsaUJBQWlCO0FBQUEsTUFDZixTQUFTLENBQUMsZ0JBQWdCLGFBQWE7QUFBQSxJQUN6QztBQUFBLEVBQ0Y7QUFBQSxFQUNBLFFBQVE7QUFBQSxJQUNOLGlCQUFpQixLQUFLLFVBQVUsUUFBUSxJQUFJLGVBQWUsRUFBRTtBQUFBO0FBQUEsSUFFN0QsbUJBQW1CLEtBQUssVUFBVSxRQUFRLElBQUksaUJBQWlCLEVBQUU7QUFBQSxFQUNuRTtBQUNGLENBQUM7IiwKICAibmFtZXMiOiBbXQp9Cg==

@@ -18,6 +18,10 @@ export default defineConfig({
     }
   },
   server: {
+    host: "0.0.0.0",
+    port: 5175,
+    strictPort: true,
+    allowedHosts: ["p8wp9m49-5175.use.devtunnels.ms"],
     proxy: {
       "/v1": {
         target: process.env.VP_API_PROXY_TARGET || "http://localhost:3000",

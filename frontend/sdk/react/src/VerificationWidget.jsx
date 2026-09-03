@@ -41,6 +41,14 @@ const STEP_COPY = {
 // displayAspect must equal frameW/frameH of the document preview (340/212).
 const DOC_GUIDE = { displayAspect: 340 / 212, widthFrac: 0.88, regionAspect: 1.586 };
 
+// Client-side mirror of the server's per-action liveness frame budget (FV-3,
+// MAX_LIVENESS_FRAMES_PER_ACTION, default 6). The widget stops uploading
+// BEFORE the server would reject: redo cycles after a stalled burst add an
+// extra early-shot + burst per cycle, which used to blow past the cap and
+// dead-end the whole flow with "too many liveness frames" — the user kept
+// turning their head at a wall that could never accept another frame.
+const LIVENESS_FRAME_BUDGET = 6;
+
 // Directional arrow overlay per head action. Shown over the (mirrored)
 // preview while the user performs the movement. Mirror math: a selfie
 // preview behaves like a MIRROR — lateral movement keeps its screen
@@ -177,6 +185,9 @@ export function VerificationWidget({
   const clientRef = useRef(null);
   const actionsRef = useRef([]);
   const actionIdxRef = useRef(0);
+  // Frames uploaded per action for the CURRENT challenge (mirrors the server
+  // budget; reset whenever a challenge is issued/reissued).
+  const livenessFrameCountsRef = useRef({});
   const capturingRef = useRef(false);
   const detectorRef = useRef(null);
   const framingRef = useRef(null);
@@ -244,6 +255,7 @@ export function VerificationWidget({
       }
       if (cancelled) return;
       actionsRef.current = challengeActions;
+      livenessFrameCountsRef.current = {}; // fresh challenge → fresh budgets
       setActions(challengeActions);
       const flow = createFlow(verificationType, { documentBack: needsDocumentBack(documentTypes) });
       flowRef.current = flow;
@@ -307,6 +319,23 @@ export function VerificationWidget({
     setBusy(true);
     setFeedback(null);
     try {
+      if (step === "liveness"
+        && (livenessFrameCountsRef.current[actionsRef.current[actionIdxRef.current]] || 0) >= LIVENESS_FRAME_BUDGET) {
+        // Budget spent for this action — no frame can be uploaded, so skip
+        // the capture + quality gate entirely and just advance the flow.
+        if (livenessAdvance) {
+          const next = actionIdxRef.current + 1;
+          if (next >= actionsRef.current.length) {
+            actionIdxRef.current = 0;
+            setActionIdx(0);
+            flow.advance(); // → face
+          } else {
+            actionIdxRef.current = next;
+            setActionIdx(next);
+          }
+        }
+        return;
+      }
       // Documents are cropped to the on-screen card guide so the ID FILLS the
       // evidence photo (matches what the user aligned to; better OCR/review).
       const { imageData, base64 } = isDocumentStep(step)
@@ -340,7 +369,24 @@ export function VerificationWidget({
         }
       } else if (step === "liveness") {
         const action = actionsRef.current[actionIdxRef.current];
-        await client.uploadLivenessFrame(action, base64);
+        const counts = livenessFrameCountsRef.current;
+        const used = counts[action] || 0;
+        if (used < LIVENESS_FRAME_BUDGET) {
+          try {
+            await client.uploadLivenessFrame(action, base64);
+            counts[action] = used + 1;
+          } catch (err) {
+            // Server says the action's budget is spent (frames from another
+            // tab / a redo within the same challenge window). That means the
+            // action already carries MAX evidence — completion, not failure:
+            // swallow it, mark the budget spent locally, and let the flow
+            // advance below. Every other error is real and still fails.
+            if (!/too many liveness frames/i.test((err && err.message) || "")) throw err;
+            counts[action] = LIVENESS_FRAME_BUDGET;
+          }
+        }
+        // Budget already spent → skip the upload entirely (the server would
+        // only reject it) but still advance so the flow can't dead-end.
         // Burst mode uploads several frames per action; only the last one
         // advances. More frames per action = far better odds the server finds
         // one live, single-face, pose-matching frame.
@@ -388,6 +434,7 @@ export function VerificationWidget({
       const r = await client.retrySession();
       const acts = r.livenessChallenge?.actions || [];
       actionsRef.current = acts;
+      livenessFrameCountsRef.current = {}; // reissued challenge → fresh budgets
       setActions(acts);
       actionIdxRef.current = 0;
       setActionIdx(0);
@@ -538,6 +585,13 @@ export function VerificationWidget({
     const BURST_AT = [0, 350, 700]; // offsets from the trigger moment
     const BURST_TOTAL = 800;        // progress bar duration
     const AWAIT_HINT_MS = 3500;     // no movement detected → coach the user
+    // Detection here is UX-only — the server verifies pose magnitude and
+    // liveness authoritatively. If THIS action's signature never fires (the
+    // frontal-biased detector loses some faces sooner turning one way than
+    // the other — turn_right vs turn_left asymmetry on some cameras/lighting),
+    // don't starve the flow forever: after the hint has been up a while,
+    // capture a fallback burst while the user performs the movement anyway.
+    const AWAIT_FALLBACK_MS = 9000; // hint shown + still no trigger → fallback burst
     const AWAIT_FACE_LOST_MS = 4000; // face gone this long → back to align
     // Document step: if something is present, lit and face-clear this long but
     // the strict card-shape gate hasn't passed (hand/forearm in the mask,
@@ -561,6 +615,10 @@ export function VerificationWidget({
     // after the face has already turned out of detection range, and the
     // server requires at least one face-bearing frame per action.
     let earlyShotTaken = false;
+    // True when the current burst was started by the AWAIT_FALLBACK_MS timer
+    // rather than the action detector — relaxes the per-shot hold/presence
+    // gates that a detector-blind movement can never satisfy.
+    let fallbackBurst = false;
 
     const tick = () => {
       const video = videoRef.current;
@@ -706,6 +764,14 @@ export function VerificationWidget({
             // Instruction shown — capture NOTHING until THIS action's own
             // signature is seen (2 consecutive detections; jitter can't fire it).
             setGreen(true);
+            // Budget spent for this action (redo cycles): nothing more can be
+            // uploaded, so asking for ANOTHER head turn is pure neck pain.
+            // Advance immediately — the action already carries max evidence.
+            if ((livenessFrameCountsRef.current[currentAction] || 0) >= LIVENESS_FRAME_BUDGET) {
+              if (!capturingRef.current) captureRef.current({ livenessAdvance: true });
+              raf = requestAnimationFrame(tick);
+              return;
+            }
             if (actionState.ok && rawBox && !earlyShotTaken && !capturingRef.current) {
               // movement just started and the face is STILL detectable —
               // grab the guaranteed face-bearing frame for this action now
@@ -714,12 +780,23 @@ export function VerificationWidget({
             }
             if (facePresent && actionState.triggered) {
               phase = "capturing";
+              fallbackBurst = false;
               triggerAt = now;
               shots = 0;
               setLivePhase({ phase: "capturing", startedAt: now, total: BURST_TOTAL });
             } else if (!hintShown && now - awaitStart > AWAIT_HINT_MS) {
               hintShown = true; // still waiting — coach, don't capture
               setLivePhase({ phase: "await", startedAt: awaitStart, total: 0, hint: true });
+            } else if (hintShown && now - awaitStart > AWAIT_FALLBACK_MS
+              && now - lastPresentAt < 2000 && !capturingRef.current) {
+              // The user has been here, coached, and moving for ~9s without
+              // the signature firing — capture anyway; the server is the
+              // authoritative judge of whether the action happened.
+              phase = "capturing";
+              fallbackBurst = true;
+              triggerAt = now;
+              shots = 0;
+              setLivePhase({ phase: "capturing", startedAt: now, total: BURST_TOTAL });
             } else if (now - lastPresentAt > AWAIT_FACE_LOST_MS) {
               phase = "align"; // user walked off — re-establish the baseline
               actionDet = null;
@@ -736,8 +813,16 @@ export function VerificationWidget({
             // whole burst whenever the user snapped back to frontal quickly —
             // the early faced-frame + trigger frame already carry the action
             // evidence, and the server tolerates mid-return frames.
-            const canShoot = shots > 0 || !holdRequired || actionState.holding;
-            if (shots < BURST_AT.length && now - triggerAt >= BURST_AT[shots] && !capturingRef.current && facePresent && canShoot) {
+            const canShoot = fallbackBurst
+              // Fallback burst: the detector never saw the action, so demanding
+              // `holding` would stall forever. The FIRST shot still waits for a
+              // detectable face (the server needs one face-bearing frame per
+              // action); later shots may catch the mid-turn profile the
+              // frontal-biased detector loses.
+              ? (shots > 0 || facePresent)
+              : (shots > 0 || !holdRequired || actionState.holding);
+            const presenceOk = facePresent || (fallbackBurst && shots > 0);
+            if (shots < BURST_AT.length && now - triggerAt >= BURST_AT[shots] && !capturingRef.current && presenceOk && canShoot) {
               const isLast = shots === BURST_AT.length - 1;
               shots++;
               captureRef.current({ livenessAdvance: isLast });
@@ -747,6 +832,7 @@ export function VerificationWidget({
               // detector so the user redoes the movement; a stale latched
               // trigger would re-fire instantly.
               phase = "await";
+              fallbackBurst = false;
               actionDet = createActionDetector(currentAction, baselineBox);
               actionState = { ok: false, triggered: false, holding: false };
               awaitStart = now;
