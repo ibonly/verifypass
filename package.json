@@ -1,0 +1,21 @@
+{
+  "name": "verifypass-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Multitenant liveness, face recognition, and ID verification service",
+  "scripts": {
+    "start": "node scripts/start-all.js",
+    "dev": "node scripts/start-all.js",
+    "dev:backend": "node scripts/dev-stack.js",
+    "test": "npm test --prefix backend && npm test --prefix frontend/sdk/core",
+    "test:backend": "npm test --prefix backend",
+    "test:sdk": "npm test --prefix frontend/sdk/core",
+    "build": "(cd frontend/sdk/js && npm run build) && (cd frontend/dashboard && npm run build) && (cd frontend/verify-page && npm run build) && (cd sample-app && npm run build)",
+    "models:fetch": "node backend/scripts/fetch-models.js",
+    "mongo:start": "bash scripts/start-mongo.sh",
+    "prisma:push": "npm run prisma:push --prefix backend"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  }
+}

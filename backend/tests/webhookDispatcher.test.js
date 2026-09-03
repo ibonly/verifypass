@@ -44,7 +44,7 @@ test("payload carries attempt number — consumers can order events across retri
   const fetch = mockFetch(() => ({ status: 200 }));
   await sendWebhook(
     { tenantId: String(tenant.id), sessionUid: "vps_WH1", event: "verification.approved" },
-    { db, fetchImpl: fetch }
+    { db, fetchImpl: fetch, validateTarget: async () => {} }
   );
   const body = JSON.parse(fetch.calls[0].opts.body);
   assert.equal(body.attempt, 3, "initial attempt + 2 retries");
@@ -56,7 +56,7 @@ test("fresh session payload has attempt 1", async () => {
   const fetch = mockFetch(() => ({ status: 200 }));
   await sendWebhook(
     { tenantId: String(tenant.id), sessionUid: "vps_WH1", event: "verification.approved" },
-    { db, fetchImpl: fetch }
+    { db, fetchImpl: fetch, validateTarget: async () => {} }
   );
   assert.equal(JSON.parse(fetch.calls[0].opts.body).attempt, 1);
 });
@@ -68,7 +68,7 @@ test("delivers signed webhook; receiver can verify signature", async () => {
 
   const out = await sendWebhook(
     { tenantId: String(tenant.id), sessionUid: "vps_WH1", event: "verification.approved" },
-    { db, fetchImpl: fetch }
+    { db, fetchImpl: fetch, validateTarget: async () => {} }
   );
   assert.equal(out.delivered, true);
 
@@ -108,7 +108,7 @@ test("failure schedules retry with backoff; delivery row tracks state", async ()
 
   const out = await sendWebhook(
     { tenantId: String(tenant.id), sessionUid: "vps_WH1", event: "verification.approved" },
-    { db, fetchImpl: mockFetch(() => ({ status: 500 })), now: () => now }
+    { db, validateTarget: async () => {}, fetchImpl: mockFetch(() => ({ status: 500 })), now: () => now }
   );
   assert.equal(out.delivered, false);
   assert.equal(out.exhausted, false);
@@ -130,12 +130,12 @@ test("retries until exhausted after MAX_ATTEMPTS", async () => {
 
   let out = await sendWebhook(
     { tenantId: String(tenant.id), sessionUid: "vps_WH1", event: "verification.approved" },
-    { db, fetchImpl: fetch }
+    { db, fetchImpl: fetch, validateTarget: async () => {} }
   );
   const delivery = (await db.webhookDelivery.findMany({}))[0];
 
   for (let i = 1; i < MAX_ATTEMPTS; i++) {
-    out = await sendWebhook({ deliveryId: delivery.id }, { db, fetchImpl: fetch });
+    out = await sendWebhook({ deliveryId: delivery.id }, { db, validateTarget: async () => {}, fetchImpl: fetch });
   }
   assert.equal(out.exhausted, true);
 
@@ -149,10 +149,10 @@ test("already-delivered retry job is a no-op (idempotent)", async () => {
   const db = createMockDb();
   const { tenant } = await seed(db);
   const fetch = mockFetch(() => ({ status: 200 }));
-  await sendWebhook({ tenantId: String(tenant.id), sessionUid: "vps_WH1", event: "verification.approved" }, { db, fetchImpl: fetch });
+  await sendWebhook({ tenantId: String(tenant.id), sessionUid: "vps_WH1", event: "verification.approved" }, { db, validateTarget: async () => {}, fetchImpl: fetch });
   const delivery = (await db.webhookDelivery.findMany({}))[0];
 
-  const out = await sendWebhook({ deliveryId: delivery.id }, { db, fetchImpl: fetch });
+  const out = await sendWebhook({ deliveryId: delivery.id }, { db, validateTarget: async () => {}, fetchImpl: fetch });
   assert.equal(out.skipped, true);
   assert.equal(fetch.calls.length, 1); // no second HTTP call
 });
@@ -162,7 +162,7 @@ test("tenant without webhook config: skipped, no delivery row", async () => {
   const { tenant } = await seed(db, { webhookUrl: null, webhookSecret: null });
   const out = await sendWebhook(
     { tenantId: String(tenant.id), sessionUid: "vps_WH1", event: "verification.approved" },
-    { db, fetchImpl: mockFetch(() => ({ status: 200 })) }
+    { db, validateTarget: async () => {}, fetchImpl: mockFetch(() => ({ status: 200 })) }
   );
   assert.equal(out.skipped, true);
   assert.equal((await db.webhookDelivery.findMany({})).length, 0);

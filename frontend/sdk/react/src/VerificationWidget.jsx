@@ -224,10 +224,12 @@ export function VerificationWidget({
     (async () => {
       let verificationType = "ID_AND_FACE";
       let challengeActions = [];
+      let documentTypes = [];
       try {
         const c = await client.getChallenge();
         verificationType = c.verificationType || "ID_AND_FACE";
         challengeActions = Array.isArray(c.livenessActions) ? c.livenessActions : [];
+        documentTypes = Array.isArray(c.documentTypes) ? c.documentTypes : [];
         // Rehydrate attempt state — a refresh mid-retry must not reset the
         // counter or hide the manual-upload option the server already granted.
         if (typeof c.attempts === "number") {
@@ -243,7 +245,7 @@ export function VerificationWidget({
       if (cancelled) return;
       actionsRef.current = challengeActions;
       setActions(challengeActions);
-      const flow = createFlow(verificationType, { documentBack: needsDocumentBack(c.documentTypes) });
+      const flow = createFlow(verificationType, { documentBack: needsDocumentBack(documentTypes) });
       flowRef.current = flow;
       setFlowState(flow.state());
       off = flow.onChange((s) => {

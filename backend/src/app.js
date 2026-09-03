@@ -12,10 +12,21 @@ const limiters = standardLimiters();
 app.locals.limiters = limiters;
 
 app.disable("x-powered-by");
+// Trust the first reverse proxy (Apache/Passenger, API Gateway). Ensures
+// req.ip reflects the real client, not a spoofed X-Forwarded-For header.
+app.set("trust proxy", Number(process.env.TRUST_PROXY_HOPS) || 1);
 app.use(require("./middleware/cors").cors);
 app.use(securityHeaders);
 app.use(limiters.global);
-app.use(express.json({ limit: "1mb" })); // capture routes use a 12mb body parser of their own
+// Capture routes mount their own 12mb body parser per-route, so skip the
+// global parser for them — the first body parser to run wins in Express,
+// and a global 1mb limit would silently cap capture uploads.
+app.use((req, res, next) => {
+  if (req.method === "POST" && /^\/v1\/verification-sessions\/[^/]+\//.test(req.path)) {
+    return next(); // let the per-route bigBody parser handle it
+  }
+  express.json({ limit: "1mb" })(req, res, next);
+});
 app.use(correlationId);
 
 app.use(require("./routes/health"));

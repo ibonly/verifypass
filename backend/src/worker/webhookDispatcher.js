@@ -7,6 +7,60 @@
 const crypto = require("crypto");
 const { webhookHeaders } = require("@verifypass/shared");
 
+
+const dns = require("dns/promises");
+const { URL } = require("url");
+const net = require("net");
+
+/**
+ * Resolve the webhook URL's hostname and reject private/loopback/link-local/
+ * CGNAT ranges to prevent SSRF. Also enforces https in production.
+ */
+async function validateWebhookTarget(urlStr) {
+  const u = new URL(urlStr);
+  if (u.protocol !== "https:") {
+    throw new Error("webhook URL must use https");
+  }
+  // Only allow standard HTTPS port (or explicit 443)
+  const port = u.port ? Number(u.port) : 443;
+  if (port !== 443) {
+    throw new Error(`webhook URL port ${port} not allowed (use 443)`);
+  }
+  // Resolve hostname to IPs and check each
+  const host = u.hostname;
+  let addrs;
+  if (net.isIP(host)) {
+    addrs = [host];
+  } else {
+    try {
+      const records = await dns.resolve4(host);
+      addrs = records;
+    } catch (_) {
+      throw new Error(`could not resolve webhook host: ${host}`);
+    }
+  }
+  for (const ip of addrs) {
+    if (isPrivateIp(ip)) {
+      throw new Error(`webhook URL resolves to private/reserved IP (${ip})`);
+    }
+  }
+}
+
+function isPrivateIp(ip) {
+  const parts = ip.split(".").map(Number);
+  if (parts.length !== 4) return true; // non-IPv4 → block
+  const [a, b, c, d] = parts;
+  if (a === 127) return true;                          // loopback
+  if (a === 10) return true;                           // 10.0.0.0/8
+  if (a === 172 && b >= 16 && b <= 31) return true;    // 172.16.0.0/12
+  if (a === 192 && b === 168) return true;             // 192.168.0.0/16
+  if (a === 169 && b === 254) return true;             // link-local
+  if (a === 100 && b >= 64 && b <= 127) return true;   // CGNAT 100.64.0.0/10
+  if (a === 0) return true;                            // 0.0.0.0/8
+  if (a >= 224) return true;                           // multicast + reserved
+  return false;
+}
+
 const RETRY_SCHEDULE_SECONDS = [60, 300, 1800, 7200, 43200];
 const MAX_ATTEMPTS = RETRY_SCHEDULE_SECONDS.length;
 const TIMEOUT_MS = 10000;
@@ -17,7 +71,8 @@ const TIMEOUT_MS = 10000;
  *   retry:       {deliveryId}
  * @param {object} deps {db, fetchImpl, now}
  */
-async function sendWebhook(payload, { db, fetchImpl, now = () => new Date(), enqueueJob } = {}) {
+async function sendWebhook(payload, deps = {}) {
+  const { db, fetchImpl, now = () => new Date(), enqueueJob } = deps;
   const doFetch = fetchImpl || fetch;
   // Retry scheduling goes through the injected dispatch in Lambda/SQS
   // topologies; the polling worker keeps using job_queue rows.
@@ -42,6 +97,18 @@ async function sendWebhook(payload, { db, fetchImpl, now = () => new Date(), enq
 
   const body = JSON.stringify(delivery.payload);
   const attempts = (delivery.attempts || 0) + 1;
+
+  // SSRF protection: validate the target URL before sending
+  const checkTarget = deps.validateTarget || validateWebhookTarget;
+  try {
+    await checkTarget(tenant.webhookUrl);
+  } catch (ssrfErr) {
+    await db.webhookDelivery.updateMany({
+      where: { id: delivery.id },
+      data: { status: "failed", attempts, lastError: `SSRF blocked: ${ssrfErr.message}` }
+    });
+    return { delivered: false, attempts, blocked: true, reason: ssrfErr.message };
+  }
 
   let statusCode = null;
   let error = null;
@@ -134,4 +201,4 @@ async function createDelivery({ tenantId, sessionUid, event }, { db, now }) {
   });
 }
 
-module.exports = { sendWebhook, RETRY_SCHEDULE_SECONDS, MAX_ATTEMPTS };
+module.exports = { sendWebhook, validateWebhookTarget, isPrivateIp, RETRY_SCHEDULE_SECONDS, MAX_ATTEMPTS };

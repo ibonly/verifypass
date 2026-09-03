@@ -4,19 +4,29 @@
 // no randomness. Tested against a golden table; changing any rule must break
 // a test.
 
-const { DEFAULT_THRESHOLDS, THRESHOLD_BOUNDS, REASON_CODES } = require("./reasonCodes");
+const { DEFAULT_THRESHOLDS, THRESHOLD_BOUNDS, THRESHOLD_PROFILES, REASON_CODES } = require("./reasonCodes");
 
-/** Merge tenant-configured thresholds over defaults, clamped to platform bounds. */
-function resolveThresholds(tenantSettings = {}) {
+/**
+ * Merge tenant-configured thresholds over defaults, clamped to platform bounds.
+ * @param {object} tenantSettings tenant.settings ({ thresholds: {...} })
+ * @param {string} [providerName] active provider ("onnx" | "faceplugin" | ...).
+ *   Face-match/liveness SCORE SCALES differ by provider (FV-5), so the base
+ *   defaults AND bounds come from that provider's profile when one exists;
+ *   an unknown/absent provider falls back to the platform faceplugin scale.
+ */
+function resolveThresholds(tenantSettings = {}, providerName) {
+  const profile = providerName ? THRESHOLD_PROFILES[providerName] : null;
+  const baseDefaults = profile ? profile.defaults : DEFAULT_THRESHOLDS;
+  const bounds = profile ? profile.bounds : THRESHOLD_BOUNDS;
   const t = tenantSettings.thresholds || {};
   const merged = {
-    liveness: { ...DEFAULT_THRESHOLDS.liveness, ...(t.liveness || {}) },
-    faceMatch: { ...DEFAULT_THRESHOLDS.faceMatch, ...(t.faceMatch || {}) },
+    liveness: { ...baseDefaults.liveness, ...(t.liveness || {}) },
+    faceMatch: { ...baseDefaults.faceMatch, ...(t.faceMatch || {}) },
     maxFailedAttempts: t.maxFailedAttempts || DEFAULT_THRESHOLDS.maxFailedAttempts,
     risk: { ...DEFAULT_THRESHOLDS.risk, ...(t.risk || {}) }
   };
   for (const k of ["liveness", "faceMatch"]) {
-    const b = THRESHOLD_BOUNDS[k];
+    const b = bounds[k];
     merged[k].reject = Math.max(merged[k].reject, b.rejectMin);
     merged[k].pass = Math.min(merged[k].pass, b.passMax);
     if (merged[k].reject > merged[k].pass) merged[k].reject = merged[k].pass;

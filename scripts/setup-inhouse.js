@@ -12,7 +12,39 @@
 const fs = require("fs");
 const path = require("path");
 
-require("dotenv").config({ path: path.resolve(__dirname, "../.env") });
+function loadEnv() {
+  const envPaths = [
+    path.resolve(__dirname, "../backend/.env"),
+    path.resolve(__dirname, "../.env")
+  ];
+  for (const p of envPaths) {
+    if (!fs.existsSync(p)) continue;
+    try {
+      require("dotenv").config({ path: p });
+    } catch (_) {
+      try {
+        require("../backend/node_modules/dotenv").config({ path: p });
+      } catch (_) {
+        const lines = fs.readFileSync(p, "utf8").split("\n");
+        for (const l of lines) {
+          const t = l.trim();
+          if (!t || t.startsWith("#")) continue;
+          const eq = t.indexOf("=");
+          if (eq > 0) {
+            const k = t.slice(0, eq).trim();
+            let v = t.slice(eq + 1).trim();
+            if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+              v = v.slice(1, -1);
+            }
+            if (process.env[k] === undefined) process.env[k] = v;
+          }
+        }
+      }
+    }
+  }
+}
+
+loadEnv();
 
 const { getDb } = require("../backend/src/lib/db");
 const { issueKey } = require("../backend/src/services/apiKeyService");

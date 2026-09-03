@@ -58,19 +58,20 @@ async function deleteEvidence(storagePath) {
 }
 
 /** HMAC-signed, expiring access token for one evidence file id. */
-function signEvidenceAccess(evidenceId, { ttlSeconds = SIGNED_URL_TTL_SECONDS, secret } = {}) {
+function signEvidenceAccess(evidenceId, { ttlSeconds = SIGNED_URL_TTL_SECONDS, secret, tenantId } = {}) {
   const expires = Math.floor(Date.now() / 1000) + ttlSeconds;
-  const payload = `${evidenceId}.${expires}`;
+  const payload = tenantId ? `${tenantId}.${evidenceId}.${expires}` : `${evidenceId}.${expires}`;
   const sig = crypto.createHmac("sha256", secret || config.sdkTokenSecret).update(payload).digest("base64url");
   return { token: `${expires}.${sig}`, expires };
 }
 
-function verifyEvidenceAccess(evidenceId, token, { secret } = {}) {
+function verifyEvidenceAccess(evidenceId, token, { secret, tenantId } = {}) {
   const [expiresStr, sig] = String(token || "").split(".");
   const expires = Number(expiresStr);
   if (!expires || !sig || expires < Math.floor(Date.now() / 1000)) return false;
+  const payloadStr = tenantId ? `${tenantId}.${evidenceId}.${expires}` : `${evidenceId}.${expires}`;
   const expected = crypto.createHmac("sha256", secret || config.sdkTokenSecret)
-    .update(`${evidenceId}.${expires}`).digest("base64url");
+    .update(payloadStr).digest("base64url");
   const a = Buffer.from(sig);
   const b = Buffer.from(expected);
   return a.length === b.length && crypto.timingSafeEqual(a, b);

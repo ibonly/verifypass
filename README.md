@@ -30,7 +30,8 @@ cp backend/.env.example backend/.env     # fill in DATABASE_URL + secrets
 #   mongod --replSet rs0   (then once: mongosh --eval 'rs.initiate()')
 (cd backend && npx prisma db push --schema prisma/schema.prisma)
 (cd backend && node scripts/fetch-models.js)
-node scripts/dev-stack.js                # API :3000 + worker + seeded tenant
+npm start                                # OR node scripts/start-all.js (API + worker + dashboard + verify-page + sample-app)
+# OR for backend-only: node scripts/dev-stack.js
 ```
 
 ## Tests

@@ -50,3 +50,8 @@ exports.ACTION_TRIGGER = stabilizer.ACTION_TRIGGER;
 exports.DETECT_CONFIG = faceDetectMath.DETECT_CONFIG;
 exports.bestFaceBox = faceDetectMath.bestFaceBox;
 exports.assessFraming = faceDetectMath.assessFraming;
+
+const modelCache = require("./modelCache");
+exports.fetchWithCache = modelCache.fetchWithCache;
+exports.clearModelCache = modelCache.clearModelCache;
+exports.DEFAULT_CACHE_NAME = modelCache.DEFAULT_CACHE_NAME;

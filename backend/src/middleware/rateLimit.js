@@ -36,7 +36,7 @@ function createRateLimiter({ windowMs, max, keyFn, name = "default", now = Date.
   }
 
   function middleware(req, res, next) {
-    const key = keyFn ? keyFn(req) : (req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "unknown");
+    const key = keyFn ? keyFn(req) : (req.ip || req.socket?.remoteAddress || "unknown");
     if (!check(String(key))) {
       res.setHeader("Retry-After", Math.ceil(windowMs / 1000));
       return next(new AppError("RATE_LIMITED", `Too many requests (${name})`));
@@ -56,7 +56,7 @@ function createRateLimiter({ windowMs, max, keyFn, name = "default", now = Date.
  * all traffic because the limiter store hiccuped would be worse — errors are
  * logged loudly instead.
  */
-function createDbRateLimiter({ windowMs, max, keyFn, name = "default", now = Date.now, getDbImpl }) {
+function createDbRateLimiter({ windowMs, max, keyFn, name = "default", now = Date.now, getDbImpl, failClosed = false }) {
   const resolveDb = getDbImpl || (() => require("../lib/db").getDb());
 
   async function count(key) {
@@ -87,7 +87,7 @@ function createDbRateLimiter({ windowMs, max, keyFn, name = "default", now = Dat
   }
 
   function middleware(req, res, next) {
-    const key = keyFn ? keyFn(req) : (req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "unknown");
+    const key = keyFn ? keyFn(req) : (req.ip || req.socket?.remoteAddress || "unknown");
     check(String(key))
       .then((ok) => {
         if (ok) return next();
@@ -96,7 +96,13 @@ function createDbRateLimiter({ windowMs, max, keyFn, name = "default", now = Dat
       })
       .catch((err) => {
         console.error("RATE_LIMIT_STORE_ERROR", { name, err: err.message });
-        next(); // fail open — see note above
+        if (failClosed) {
+          // Login limiter: fail closed during DB errors to prevent credential-stuffing windows
+          res.setHeader("Retry-After", Math.ceil(windowMs / 1000));
+          next(new AppError("RATE_LIMITED", `Rate limiter unavailable (${name})`));
+        } else {
+          next(); // fail open — availability over strict enforcement
+        }
       });
   }
 
@@ -111,13 +117,13 @@ function standardLimiters() {
     || (env === "production" || env === "staging" ? "db" : "memory");
   const make = backend === "db" ? createDbRateLimiter : createRateLimiter;
 
-  const ipKey = (req) => req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "unknown";
+  const ipKey = (req) => req.ip || req.socket?.remoteAddress || "unknown";
   return {
     // generous global backstop
     global: make({ windowMs: 60_000, max: 300, keyFn: ipKey, name: "global" }),
     // credential stuffing protection: per IP+email
     login: make({
-      windowMs: 15 * 60_000, max: 10, name: "login",
+      windowMs: 15 * 60_000, max: 10, name: "login", failClosed: true,
       keyFn: (req) => `${ipKey(req)}:${(req.body?.email || "").toLowerCase()}`
     }),
     // capture uploads: per tenant once authed — applied after auth middleware

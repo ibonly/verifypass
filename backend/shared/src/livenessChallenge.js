@@ -59,6 +59,14 @@ function isChallengeFresh(challenge, { now = Date.now, ttlMs = DEFAULT_TTL_MS } 
 // a face, and only a confidently-spoof score fails them.
 const CHALLENGE_SCORE_FLOOR = 0.3;
 
+// FV-2 soft floor: applied instead of CHALLENGE_SCORE_FLOOR only when the
+// selfie strongly passed passive liveness. It relaxes the anti-spoof floor
+// enough to accommodate the low scores frontal-biased models give genuine
+// turned/tilted heads, WITHOUT disarming it — a near-zero or non-face junk
+// frame still fails, so a strong selfie can no longer vouch for unrelated,
+// independently-uploaded action frames.
+const CHALLENGE_SOFT_FLOOR = 0.1;
+
 /**
  * Does an observed pose satisfy the requested action?
  * Returns true/false when a verdict is possible, or null when this frame
@@ -84,12 +92,6 @@ function poseSatisfiesAction(action, pose, { strictDirection = false } = {}) {
     case "smile": return pose.smiled === undefined ? null : pose.smiled !== false;
     default: return null;
   }
-}
-
-/** @deprecated kept for compatibility; use poseSatisfiesAction */
-function poseMatchesAction(action, pose) {
-  const r = poseSatisfiesAction(action, pose, { strictDirection: true });
-  return r === null ? true : r;
 }
 
 /**
@@ -120,30 +122,48 @@ function verifyLivenessChallenge(challenge, frames = [], thresholds = {}, opts =
     byAction.get(f.action).push(f);
   }
 
+  const usedChecksums = new Set();
   const bestScores = [];
   for (const action of challenge.actions) {
     const candidates = byAction.get(action) || [];
+    // Distinctness (FV-1): a frame that already satisfied ANOTHER action can't
+    // be reused here. Frames carry a plaintext checksum (from the evidence
+    // store); relabeling ONE frame across every action — the trivial way to
+    // defeat an action challenge — now fails, because the second action finds
+    // its only frame already consumed. Frames without a checksum (unit tests,
+    // legacy rows) are treated as always-distinct.
+    const distinctCandidates = candidates.filter((c) => !(c.checksum && usedChecksums.has(c.checksum)));
     // Mid-action frames: a face must be PRESENT. faceCount>=1 (not ===1):
     // profile/tilted heads make detectors split or double-count, and the
     // selfie gate already rejects genuinely multi-person sessions.
-    const faced = candidates.filter((c) => c.liveness && c.liveness.faceCount >= 1);
+    const faced = distinctCandidates.filter((c) => c.liveness && c.liveness.faceCount >= 1);
     if (faced.length === 0) {
-      reasonCodes.push("LIVENESS_CHALLENGE_INCOMPLETE");
-      perAction[action] = { present: candidates.length > 0, live: false, poseOk: false };
+      // A present-but-consumed frame is a relabeled duplicate; a truly absent
+      // one is just incomplete. Both fail the challenge, with distinct codes.
+      const consumedAway = candidates.length > 0 && distinctCandidates.length === 0;
+      if (consumedAway) {
+        reasonCodes.push("LIVENESS_CHALLENGE_DUPLICATE_FRAME");
+        perAction[action] = { present: true, live: false, poseOk: false, duplicate: true };
+      } else {
+        reasonCodes.push("LIVENESS_CHALLENGE_INCOMPLETE");
+        perAction[action] = { present: candidates.length > 0, live: false, poseOk: false };
+      }
       continue;
     }
+    // Consume these frames so a later action can't also claim them.
+    for (const c of faced) if (c.checksum) usedChecksums.add(c.checksum);
 
-    // Spoof floor — only when the provider gave a numeric score at all, and
-    // ONLY when the selfie did not strongly pass the strict liveness gate.
-    // Rationale: mid-action frames (tilted/turned heads, backlighting) score
-    // low on frontal-biased anti-spoof models even for live users, while a
-    // replay attack cannot produce a high SELFIE score — so a strong selfie
-    // makes low action-frame scores attributable to pose/lighting, not spoofing.
+    // Spoof floor — only when the provider gave a numeric score at all. A
+    // strong selfie SOFTENS the floor (frontal-biased models score genuine
+    // turned/tilted heads low) but never removes it (FV-2): the selfie and the
+    // action frames are independent uploads, so a strong selfie must not let a
+    // near-zero / non-face junk frame pass as a completed action.
     const passAt = thresholds?.liveness?.pass ?? 0.85;
     const selfieStrong = typeof opts.selfieScore === "number" && opts.selfieScore >= passAt;
+    const floor = selfieStrong ? CHALLENGE_SOFT_FLOOR : CHALLENGE_SCORE_FLOOR;
     const scores = faced.map((c) => c.liveness.score).filter((s) => typeof s === "number");
     const maxScore = scores.length ? Math.max(...scores) : null;
-    if (maxScore !== null && maxScore < CHALLENGE_SCORE_FLOOR && !selfieStrong) {
+    if (maxScore !== null && maxScore < floor) {
       reasonCodes.push("LIVENESS_CHALLENGE_FAILED");
       perAction[action] = { present: true, live: false, poseOk: false, score: maxScore };
       continue;
@@ -157,9 +177,8 @@ function verifyLivenessChallenge(challenge, frames = [], thresholds = {}, opts =
     const poseOk = poseVerdicts.length === 0 ? null : poseVerdicts.some(Boolean);
 
     // Record OBSERVED magnitudes for calibration — pose units/ranges differ
-    // across models (degrees vs radians, sign conventions), so these numbers
-    // in rawResult are how a deployment calibrates POSE thresholds before
-    // turning enforcement on.
+    // across models, so these numbers in rawResult are how a deployment
+    // calibrates POSE thresholds before turning enforcement on.
     const posed = faced.filter((c) => c.pose);
     const poseObserved = posed.length
       ? {
@@ -168,9 +187,6 @@ function verifyLivenessChallenge(challenge, frames = [], thresholds = {}, opts =
         }
       : null;
 
-    // Pose enforcement is OPT-IN (settings.challenge.enforcePose) until the
-    // deployed container's pose output has been calibrated against real
-    // sessions. Uncalibrated hard-fail rejects every legitimate user.
     if (poseOk === false && opts.enforcePose === true) {
       reasonCodes.push("LIVENESS_CHALLENGE_FAILED");
       perAction[action] = { present: true, live: true, poseOk: false, poseChecked: true, score: maxScore, ...poseObserved };
@@ -197,11 +213,11 @@ function verifyLivenessChallenge(challenge, frames = [], thresholds = {}, opts =
 module.exports = {
   CHALLENGE_ACTIONS,
   CHALLENGE_SCORE_FLOOR,
+  CHALLENGE_SOFT_FLOOR,
   poseSatisfiesAction,
   DEFAULT_STEPS,
   DEFAULT_TTL_MS,
   generateLivenessChallenge,
   isChallengeFresh,
-  poseMatchesAction,
   verifyLivenessChallenge
 };

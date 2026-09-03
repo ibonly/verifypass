@@ -50,8 +50,13 @@ function signSdkToken(sessionUid, publicApiUrl = config.apiPublicUrl) {
 }
 
 function verifySdkToken(sessionUid, token, tokenHash) {
+  if (!tokenHash) return false; // null/undefined hash → no valid token was ever issued
   const expected = crypto.createHmac("sha256", config.sdkTokenSecret).update(`${sessionUid}.${token}`).digest("hex");
-  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(tokenHash || ""));
+  const a = Buffer.from(expected);
+  const b = Buffer.from(tokenHash);
+  // timingSafeEqual throws on length mismatch — guard it for a clean 401
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
 }
 
 /** Create a verification session for the authenticated tenant (PRD §9.3/§12.1). */
@@ -243,10 +248,10 @@ async function recordConsent(scopedDb, sessionUid, sdkToken, { copyVersion = nul
   const consentAt = new Date();
   // x-forwarded-for is a comma-separated proxy chain — record the CLIENT ip
   // (first hop), same normalization attachDeviceInfo uses.
-  const rawIp = req ? String(req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "") : "";
+  const rawIp = req ? String(req.ip || (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.socket?.remoteAddress || "") : "";
   const consentMeta = {
     copyVersion,
-    ip: rawIp.split(",")[0].trim() || null,
+    ip: rawIp || null,
     userAgent: req ? (req.headers["user-agent"] || null) : null
   };
   await scopedDb.sessions.update(session.sessionUid, { consentAt, consentMeta });

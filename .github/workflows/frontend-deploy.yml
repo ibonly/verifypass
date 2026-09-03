@@ -43,6 +43,10 @@ jobs:
           VP_API_BASE: ${{ secrets.VP_API_BASE }}
         run: npm install && npm run build
 
+      - name: Install SDK react
+        working-directory: frontend/sdk/react
+        run: npm install
+
       - name: Build verify-page
         working-directory: frontend/verify-page
         env:

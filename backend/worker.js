@@ -105,6 +105,11 @@ const HANDLERS = {
     });
     for (const file of expired) {
       await storage.removeStored(file.storagePath); // fs or s3://, idempotent
+      // Remove any plaintext Cloudinary mirror (H2/L7 fix)
+      if (file.cloudinaryPublicId) {
+        const { destroyEvidenceImage } = require("./src/services/cloudinaryService");
+        await destroyEvidenceImage(file.cloudinaryPublicId);
+      }
       await db.evidenceFile.delete({ where: { id: file.id } });
     }
     if (expired.length) console.log(`retention_cleanup: removed ${expired.length} files`);

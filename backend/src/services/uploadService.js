@@ -24,6 +24,15 @@ const { uploadEvidenceImage } = require("./cloudinaryService");
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MIN_IMAGE_BYTES = 1024;
 
+// FV-3: per-session upload budgets. A valid session token must not be able to
+// enqueue unbounded evidence — every frame is decrypted, run through liveness
+// inference, and (optionally) mirrored to Cloudinary during verification, so an
+// unbounded frame count is a worker-compute + third-party-cost DoS. These caps
+// sit well above what an honest capture flow produces (a few frames per action).
+const MAX_EVIDENCE_PER_SESSION = Number(process.env.MAX_EVIDENCE_PER_SESSION || 40);
+const MAX_LIVENESS_FRAMES_PER_ACTION = Number(process.env.MAX_LIVENESS_FRAMES_PER_ACTION || 6);
+const MAX_SELFIES_PER_SESSION = Number(process.env.MAX_SELFIES_PER_SESSION || 8);
+
 const MAGIC = [
   { type: "image/jpeg", bytes: [0xff, 0xd8, 0xff] },
   { type: "image/png", bytes: [0x89, 0x50, 0x4e, 0x47] },
@@ -47,10 +56,10 @@ function decodeImage(imageBase64) {
   }
   // Allow data-URL prefix from naive clients
   const b64 = imageBase64.replace(/^data:image\/[a-z+]+;base64,/, "");
-  let buffer;
-  try {
-    buffer = Buffer.from(b64, "base64");
-  } catch (_) {
+  // Buffer.from(str, "base64") never throws — it silently drops invalid chars.
+  // Validate explicitly: re-encode and compare to catch malformed input.
+  const buffer = Buffer.from(b64, "base64");
+  if (buffer.length === 0 && b64.length > 0) {
     throw new AppError("VALIDATION_ERROR", "imageBase64 is not valid base64");
   }
   if (buffer.length < MIN_IMAGE_BYTES) throw new AppError("VALIDATION_ERROR", "image too small to be a real capture");
@@ -132,6 +141,24 @@ async function handleUpload({ scopedDb, tenantUid, sessionUid, sdkToken, kind, s
   const sideKey = side || (kind === "document" ? "front" : "frame" in spec.fileTypes && kind === "liveness" ? "frame" : "selfie");
   const fileType = spec.fileTypes[sideKey];
   if (!fileType) throw new AppError("VALIDATION_ERROR", `invalid side '${sideKey}' for ${kind} upload`);
+
+  // FV-3: enforce per-session / per-action upload budgets before doing the
+  // expensive decode + sanitize + encrypt + Cloudinary work.
+  const existing = await scopedDb.evidence.listForSession(session.id);
+  if (existing.length >= MAX_EVIDENCE_PER_SESSION) {
+    throw new AppError("VALIDATION_ERROR", `evidence upload limit reached for this session (max ${MAX_EVIDENCE_PER_SESSION})`);
+  }
+  if (fileType === "liveness_frame") {
+    const forAction = existing.filter((e) => e.fileType === "liveness_frame" && e.label === label).length;
+    if (forAction >= MAX_LIVENESS_FRAMES_PER_ACTION) {
+      throw new AppError("VALIDATION_ERROR", `too many liveness frames for action '${label}' (max ${MAX_LIVENESS_FRAMES_PER_ACTION})`);
+    }
+  } else if (fileType === "selfie") {
+    const selfies = existing.filter((e) => e.fileType === "selfie").length;
+    if (selfies >= MAX_SELFIES_PER_SESSION) {
+      throw new AppError("VALIDATION_ERROR", `too many selfie captures for this session (max ${MAX_SELFIES_PER_SESSION})`);
+    }
+  }
 
   const decoded = decodeImage(imageBase64);
   const sanitized = await sanitizeImage(decoded.buffer);

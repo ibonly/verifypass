@@ -1,5 +1,9 @@
+import path from "path";
+import { fileURLToPath } from "url";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Sample webcam test app. Point it at your running API and paste a secret key
 // from the dev stack. Camera capture requires a secure context — localhost is
@@ -7,7 +11,11 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   resolve: {
-    dedupe: ["react", "react-dom"]
+    dedupe: ["react", "react-dom"],
+    alias: {
+      "@verifypass/sdk-core": path.resolve(__dirname, "../frontend/sdk/core/src/index.js"),
+      "@verifypass/react": path.resolve(__dirname, "../frontend/sdk/react/src/index.js")
+    }
   },
   server: {
     proxy: {

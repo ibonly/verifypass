@@ -6,7 +6,7 @@
 // tests or non-face flows, and the whole detector is optional: if the model or
 // runtime fails to load, the widget falls back to motion-based auto-capture.
 
-import { bestFaceBox, assessFraming, DETECT_CONFIG } from "@verifypass/sdk-core";
+import { bestFaceBox, assessFraming, DETECT_CONFIG, fetchWithCache } from "@verifypass/sdk-core";
 import ortWasmUrl from "onnxruntime-web/ort-wasm-simd-threaded.wasm?url";
 
 let ortPromise = null;
@@ -26,12 +26,15 @@ function loadOrt() {
 }
 
 /**
- * @param {string} modelUrl URL to fr_detect.onnx
+ * @param {string|ArrayBuffer} modelUrl URL or buffer to fr_detect.onnx
  * @returns {Promise<{detect(imageData):Promise<object>, dispose():void}>}
  */
 export async function createFaceDetector(modelUrl) {
-  const ort = await loadOrt();
-  const session = await ort.InferenceSession.create(modelUrl, { executionProviders: ["wasm"] });
+  const [ort, modelBuffer] = await Promise.all([
+    loadOrt(),
+    typeof modelUrl === "string" ? fetchWithCache(modelUrl) : modelUrl
+  ]);
+  const session = await ort.InferenceSession.create(modelBuffer, { executionProviders: ["wasm"] });
   const [W, H] = DETECT_CONFIG.inputSize;
 
   function preprocess(imageData) {

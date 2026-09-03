@@ -96,3 +96,45 @@ test("tenant thresholds change outcomes", () => {
   const d = decide({ ...ok, faceMatch: { score: 0.9 } }, strict);
   assert.equal(d.status, "manual_review");
 });
+
+// --- FV-5: provider-calibrated thresholds ---
+
+test("FV-5: ONNX cosine-scale thresholds approve a genuine match that the faceplugin-scale defaults would reject", () => {
+  // A genuine same-person ArcFace cosine similarity lands ~0.5.
+  const genuine = {
+    selfie: { faceCount: 1 },
+    liveness: { score: 0.8 },
+    idFace: { found: true },
+    faceMatch: { score: 0.5 },
+    document: { ocrConfidence: 0.94, expired: false }
+  };
+
+  // Platform (faceplugin-scale) defaults: 0.5 < reject 0.65 → wrongly rejected.
+  const fpThresholds = resolveThresholds({});
+  const fp = decide(genuine, fpThresholds);
+  assert.equal(fp.status, "rejected");
+  assert.ok(fp.reasonCodes.includes("FACE_MATCH_FAILED"));
+
+  // ONNX profile: 0.5 >= pass 0.42 → approved (given other signals clean).
+  const onnxThresholds = resolveThresholds({}, "onnx");
+  assert.ok(onnxThresholds.faceMatch.pass <= 0.5, `onnx pass should be <= 0.5, got ${onnxThresholds.faceMatch.pass}`);
+  const on = decide(genuine, onnxThresholds);
+  assert.equal(on.status, "approved", JSON.stringify(on));
+});
+
+test("FV-5: unknown/absent provider falls back to platform (faceplugin) defaults", () => {
+  assert.deepEqual(resolveThresholds({}), resolveThresholds({}, "does-not-exist"));
+  const t = resolveThresholds({}, "faceplugin");
+  assert.equal(t.faceMatch.reject, 0.65);
+  assert.equal(t.faceMatch.pass, 0.82);
+});
+
+test("FV-5: onnx impostor score below onnx reject is still rejected", () => {
+  const impostor = {
+    selfie: { faceCount: 1 }, liveness: { score: 0.8 }, idFace: { found: true },
+    faceMatch: { score: 0.2 }, document: { ocrConfidence: 0.94, expired: false }
+  };
+  const on = decide(impostor, resolveThresholds({}, "onnx"));
+  assert.equal(on.status, "rejected");
+  assert.ok(on.reasonCodes.includes("FACE_MATCH_FAILED"));
+});

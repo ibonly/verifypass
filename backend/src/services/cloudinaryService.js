@@ -120,4 +120,22 @@ function signedUrl(publicId, { format = "jpg", expiresInSeconds } = {}) {
   return client.url(publicId, opts);
 }
 
-module.exports = { uploadEvidenceImage, buildPublicId, safeSegment, signedUrl };
+
+/**
+ * Destroy a Cloudinary asset by public_id. Best-effort: returns true on
+ * success, false on any failure or when Cloudinary is not configured.
+ * Used by biometric deletion (NDPA §12.8) and retention cleanup.
+ */
+async function destroyEvidenceImage(publicId) {
+  const client = getClient();
+  if (!client || !publicId) return false;
+  try {
+    await client.uploader.destroy(publicId, { resource_type: "image", type: "authenticated" });
+    return true;
+  } catch (err) {
+    console.warn(`cloudinaryService: destroy failed (${publicId}): ${err.message}`);
+    return false;
+  }
+}
+
+module.exports = { uploadEvidenceImage, destroyEvidenceImage, buildPublicId, safeSegment, signedUrl };

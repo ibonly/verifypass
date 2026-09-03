@@ -2,6 +2,7 @@
 
 const { AppError, storage } = require("@verifypass/shared");
 const { getDb } = require("../lib/db");
+const { destroyEvidenceImage } = require("./cloudinaryService");
 
 /**
  * Delete biometric evidence for a customer reference (PRD §12.8).
@@ -18,6 +19,8 @@ async function deleteBiometricData(scopedDb, customerReference) {
     const files = await db.evidenceFile.findMany({ where: { sessionId: session.id } });
     for (const file of files) {
       await storage.removeStored(file.storagePath); // fs or s3://, idempotent
+      // NDPA §12.8: also remove any plaintext Cloudinary mirror
+      if (file.cloudinaryPublicId) await destroyEvidenceImage(file.cloudinaryPublicId);
       await db.evidenceFile.delete({ where: { id: file.id } });
       filesDeleted++;
     }

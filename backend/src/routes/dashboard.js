@@ -23,7 +23,8 @@ function requireTenant(req, _res, next) {
 // GET /v1/dashboard/stats
 router.get("/stats", anyUser, requireTenant, tenantScope, async (req, res, next) => {
   try {
-    const sessions = await req.scopedDb.sessions.list({});
+    // L6 fix: cap unbounded query to prevent OOM on large tenants
+    const sessions = await req.scopedDb.sessions.list({}, { take: 50000 });
     const byStatus = {};
     let totalCompletionMs = 0;
     let completedCount = 0;
@@ -174,7 +175,7 @@ router.get("/sessions/:sessionId/evidence", anyUser, requireTenant, tenantScope,
       orderBy: { createdAt: "asc" }
     });
     const evidence = files.map((f) => {
-      const { token } = signEvidenceAccess(String(f.id), { ttlSeconds: 15 * 60 });
+      const { token } = signEvidenceAccess(String(f.id), { ttlSeconds: 15 * 60, tenantId: String(req.tenant.id) });
       return {
         evidenceId: String(f.id),
         fileType: f.fileType,
@@ -196,39 +197,35 @@ router.get("/evidence/:evidenceId/image", async (req, res, next) => {
   try {
     const evidenceId = req.params.evidenceId;
     const token = req.query.token;
-    if (!verifyEvidenceAccess(evidenceId, token)) {
-      return res.status(403).json({ success: false, error: "Invalid or expired evidence token" });
-    }
     const { getDb } = require("../lib/db");
     const file = await getDb().evidenceFile.findFirst({ where: { id: String(evidenceId) } });
     if (!file) return res.status(404).json({ success: false, error: "Evidence file not found" });
+    // M5 fix: bind the token to the tenant — look up via the evidence's session
+    const evidenceSession = await getDb().verificationSession.findFirst({ where: { id: file.sessionId } });
+    const fileTenantId = evidenceSession ? String(evidenceSession.tenantId) : null;
+    if (!verifyEvidenceAccess(evidenceId, token, { tenantId: fileTenantId })) {
+      return res.status(403).json({ success: false, error: "Invalid or expired evidence token" });
+    }
 
-    // readEvidence calls resolveKey(key) internally, so key must be a hex string (not a Buffer).
-    // Try primary key (from .env), then SDK-derived fallback, then hard-coded dev fallback.
-    const keysToTry = [
-      config.evidenceEncryptionKey,              // 64-char hex from EVIDENCE_ENCRYPTION_KEY
-      null                                       // null → resolveKey uses config.evidenceEncryptionKey itself
-    ].filter((k, i, a) => a.indexOf(k) === i);  // deduplicate
-
+    // Decrypt with the configured evidence key. In production, fail immediately
+    // on key mismatch — never fall back to well-known dev keys (M4 fix).
     let imageBuffer = null;
-    let lastErr;
-    // First, try letting evidenceStore resolve the key normally (uses config values)
     try {
       imageBuffer = await readEvidence(file.storagePath);
-    } catch (_) {
-      // If that fails, the file was encrypted with a different key (e.g. missing env).
-      // Try the SDK-token-derived fallback explicitly
+    } catch (primaryErr) {
+      if (config.env === "production") {
+        console.error("evidence decrypt failed in production — check EVIDENCE_ENCRYPTION_KEY", { evidenceId, err: primaryErr.message });
+        throw new AppError("INTERNAL_ERROR", "Could not decrypt evidence (key mismatch)");
+      }
+      // Dev/test only: try SDK-token-derived fallback for locally-encrypted evidence
       const crypto = require("crypto");
       const sdkDerivedHex = crypto.createHash("sha256").update(`evidence:${config.sdkTokenSecret}`).digest("hex");
-      const devHex = crypto.createHash("sha256").update("evidence:dev-only-secret").digest("hex");
-      for (const keyHex of [sdkDerivedHex, devHex]) {
-        try {
-          imageBuffer = await readEvidence(file.storagePath, { key: keyHex });
-          break;
-        } catch (e) { lastErr = e; }
+      try {
+        imageBuffer = await readEvidence(file.storagePath, { key: sdkDerivedHex });
+      } catch (e) {
+        throw primaryErr; // surface the original error
       }
     }
-    if (!imageBuffer) throw lastErr || new Error("Could not decrypt evidence with any known key");
 
 
 
@@ -243,7 +240,7 @@ router.get("/evidence/:evidenceId/image", async (req, res, next) => {
 // GET /v1/dashboard/sessions/:sessionId/attempts — end-user attempt history.
 // Derived from the audit trail (the audit rows ARE the attempt counter — the
 // same source the retry endpoint enforces its limit with, so they can't drift).
-router.get("/sessions/:sessionId/attempts", async (req, res, next) => {
+router.get("/sessions/:sessionId/attempts", anyUser, requireTenant, tenantScope, async (req, res, next) => {
   try {
     const session = await req.scopedDb.sessions.findByUid(req.params.sessionId);
     if (!session) throw new AppError("SESSION_NOT_FOUND");

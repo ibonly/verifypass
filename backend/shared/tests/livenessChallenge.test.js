@@ -152,3 +152,67 @@ test("verify: no challenge on session → ok (nothing to verify)", () => {
   const r = verifyLivenessChallenge(null, [], THRESH);
   assert.equal(r.ok, true);
 });
+
+// --- FV-1: frames are bound to actions by a distinct checksum ---
+
+function cframe(action, score, checksum, faceCount = 1, pose = null) {
+  return { action, liveness: { score, faceCount }, pose, checksum };
+}
+
+test("FV-1: one frame relabeled across every action → DUPLICATE_FRAME, not ok", () => {
+  const c = { actions: ["turn_left", "turn_right", "smile"], nonce: "x", issuedAt: new Date().toISOString() };
+  // The classic bypass: upload ONE genuine frame three times, once per action.
+  const frames = [
+    cframe("turn_left", 0.9, "sha_same"),
+    cframe("turn_right", 0.9, "sha_same"),
+    cframe("smile", 0.9, "sha_same")
+  ];
+  const r = verifyLivenessChallenge(c, frames, THRESH);
+  assert.equal(r.ok, false);
+  assert.ok(r.reasonCodes.includes("LIVENESS_CHALLENGE_DUPLICATE_FRAME"), JSON.stringify(r.reasonCodes));
+});
+
+test("FV-1: distinct frame per action → ok", () => {
+  const c = { actions: ["turn_left", "smile"], nonce: "x", issuedAt: new Date().toISOString() };
+  const frames = [
+    cframe("turn_left", 0.9, "sha_a", 1, { yaw: -20 }),
+    cframe("smile", 0.9, "sha_b")
+  ];
+  const r = verifyLivenessChallenge(c, frames, THRESH);
+  assert.equal(r.ok, true, JSON.stringify(r));
+});
+
+test("FV-1: a duplicate copy added alongside a real distinct frame does not reject the honest action", () => {
+  const c = { actions: ["turn_left", "smile"], nonce: "x", issuedAt: new Date().toISOString() };
+  const frames = [
+    cframe("turn_left", 0.9, "sha_a", 1, { yaw: -20 }),
+    cframe("smile", 0.9, "sha_b"),      // honest frame for smile
+    cframe("smile", 0.9, "sha_a")       // attacker copies turn_left's frame under smile
+  ];
+  const r = verifyLivenessChallenge(c, frames, THRESH);
+  assert.equal(r.ok, true, JSON.stringify(r)); // smile still satisfied by its own distinct frame
+});
+
+test("FV-1: frames without checksums stay always-distinct (legacy/back-compat)", () => {
+  const c = { actions: ["turn_left", "smile"], nonce: "x", issuedAt: new Date().toISOString() };
+  const frames = [frame("turn_left", 0.9, 1, { yaw: -20 }), frame("smile", 0.9)];
+  const r = verifyLivenessChallenge(c, frames, THRESH);
+  assert.equal(r.ok, true);
+});
+
+// --- FV-2: a strong selfie softens but never disarms the spoof floor ---
+
+test("FV-2: near-zero junk frame FAILS even with a strong selfie", () => {
+  const c = { actions: ["look_up"], nonce: "x", issuedAt: new Date().toISOString() };
+  const frames = [frame("look_up", 0.03, 1)]; // blank/non-face junk scores ~0
+  const r = verifyLivenessChallenge(c, frames, THRESH, { selfieScore: 0.98 });
+  assert.equal(r.ok, false);
+  assert.ok(r.reasonCodes.includes("LIVENESS_CHALLENGE_FAILED"));
+});
+
+test("FV-2: genuine backlit frame (above soft floor) still passes with a strong selfie", () => {
+  const c = { actions: ["look_up"], nonce: "x", issuedAt: new Date().toISOString() };
+  const frames = [frame("look_up", 0.12, 1)]; // real but backlit head
+  const r = verifyLivenessChallenge(c, frames, THRESH, { selfieScore: 0.91 });
+  assert.equal(r.ok, true, JSON.stringify(r));
+});

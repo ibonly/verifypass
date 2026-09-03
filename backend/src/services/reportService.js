@@ -21,7 +21,7 @@ function rangeFilter(days) {
 /** Daily verification volume + outcome trend (PRD: daily volume, approval/rejection trend, manual review volume). */
 async function dailyVolume(scopedDb, { days = 30 } = {}) {
   const { from } = rangeFilter(days);
-  const sessions = await scopedDb.sessions.list({ createdAt: { gte: from } });
+  const sessions = await scopedDb.sessions.list({ createdAt: { gte: from } }, { take: 50000 });
   const byDay = new Map();
   for (const s of sessions) {
     const key = dateKey(s.createdAt);
@@ -38,7 +38,7 @@ async function dailyVolume(scopedDb, { days = 30 } = {}) {
 /** Top rejection/review reasons (PRD: top rejection reasons). */
 async function topReasons(scopedDb, { days = 30, statuses = ["rejected", "manual_review"] } = {}) {
   const { from } = rangeFilter(days);
-  const sessions = await scopedDb.sessions.list({ createdAt: { gte: from } });
+  const sessions = await scopedDb.sessions.list({ createdAt: { gte: from } }, { take: 50000 });
   const counts = new Map();
   for (const s of sessions) {
     if (!statuses.includes(s.status)) continue;
@@ -143,7 +143,7 @@ async function usageSummary(scopedDb, { months = 6 } = {}) {
   since.setDate(1);
   since.setHours(0, 0, 0, 0);
   const BILLABLE = ["approved", "rejected", "manual_review"];
-  const sessions = await scopedDb.sessions.list({ createdAt: { gte: since } });
+  const sessions = await scopedDb.sessions.list({ createdAt: { gte: since } }, { take: 50000 });
   const byMonth = new Map();
   for (const s of sessions) {
     const key = new Date(s.createdAt).toISOString().slice(0, 7); // YYYY-MM

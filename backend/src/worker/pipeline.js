@@ -126,7 +126,9 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
   const docLiveness = idBuf ? await provider.checkLiveness(idBuf) : null;
 
   // --- Decision ---
-  const thresholds = resolveThresholds(tenant?.settings || {});
+  // FV-5: thresholds are provider-scale-aware — the ONNX cosine scale and the
+  // Faceplugin container scale use different default bands + bounds.
+  const thresholds = resolveThresholds(tenant?.settings || {}, provider?.name);
   // A LIVE FACE shown as the "document" must satisfy BOTH signals when the
   // provider reports face size: (1) passive liveness says Real, (2) the face
   // DOMINATES the image. A genuine card's printed portrait is a small
@@ -160,7 +162,7 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
     for (const fr of currentFrames) {
       const buf = await loadDecrypted(fr);
       const lv = await provider.checkLiveness(buf);
-      frames.push({ action: fr.label, liveness: { score: lv.score, faceCount: lv.faceCount }, pose: lv.pose || null });
+      frames.push({ action: fr.label, liveness: { score: lv.score, faceCount: lv.faceCount }, pose: lv.pose || null, checksum: fr.checksum || null });
     }
     // Pose enforcement + direction strictness are tenant-opt-in flags, meant
     // to be enabled only after calibrating the deployed Faceplugin container's
@@ -268,9 +270,11 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
 
 async function finalize(db, session, { decision, resultRow, dispatch }) {
   const send = dispatch || dbEnqueue(db);
-  await db.verificationResult.create({ data: { sessionId: session.id, ...resultRow } });
-  await db.verificationSession.updateMany({
-    where: { id: session.id },
+  // Optimistic compare-and-set: claim the session FIRST to prevent duplicate
+  // results if the worker dies between result-create and session-update (M2).
+  // Only one worker can flip the status away from its current value.
+  const claimed = await db.verificationSession.updateMany({
+    where: { id: session.id, status: session.status },
     data: {
       status: decision.status,
       riskLevel: decision.riskLevel === "low" || decision.riskLevel === "medium" || decision.riskLevel === "high"
@@ -279,6 +283,11 @@ async function finalize(db, session, { decision, resultRow, dispatch }) {
       completedAt: ["approved", "rejected", "failed"].includes(decision.status) ? new Date() : null
     }
   });
+  if (claimed.count === 0) {
+    // Another worker already finalized — skip to avoid duplicate results/webhooks.
+    return;
+  }
+  await db.verificationResult.create({ data: { sessionId: session.id, ...resultRow } });
   await db.auditLog.create({
     data: {
       tenantId: session.tenantId,

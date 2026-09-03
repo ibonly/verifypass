@@ -40,6 +40,10 @@ export default function App() {
     if (redirectUrl && !retryable) {
       try {
         const u = new URL(redirectUrl);
+        // M3 fix: block javascript:/data: and require https (http allowed in dev only)
+        const allowedSchemes = ["https:"];
+        if (typeof __VP_DEV__ !== "undefined" && __VP_DEV__) allowedSchemes.push("http:");
+        if (!allowedSchemes.includes(u.protocol)) return; // stay on page
         u.searchParams.set("sessionId", sessionId);
         u.searchParams.set("status", result.status);
         setTimeout(() => { window.location.href = u.toString(); }, 1500);

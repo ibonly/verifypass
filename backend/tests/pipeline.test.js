@@ -405,3 +405,33 @@ test("screening outage: fail-open, decision unaffected, outcome recorded", async
   assert.equal(r.rawResult.screening.performed, false);
   assert.match(r.rawResult.screening.error, /ECONNREFUSED/);
 });
+
+test("FV-1: one frame relabeled across two challenge actions → rejected DUPLICATE_FRAME", async () => {
+  const { db, session, addEvidence } = await seed();
+  const now = Date.now();
+  await db.verificationSession.updateMany({
+    where: { id: session.id },
+    data: { livenessChallenge: { version: 1, actions: ["turn_left", "smile"], nonce: "n", issuedAt: new Date(now).toISOString() } }
+  });
+  // Same checksum uploaded under BOTH actions (the classic bypass).
+  await addEvidence("liveness_frame", { label: "turn_left", checksum: "dup", createdAt: new Date(now + 1000) });
+  await addEvidence("liveness_frame", { label: "smile", checksum: "dup", createdAt: new Date(now + 2000) });
+
+  const out = await runVerification({ sessionUid: "vps_PIPE1" }, { db, provider: stubProvider(), evidenceKey: KEY });
+  assert.equal(out.status, "rejected");
+  assert.ok(out.reasonCodes.includes("LIVENESS_CHALLENGE_DUPLICATE_FRAME"), `got ${out.reasonCodes}`);
+});
+
+test("FV-1: distinct frame per action verifies normally", async () => {
+  const { db, session, addEvidence } = await seed();
+  const now = Date.now();
+  await db.verificationSession.updateMany({
+    where: { id: session.id },
+    data: { livenessChallenge: { version: 1, actions: ["turn_left", "smile"], nonce: "n", issuedAt: new Date(now).toISOString() } }
+  });
+  await addEvidence("liveness_frame", { label: "turn_left", checksum: "a", createdAt: new Date(now + 1000) });
+  await addEvidence("liveness_frame", { label: "smile", checksum: "b", createdAt: new Date(now + 2000) });
+
+  const out = await runVerification({ sessionUid: "vps_PIPE1" }, { db, provider: stubProvider(), evidenceKey: KEY });
+  assert.equal(out.status, "approved", `got ${out.reasonCodes}`);
+});
