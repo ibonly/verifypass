@@ -4,7 +4,7 @@
 // Dependencies are injected so the whole pipeline is testable without
 // Prisma or a live Faceplugin container.
 
-const { decide, resolveThresholds, decryptBuffer, resolveEvidenceKey, verifyLivenessChallenge, storage } = require("@verifypass/shared");
+const { decide, resolveThresholds, decryptBuffer, resolveEvidenceKey, verifyLivenessChallenge, verifyFrameBinding, storage } = require("@verifypass/shared");
 const { computeRiskSignals } = require("./riskSignals");
 
 // Stamped into every rawResult + logged at worker startup. When a decision
@@ -153,7 +153,21 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
     const issuedAt = session.livenessChallenge.issuedAt
       ? new Date(session.livenessChallenge.issuedAt).getTime() - 5000
       : 0;
+    const bindingSecret = require("../config").sdkTokenSecret;
     const currentFrames = livenessFrames.filter((fr) => {
+      if (fr.challengeNonce) {
+        // P0: cryptographic binding — the frame must name THIS challenge's
+        // nonce AND carry a valid HMAC over (nonce:action:checksum). A frame
+        // from an earlier challenge, relabeled to a different action, or with
+        // a swapped image body fails here and never counts.
+        if (fr.challengeNonce !== session.livenessChallenge.nonce) return false;
+        return verifyFrameBinding(bindingSecret, {
+          challengeNonce: fr.challengeNonce,
+          action: fr.label,
+          checksum: fr.checksum,
+          bindingHmac: fr.bindingHmac
+        });
+      }
       if (!issuedAt || !fr.createdAt) return true; // legacy rows: no fence possible
       return new Date(fr.createdAt).getTime() >= issuedAt;
     });
@@ -168,7 +182,14 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
     // to be enabled only after calibrating the deployed Faceplugin container's
     // pose output against real sessions (see rawResult perAction maxAbsYaw/Pitch).
     const challengeOpts = {
-      enforcePose: tenant?.settings?.challenge?.enforcePose === true,
+      // P0: pose-magnitude enforcement is ON by default (a challenge frame
+      // must actually reach the movement threshold when the provider reports
+      // pose). A tenant can opt out during calibration
+      // (settings.challenge.enforcePose = false); ENFORCE_POSE=false is the
+      // global kill-switch while calibrating a new model container.
+      enforcePose: process.env.ENFORCE_POSE === "false"
+        ? false
+        : tenant?.settings?.challenge?.enforcePose !== false,
       strictDirection: tenant?.settings?.challenge?.strictDirection === true,
       // strong selfie liveness disarms the mid-action spoof floor (a replay
       // can't produce a high selfie score; low action-frame scores then mean
@@ -259,6 +280,7 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
         repeatedFailedAttempts: risk.repeatedFailedAttempts,
         deviceSharedAcrossIdentities: risk.deviceSharedAcrossIdentities,
         ipVelocityExceeded: risk.ipVelocityExceeded,
+        virtualCameraSuspected: risk.virtualCameraSuspected,
         counts: risk.counts
       }
     }

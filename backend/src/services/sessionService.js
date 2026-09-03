@@ -131,7 +131,7 @@ async function getSession(scopedDb, sessionUid) {
  * will use). The fingerprint hash is computed SERVER-side from the raw
  * signals, salted per tenant so it can't be correlated across tenants.
  */
-async function attachDeviceInfo(scopedDb, tenantUid, sessionUid, device, clientIp) {
+async function attachDeviceInfo(scopedDb, tenantUid, sessionUid, device, clientIp, capture) {
   const session = await scopedDb.sessions.findByUid(sessionUid);
   if (!session || session.deviceFingerprint) return false;
 
@@ -144,10 +144,27 @@ async function attachDeviceInfo(scopedDb, tenantUid, sessionUid, device, clientI
     const canonical = JSON.stringify(keys.map((k) => [k, meta[k] ?? null]));
     fingerprint = crypto.createHash("sha256").update(`${tenantUid}:${canonical}`).digest("hex");
   }
-  if (!fingerprint && !clientIp) return false;
+  // P0 capture integrity: camera/track metadata reported by the SDK at
+  // submit. Whitelisted + size-bounded; the worker re-checks the label
+  // server-side, so the client-computed flag alone is never trusted.
+  if (capture && typeof capture === "object") {
+    const cap = {};
+    if (typeof capture.cameraLabel === "string") cap.cameraLabel = capture.cameraLabel.slice(0, 120);
+    if (typeof capture.facingMode === "string") cap.facingMode = capture.facingMode.slice(0, 20);
+    if (typeof capture.frameRate === "number") cap.frameRate = capture.frameRate;
+    if (typeof capture.resolution === "string") cap.resolution = capture.resolution.slice(0, 20);
+    if (typeof capture.videoInputCount === "number") cap.videoInputCount = capture.videoInputCount;
+    if (typeof capture.hasCapabilities === "boolean") cap.hasCapabilities = capture.hasCapabilities;
+    if (typeof capture.virtualCameraSuspected === "boolean") cap.virtualCameraSuspected = capture.virtualCameraSuspected;
+    if (Object.keys(cap).length) {
+      meta = meta || {};
+      meta.capture = cap;
+    }
+  }
+  if (!fingerprint && !meta && !clientIp) return false;
 
   await scopedDb.sessions.update(sessionUid, {
-    ...(fingerprint ? { deviceFingerprint: fingerprint, deviceMeta: meta } : {}),
+    ...(fingerprint || meta ? { ...(fingerprint ? { deviceFingerprint: fingerprint } : {}), deviceMeta: meta } : {}),
     ...(clientIp ? { clientIp: String(clientIp).slice(0, 64) } : {})
   });
   return true;

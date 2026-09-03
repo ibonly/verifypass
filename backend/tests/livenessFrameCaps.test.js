@@ -31,7 +31,13 @@ async function setup() {
   const tenant = await db.tenant.create({ data: { tenantUid: "tnt_cap", companyName: "C", status: "active" } });
   const scope = scopeFor(tenant);
   const created = await createSession(scope, { verificationType: "FACE_ONLY" }, false);
-  const session = await scope.sessions.findByUid(created.sessionId);
+  let session = await scope.sessions.findByUid(created.sessionId);
+  // Pin the (randomly generated) challenge to a known action set so uploads
+  // for "smile" always pass the challenge-membership check (P0 binding).
+  await scope.sessions.update(created.sessionId, {
+    livenessChallenge: { ...session.livenessChallenge, actions: ["smile", "turn_left", "turn_right"] }
+  });
+  session = await scope.sessions.findByUid(created.sessionId);
   return { db, tenant, scope, created, session };
 }
 
@@ -123,5 +129,41 @@ test("FV-3: current-attempt frames still enforce the cap after a retry fence", a
       imageBase64: "data:image/jpeg;base64,AAAA"
     }),
     (err) => err.code === "VALIDATION_ERROR" && /too many liveness frames/.test(err.message)
+  );
+});
+
+test("P0 binding: frames stamped with an OLD challenge nonce don't eat the budget", async (t) => {
+  const { scope, tenant, created, session } = await setup();
+  t.after(() => setDb(null));
+
+  // Two frames bound to a PREVIOUS challenge's nonce: superseded, must not count.
+  for (let i = 0; i < 2; i++) {
+    await scope.evidence.create({
+      sessionId: session.id, fileType: "liveness_frame", label: "smile",
+      storagePath: `old${i}`, encrypted: true, challengeNonce: "previous-nonce"
+    });
+  }
+
+  await assert.rejects(
+    () => handleUpload({
+      scopedDb: scope, tenantUid: tenant.tenantUid, sessionUid: created.sessionId,
+      sdkToken: created.sdkToken, kind: "liveness", action: "smile",
+      imageBase64: "data:image/jpeg;base64,AAAA"
+    }),
+    (err) => !/too many liveness frames/.test(err.message) // gets past the cap
+  );
+});
+
+test("P0 binding: frames for an action outside the current challenge are rejected", async (t) => {
+  const { scope, tenant, created } = await setup();
+  t.after(() => setDb(null));
+
+  await assert.rejects(
+    () => handleUpload({
+      scopedDb: scope, tenantUid: tenant.tenantUid, sessionUid: created.sessionId,
+      sdkToken: created.sdkToken, kind: "liveness", action: "look_up", // not in pinned challenge
+      imageBase64: "data:image/jpeg;base64,AAAA"
+    }),
+    (err) => err.code === "VALIDATION_ERROR" && /not part of this session's current challenge/.test(err.message)
   );
 });

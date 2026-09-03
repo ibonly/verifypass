@@ -5,7 +5,7 @@
 // without changing this service). Validation is defense-in-depth: the SDK
 // pre-checks quality, but the server never trusts the client.
 
-const { AppError, CHALLENGE_ACTIONS } = require("@verifypass/shared");
+const { AppError, CHALLENGE_ACTIONS, computeFrameBinding } = require("@verifypass/shared");
 const { verifySdkToken } = require("./sessionService");
 
 // sharp is required in production; in dev environments where its native
@@ -135,6 +135,14 @@ async function handleUpload({ scopedDb, tenantUid, sessionUid, sdkToken, kind, s
     if (!action || !CHALLENGE_ACTIONS.includes(action)) {
       throw new AppError("VALIDATION_ERROR", `liveness frame requires a valid action (${CHALLENGE_ACTIONS.join(", ")})`);
     }
+    // P0 binding: a frame may only be uploaded for an action the CURRENT
+    // challenge actually asked for — junk-action uploads can't accumulate
+    // evidence, and every accepted frame is stamped with the challenge nonce
+    // + an HMAC below so the worker can verify the binding cryptographically.
+    const ch = session.livenessChallenge;
+    if (ch && Array.isArray(ch.actions) && !ch.actions.includes(action)) {
+      throw new AppError("VALIDATION_ERROR", `action '${action}' is not part of this session's current challenge`);
+    }
     label = action;
   }
 
@@ -160,7 +168,10 @@ async function handleUpload({ scopedDb, tenantUid, sessionUid, sdkToken, kind, s
   const fenceAt = session.livenessChallenge?.issuedAt
     ? new Date(session.livenessChallenge.issuedAt).getTime() - 5000
     : 0;
-  const inAttempt = (e) => !fenceAt || !e.createdAt || new Date(e.createdAt).getTime() >= fenceAt;
+  const currentNonce = session.livenessChallenge?.nonce || null;
+  const inAttempt = (e) => e.challengeNonce
+    ? e.challengeNonce === currentNonce // nonce-stamped rows: exact challenge match
+    : (!fenceAt || !e.createdAt || new Date(e.createdAt).getTime() >= fenceAt); // legacy rows: time fence
   if (fileType === "liveness_frame") {
     const forAction = existing.filter((e) => e.fileType === "liveness_frame" && e.label === label && inAttempt(e)).length;
     if (forAction >= MAX_LIVENESS_FRAMES_PER_ACTION) {
@@ -196,10 +207,21 @@ async function handleUpload({ scopedDb, tenantUid, sessionUid, sdkToken, kind, s
     buffer: sanitized.buffer
   });
 
+  // P0 binding: stamp liveness frames with the challenge nonce and an HMAC
+  // over (nonce:action:checksum), keyed with the server-side SDK token secret.
+  // The worker verifies this before counting a frame toward the challenge.
+  const binding = fileType === "liveness_frame" && currentNonce && stored.checksum
+    ? {
+        challengeNonce: currentNonce,
+        bindingHmac: computeFrameBinding(config.sdkTokenSecret, currentNonce, label, stored.checksum)
+      }
+    : {};
+
   await scopedDb.evidence.create({
     sessionId: session.id,
     fileType,
     label,
+    ...binding,
     storagePath: stored.storagePath,
     checksum: stored.checksum,
     encrypted: true,

@@ -70,7 +70,7 @@ router.post("/:sessionId/verify", bigBody, ...sdkAuth, async (req, res, next) =>
 
     // Device fingerprint + client IP for fraud-signal checks (Phase 2)
     const clientIp = req.ip || req.socket?.remoteAddress || null;
-    await attachDeviceInfo(req.scopedDb, req.tenant.tenantUid, session.sessionUid, req.body?.device, clientIp);
+    await attachDeviceInfo(req.scopedDb, req.tenant.tenantUid, session.sessionUid, req.body?.device, clientIp, req.body?.capture);
 
     await req.scopedDb.sessions.update(session.sessionUid, { status: "submitted" });
     await enqueue("run_verification", { sessionUid: session.sessionUid, tenantId: String(req.tenant.id) });

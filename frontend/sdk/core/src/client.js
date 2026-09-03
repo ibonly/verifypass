@@ -152,11 +152,20 @@ class VerifyPassClient {
     });
   }
 
+  /**
+   * Record capture-integrity signals (camera label/track metadata, virtual
+   * camera heuristics) collected after the camera started. Sent with submit.
+   */
+  setCaptureSignals(signals) {
+    this._captureSignals = signals || null;
+  }
+
   submit() {
     const { collectDeviceSignals } = require("./device");
     return this._post(`/v1/verification-sessions/${this.sessionId}/verify`, {
       sdkToken: this.sdkToken,
-      device: collectDeviceSignals() // null outside browsers; server treats as optional
+      device: collectDeviceSignals(), // null outside browsers; server treats as optional
+      capture: this._captureSignals || null
     });
   }
 

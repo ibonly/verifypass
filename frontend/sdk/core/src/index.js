@@ -28,6 +28,7 @@ exports.grabAnalysisFrame = camera.grabAnalysisFrame;
 exports.grabFixedFrame = camera.grabFixedFrame;
 exports.grabSquareFrame = camera.grabSquareFrame;
 exports.collectDeviceSignals = device.collectDeviceSignals;
+exports.collectCaptureSignals = require("./captureIntegrity").collectCaptureSignals;
 
 const actionSignals = require("./actionSignals");
 exports.actionGeometry = actionSignals.actionGeometry;

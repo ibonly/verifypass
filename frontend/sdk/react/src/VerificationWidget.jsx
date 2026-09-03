@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  VerifyPassClient, createFlow, needsDocumentBack, assessFrame,
+  VerifyPassClient, createFlow, needsDocumentBack, assessFrame, collectCaptureSignals,
   startCamera, stopCamera, captureFrame, captureGuideFrame,
   grabAnalysisFrame, grabSquareFrame, grabFixedFrame, frameMotion, toGrayscale, meanBrightness, laplacianVariance,
   createFramingStabilizer, createActionDetector, bandMotion, createDocumentGate, isDominantFace
@@ -290,6 +290,11 @@ export function VerificationWidget({
         // freshly acquired stream so the camera doesn't stay on (leak) and don't
         // flip readiness for a step that no longer applies.
         if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
+        // P0 capture integrity: report the active camera's metadata (virtual
+        // camera heuristics included) — sent to the server at submit.
+        collectCaptureSignals(stream).then((sig) => {
+          if (!cancelled && sig && clientRef.current) clientRef.current.setCaptureSignals(sig);
+        }).catch(() => {});
         setCameraReady(true);
       })
       .catch((err) => {

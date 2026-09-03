@@ -7,6 +7,10 @@
 
 const HOUR_MS = 3600 * 1000;
 
+// Known virtual-camera / injection tool label patterns (advisory — an
+// attacker can rename, so a miss proves nothing; a hit is worth review).
+const VIRTUAL_CAMERA_RE = /virtual|obs|manycam|snap camera|xsplit|camtwist|droidcam|iriun|epoccam|\bndi\b|vcam|screen capture|dummy|fake|emulat/i;
+
 /**
  * @param {object} db prisma-like client
  * @param {object} session the session being verified (needs id, tenantId,
@@ -27,8 +31,22 @@ async function computeRiskSignals(db, session, thresholds, now = new Date(), opt
     repeatedFailedAttempts: false,
     deviceSharedAcrossIdentities: false,
     ipVelocityExceeded: false,
+    virtualCameraSuspected: false,
     counts: { priorFailures: 0, deviceIdentities: 0, ipSessionsLastHour: 0 }
   };
+
+  // 0. Capture integrity (P0): the SDK reports the active camera's label and
+  //    track metadata at submit; the server ALSO re-checks the label here so a
+  //    doctored client can't simply clear the client-computed flag. Absence of
+  //    capture metadata is NOT flagged — direct API integrations legitimately
+  //    have none. Soft signal → manual review only.
+  const capture = session.deviceMeta && session.deviceMeta.capture;
+  if (capture) {
+    const serverLabelHit = VIRTUAL_CAMERA_RE.test(String(capture.cameraLabel || ""));
+    if (capture.virtualCameraSuspected === true || serverLabelHit) {
+      out.virtualCameraSuspected = true;
+    }
+  }
 
   // 1. Repeated failed attempts for the same customer reference
   if (session.customerReference) {

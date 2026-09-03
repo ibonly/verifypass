@@ -138,3 +138,15 @@ test("FV-5: onnx impostor score below onnx reject is still rejected", () => {
   assert.equal(on.status, "rejected");
   assert.ok(on.reasonCodes.includes("FACE_MATCH_FAILED"));
 });
+
+test("P0 capture integrity: virtualCameraSuspected routes to manual review", () => {
+  const { decide, resolveThresholds } = require("../src/decisionEngine");
+  const t = resolveThresholds({});
+  const r = decide({
+    selfie: { faceCount: 1 },
+    liveness: { score: 0.95 },
+    risk: { virtualCameraSuspected: true }
+  }, t);
+  assert.equal(r.status, "manual_review");
+  assert.ok(r.reasonCodes.includes("CAPTURE_INTEGRITY_RISK"));
+});

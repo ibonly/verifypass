@@ -7,7 +7,7 @@
 
 const {
   VerifyPassClient, createFlow, assessFrame,
-  startCamera, stopCamera, captureFrame
+  startCamera, stopCamera, captureFrame, collectCaptureSignals
 } = require("@verifypass/sdk-core");
 
 const COPY = {
@@ -68,7 +68,11 @@ function init(opts = {}) {
     camStep = step;
     stopCamera(video);
     const facing = step === "document" ? "environment" : "user";
-    startCamera(video, { facingMode: facing }).catch((err) => {
+    startCamera(video, { facingMode: facing }).then((stream) => {
+      // P0 capture integrity: report camera metadata with submit
+      collectCaptureSignals(stream).then((sig) => { if (sig && client) client.setCaptureSignals(sig); }).catch(() => {});
+      return stream;
+    }).catch((err) => {
       msg.style.color = "#DC2626";
       msg.textContent = err.message;
       if (onError) onError(err);

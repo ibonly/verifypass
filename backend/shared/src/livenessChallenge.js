@@ -57,7 +57,11 @@ function isChallengeFresh(challenge, { now = Date.now, ttlMs = DEFAULT_TTL_MS } 
 // turned/tilted head legitimately scores low. The SELFIE carries the strict
 // passive-liveness gate; challenge frames only prove the action happened on
 // a face, and only a confidently-spoof score fails them.
-const CHALLENGE_SCORE_FLOOR = 0.3;
+// Both floors are env-tunable for calibration (P0: soft floor RAISED from
+// 0.1 → 0.2 — at 0.1 a printed photo waved through the challenge scored
+// close enough to pass whenever the selfie was strong; 0.2 keeps genuine
+// backlit/turned heads passing while cutting flat-artifact frames).
+const CHALLENGE_SCORE_FLOOR = Number(process.env.CHALLENGE_SCORE_FLOOR || 0.3);
 
 // FV-2 soft floor: applied instead of CHALLENGE_SCORE_FLOOR only when the
 // selfie strongly passed passive liveness. It relaxes the anti-spoof floor
@@ -65,7 +69,31 @@ const CHALLENGE_SCORE_FLOOR = 0.3;
 // turned/tilted heads, WITHOUT disarming it — a near-zero or non-face junk
 // frame still fails, so a strong selfie can no longer vouch for unrelated,
 // independently-uploaded action frames.
-const CHALLENGE_SOFT_FLOOR = 0.1;
+const CHALLENGE_SOFT_FLOOR = Number(process.env.CHALLENGE_SOFT_FLOOR || 0.2);
+
+/**
+ * P0: cryptographic frame↔challenge binding. At upload time the API stamps
+ * each liveness frame with the challenge nonce and an HMAC over
+ * (nonce:action:checksum) keyed with a server secret. The worker only counts
+ * frames whose binding verifies for the CURRENT challenge — a frame recorded
+ * against an earlier challenge, relabeled for a different action, or with a
+ * swapped image body (checksum mismatch) fails the HMAC and is ignored.
+ */
+function computeFrameBinding(secret, nonce, action, checksum) {
+  return crypto
+    .createHmac("sha256", String(secret))
+    .update(`${nonce}:${action}:${checksum}`)
+    .digest("hex");
+}
+
+/** Timing-safe verification of a stored frame binding. */
+function verifyFrameBinding(secret, { challengeNonce, action, checksum, bindingHmac } = {}) {
+  if (!challengeNonce || !action || !checksum || !bindingHmac) return false;
+  const expected = computeFrameBinding(secret, challengeNonce, action, checksum);
+  const a = Buffer.from(expected, "utf8");
+  const b = Buffer.from(String(bindingHmac), "utf8");
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
 
 /**
  * Does an observed pose satisfy the requested action?
@@ -215,6 +243,8 @@ module.exports = {
   CHALLENGE_SCORE_FLOOR,
   CHALLENGE_SOFT_FLOOR,
   poseSatisfiesAction,
+  computeFrameBinding,
+  verifyFrameBinding,
   DEFAULT_STEPS,
   DEFAULT_TTL_MS,
   generateLivenessChallenge,

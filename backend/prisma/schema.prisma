@@ -195,6 +195,8 @@ model EvidenceFile {
   sessionId          String   @map("session_id") @db.ObjectId
   fileType           EvidenceType @map("file_type")
   label              String?
+  challengeNonce     String?  @map("challenge_nonce")
+  bindingHmac        String?  @map("binding_hmac")
   storagePath        String   @map("storage_path")
   checksum           String?
   cloudinaryUrl      String?  @map("cloudinary_url")

@@ -7,8 +7,7 @@ const {
   generateLivenessChallenge,
   isChallengeFresh,
   verifyLivenessChallenge,
-  CHALLENGE_ACTIONS
-} = require("../src/livenessChallenge");
+  CHALLENGE_ACTIONS, computeFrameBinding, verifyFrameBinding } = require("../src/livenessChallenge");
 
 const THRESH = { liveness: { reject: 0.7, pass: 0.85 } };
 
@@ -64,7 +63,7 @@ test("verify: confidently-spoof frame (below challenge floor) → FAILED", () =>
 
 test("verify: STRONG selfie disarms the spoof floor — backlit/tilted action frames must not fail a proven-live user", () => {
   const c = { actions: ["look_up"], nonce: "x", issuedAt: new Date().toISOString() };
-  const frames = [frame("look_up", 0.12, 1)]; // harsh backlight → very low score
+  const frames = [frame("look_up", 0.25, 1)]; // harsh backlight → low score, above raised soft floor (0.2)
   const r = verifyLivenessChallenge(c, frames, THRESH, { selfieScore: 0.91 });
   assert.equal(r.ok, true, JSON.stringify(r));
 });
@@ -212,7 +211,26 @@ test("FV-2: near-zero junk frame FAILS even with a strong selfie", () => {
 
 test("FV-2: genuine backlit frame (above soft floor) still passes with a strong selfie", () => {
   const c = { actions: ["look_up"], nonce: "x", issuedAt: new Date().toISOString() };
-  const frames = [frame("look_up", 0.12, 1)]; // real but backlit head
+  const frames = [frame("look_up", 0.25, 1)]; // real but backlit head — above raised soft floor (0.2)
   const r = verifyLivenessChallenge(c, frames, THRESH, { selfieScore: 0.91 });
   assert.equal(r.ok, true, JSON.stringify(r));
+});
+
+test("P0 binding: compute/verify round-trip", () => {
+  const hmac = computeFrameBinding("secret", "nonce-1", "turn_left", "abc123");
+  assert.ok(/^[0-9a-f]{64}$/.test(hmac));
+  assert.equal(verifyFrameBinding("secret", {
+    challengeNonce: "nonce-1", action: "turn_left", checksum: "abc123", bindingHmac: hmac
+  }), true);
+});
+
+test("P0 binding: tampered action, checksum, nonce or secret all fail", () => {
+  const hmac = computeFrameBinding("secret", "nonce-1", "turn_left", "abc123");
+  const base = { challengeNonce: "nonce-1", action: "turn_left", checksum: "abc123", bindingHmac: hmac };
+  assert.equal(verifyFrameBinding("secret", { ...base, action: "turn_right" }), false);
+  assert.equal(verifyFrameBinding("secret", { ...base, checksum: "zzz" }), false);
+  assert.equal(verifyFrameBinding("secret", { ...base, challengeNonce: "nonce-2" }), false);
+  assert.equal(verifyFrameBinding("other-secret", base), false);
+  assert.equal(verifyFrameBinding("secret", { ...base, bindingHmac: null }), false);
+  assert.equal(verifyFrameBinding("secret", {}), false);
 });

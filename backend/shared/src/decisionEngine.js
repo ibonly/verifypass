@@ -61,6 +61,10 @@ function decide(signals, thresholds = DEFAULT_THRESHOLDS) {
     if (risk.repeatedFailedAttempts) reviews.push(R.REPEATED_FAILED_ATTEMPTS);
     if (risk.deviceSharedAcrossIdentities) reviews.push(R.DEVICE_SHARED_ACROSS_IDENTITIES);
     if (risk.ipVelocityExceeded) reviews.push(R.IP_VELOCITY_EXCEEDED);
+    // P0 capture integrity: a suspected virtual/injected camera is a soft
+    // signal (labels are spoofable and absence proves nothing) — it routes to
+    // manual review, never auto-reject.
+    if (risk.virtualCameraSuspected) reviews.push(R.CAPTURE_INTEGRITY_RISK);
   }
 
   // Active liveness challenge (server-authoritative anti-spoofing). A failed or
