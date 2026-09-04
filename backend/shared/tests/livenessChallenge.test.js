@@ -7,7 +7,7 @@ const {
   generateLivenessChallenge,
   isChallengeFresh,
   verifyLivenessChallenge,
-  CHALLENGE_ACTIONS, computeFrameBinding, verifyFrameBinding } = require("../src/livenessChallenge");
+  CHALLENGE_ACTIONS, CHALLENGE_POOL, computeFrameBinding, verifyFrameBinding } = require("../src/livenessChallenge");
 
 const THRESH = { liveness: { reject: 0.7, pass: 0.85 } };
 
@@ -233,4 +233,39 @@ test("P0 binding: tampered action, checksum, nonce or secret all fail", () => {
   assert.equal(verifyFrameBinding("other-secret", base), false);
   assert.equal(verifyFrameBinding("secret", { ...base, bindingHmac: null }), false);
   assert.equal(verifyFrameBinding("secret", {}), false);
+});
+
+test("generation pool excludes smile (pose-verifiable actions only)", () => {
+  assert.ok(!CHALLENGE_POOL.includes("smile"));
+  assert.ok(CHALLENGE_POOL.includes("turn_left") && CHALLENGE_POOL.includes("turn_right") && CHALLENGE_POOL.includes("look_up"));
+  for (let i = 0; i < 25; i++) {
+    for (const a of generateLivenessChallenge().actions) {
+      assert.notEqual(a, "smile", "generator must never issue smile");
+      assert.ok(CHALLENGE_POOL.includes(a));
+    }
+  }
+  // legacy sessions: smile stays an ACCEPTED action for upload/verify
+  assert.ok(CHALLENGE_ACTIONS.includes("smile"));
+});
+
+test("enforcePose: head-movement action with NO pose signal fails (not silent pass)", () => {
+  const c = { actions: ["turn_left"], nonce: "x", issuedAt: new Date().toISOString() };
+  const frames = [frame("turn_left", 0.9, 1)]; // faceCount ok, no pose at all
+  const r = verifyLivenessChallenge(c, frames, THRESH, { enforcePose: true });
+  assert.equal(r.ok, false);
+  assert.ok(r.reasonCodes.includes("LIVENESS_POSE_UNAVAILABLE"), JSON.stringify(r));
+});
+
+test("enforcePose: smile without pose still passes (legacy expression action, no pose flag exists)", () => {
+  const c = { actions: ["smile"], nonce: "x", issuedAt: new Date().toISOString() };
+  const frames = [frame("smile", 0.9, 1)];
+  const r = verifyLivenessChallenge(c, frames, THRESH, { enforcePose: true });
+  assert.equal(r.ok, true, JSON.stringify(r));
+});
+
+test("enforcePose OFF: head-movement action with no pose keeps passing (calibration mode)", () => {
+  const c = { actions: ["turn_left"], nonce: "x", issuedAt: new Date().toISOString() };
+  const frames = [frame("turn_left", 0.9, 1)];
+  const r = verifyLivenessChallenge(c, frames, THRESH, {});
+  assert.equal(r.ok, true, JSON.stringify(r));
 });

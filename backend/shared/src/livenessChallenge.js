@@ -20,6 +20,14 @@ const crypto = require("crypto");
 // any sessions issued before the change.)
 const CHALLENGE_ACTIONS = Object.freeze(["turn_left", "turn_right", "look_up", "smile"]);
 
+// Actions the GENERATOR may issue. "smile" was removed from the pool
+// (2026-09-02, same treatment as blink): the pose provider reports only
+// {yaw, pitch, roll} — never a smile flag — so with pose enforcement a smile
+// step degrades to "face present + score ≥ floor", the weakest slot in the
+// challenge. It stays in CHALLENGE_ACTIONS so sessions issued before the
+// change can still upload and verify their pending smile step.
+const CHALLENGE_POOL = Object.freeze(["turn_left", "turn_right", "look_up"]);
+
 const DEFAULT_STEPS = 3;
 const DEFAULT_TTL_MS = 10 * 60 * 1000; // challenge must be completed within 10 min
 
@@ -32,7 +40,7 @@ const POSE = Object.freeze({ yaw: 15, pitch: 12 });
  */
 function generateLivenessChallenge({ steps = DEFAULT_STEPS, now = Date.now, randomInt } = {}) {
   const rnd = randomInt || ((n) => crypto.randomInt(n));
-  const pool = [...CHALLENGE_ACTIONS];
+  const pool = [...CHALLENGE_POOL];
   const actions = [];
   const count = Math.max(1, Math.min(steps, pool.length));
   for (let i = 0; i < count; i++) {
@@ -215,6 +223,20 @@ function verifyLivenessChallenge(challenge, frames = [], thresholds = {}, opts =
         }
       : null;
 
+    // P0 follow-up: with pose enforcement ON, a head-movement action with NO
+    // pose signal at all must not silently pass — a provider outage (or a
+    // provider that never reports pose) would otherwise disable the movement
+    // check while appearing enforced. Expression actions (smile/blink, legacy)
+    // are exempt: they never carry pose. Deployments still calibrating opt
+    // out via enforcePose.
+    const isHeadMovement = action === "turn_left" || action === "turn_right"
+      || action === "look_up" || action === "look_down";
+    if (opts.enforcePose === true && isHeadMovement && poseOk === null) {
+      reasonCodes.push("LIVENESS_POSE_UNAVAILABLE");
+      perAction[action] = { present: true, live: true, poseOk: false, poseChecked: false, poseEnforced: true, score: maxScore };
+      continue;
+    }
+
     if (poseOk === false && opts.enforcePose === true) {
       reasonCodes.push("LIVENESS_CHALLENGE_FAILED");
       perAction[action] = { present: true, live: true, poseOk: false, poseChecked: true, score: maxScore, ...poseObserved };
@@ -240,6 +262,7 @@ function verifyLivenessChallenge(challenge, frames = [], thresholds = {}, opts =
 
 module.exports = {
   CHALLENGE_ACTIONS,
+  CHALLENGE_POOL,
   CHALLENGE_SCORE_FLOOR,
   CHALLENGE_SOFT_FLOOR,
   poseSatisfiesAction,

@@ -154,20 +154,30 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
       ? new Date(session.livenessChallenge.issuedAt).getTime() - 5000
       : 0;
     const bindingSecret = require("../config").sdkTokenSecret;
+    // Frames whose nonce MATCHES the current challenge but whose HMAC fails
+    // are evidence of tampering (relabeled action, swapped body, forged row)
+    // — counted and surfaced as LIVENESS_FRAME_BINDING_FAILED below, never
+    // silently collapsed into "incomplete".
+    let bindingRejected = 0;
     const currentFrames = livenessFrames.filter((fr) => {
       if (fr.challengeNonce) {
         // P0: cryptographic binding — the frame must name THIS challenge's
-        // nonce AND carry a valid HMAC over (nonce:action:checksum). A frame
-        // from an earlier challenge, relabeled to a different action, or with
-        // a swapped image body fails here and never counts.
-        if (fr.challengeNonce !== session.livenessChallenge.nonce) return false;
-        return verifyFrameBinding(bindingSecret, {
+        // nonce AND carry a valid HMAC over (nonce:action:checksum).
+        if (fr.challengeNonce !== session.livenessChallenge.nonce) return false; // superseded attempt
+        const bound = verifyFrameBinding(bindingSecret, {
           challengeNonce: fr.challengeNonce,
           action: fr.label,
           checksum: fr.checksum,
           bindingHmac: fr.bindingHmac
         });
+        if (!bound) bindingRejected++;
+        return bound;
       }
+      // P0 follow-up: when the session HAS a challenge nonce, every honest
+      // frame went through uploadService and is bound — an unbound frame in
+      // production is a row that bypassed the upload path. The time-fence
+      // acceptance below is a dev/test affordance for legacy rows only.
+      if (env === "production" && session.livenessChallenge.nonce) return false;
       if (!issuedAt || !fr.createdAt) return true; // legacy rows: no fence possible
       return new Date(fr.createdAt).getTime() >= issuedAt;
     });
@@ -197,6 +207,14 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
       selfieScore: liveness ? liveness.score : null
     };
     challenge = verifyLivenessChallenge(session.livenessChallenge, frames, thresholds, challengeOpts);
+    if (bindingRejected > 0) {
+      challenge = {
+        ...challenge,
+        ok: false,
+        bindingRejected,
+        reasonCodes: [...new Set([...challenge.reasonCodes, "LIVENESS_FRAME_BINDING_FAILED"])]
+      };
+    }
   }
 
   const risk = await computeRiskSignals(db, session, thresholds, new Date(), { env });
@@ -259,7 +277,7 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
       thresholds,
       liveness: liveness ? { score: liveness.score, faceCount: liveness.faceCount, occluded: liveness.occluded } : null,
       livenessChallenge: hasChallenge
-        ? { ok: challenge.ok, aggregateScore: challenge.aggregateScore, reasonCodes: challenge.reasonCodes, perAction: challenge.perAction, actions: session.livenessChallenge.actions }
+        ? { ok: challenge.ok, aggregateScore: challenge.aggregateScore, reasonCodes: challenge.reasonCodes, perAction: challenge.perAction, actions: session.livenessChallenge.actions, bindingRejected: challenge.bindingRejected || 0 }
         : null,
       faceMatch: faceMatch ? { score: faceMatch.score, idFaceFound: faceMatch.idFaceFound, providerMatch: faceMatch.providerMatch ?? null } : null,
       document: doc ? {

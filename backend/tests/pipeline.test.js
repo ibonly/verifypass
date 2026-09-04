@@ -432,6 +432,67 @@ test("FV-1: distinct frame per action verifies normally", async () => {
   await addEvidence("liveness_frame", { label: "turn_left", checksum: "a", createdAt: new Date(now + 1000) });
   await addEvidence("liveness_frame", { label: "smile", checksum: "b", createdAt: new Date(now + 2000) });
 
-  const out = await runVerification({ sessionUid: "vps_PIPE1" }, { db, provider: stubProvider(), evidenceKey: KEY });
+  // Pose enforcement is on by default: the head-movement step needs a pose
+  // signal reaching the movement threshold (smile is exempt — no pose flag).
+  const provider = stubProvider({ liveness: { pose: { yaw: -20, pitch: 0 } } });
+  const out = await runVerification({ sessionUid: "vps_PIPE1" }, { db, provider, evidenceKey: KEY });
   assert.equal(out.status, "approved", `got ${out.reasonCodes}`);
+});
+
+test("P0 binding: nonce-matching frame with a bad HMAC → LIVENESS_FRAME_BINDING_FAILED (not INCOMPLETE)", async (t) => {
+  const { db, session, addEvidence } = await seed();
+  const now = Date.now();
+  await db.verificationSession.updateMany({
+    where: { id: session.id },
+    data: { livenessChallenge: { version: 1, actions: ["turn_left"], nonce: "n-bind", issuedAt: new Date(now).toISOString() } }
+  });
+  // Tampered row: names the current nonce but the HMAC doesn't verify.
+  await addEvidence("liveness_frame", {
+    label: "turn_left", checksum: "a", createdAt: new Date(now + 1000),
+    challengeNonce: "n-bind", bindingHmac: "0".repeat(64)
+  });
+
+  const out = await runVerification({ sessionUid: "vps_PIPE1" }, { db, provider: stubProvider(), evidenceKey: KEY });
+  assert.equal(out.status, "rejected");
+  assert.ok(out.reasonCodes.includes("LIVENESS_FRAME_BINDING_FAILED"), `got ${out.reasonCodes}`);
+  const r = await db.verificationResult.findFirst({ where: { sessionId: session.id } });
+  assert.equal(r.rawResult.livenessChallenge.bindingRejected, 1);
+});
+
+test("P0 binding: correctly bound frame verifies end-to-end", async (t) => {
+  const { computeFrameBinding } = require("@verifypass/shared");
+  const secret = require("../src/config").sdkTokenSecret;
+  const { db, session, addEvidence } = await seed();
+  const now = Date.now();
+  await db.verificationSession.updateMany({
+    where: { id: session.id },
+    data: { livenessChallenge: { version: 1, actions: ["turn_left"], nonce: "n-ok", issuedAt: new Date(now).toISOString() } }
+  });
+  await addEvidence("liveness_frame", {
+    label: "turn_left", checksum: "chk-1", createdAt: new Date(now + 1000),
+    challengeNonce: "n-ok", bindingHmac: computeFrameBinding(secret, "n-ok", "turn_left", "chk-1")
+  });
+
+  const provider = stubProvider({ liveness: { pose: { yaw: -20, pitch: 0 } } });
+  const out = await runVerification({ sessionUid: "vps_PIPE1" }, { db, provider, evidenceKey: KEY });
+  assert.equal(out.status, "approved", `got ${out.reasonCodes}`);
+  const r = await db.verificationResult.findFirst({ where: { sessionId: session.id } });
+  assert.equal(r.rawResult.livenessChallenge.bindingRejected, 0);
+});
+
+test("P0 binding: PRODUCTION ignores unbound liveness frames when a challenge nonce exists", async (t) => {
+  const { db, session, addEvidence } = await seed();
+  const now = Date.now();
+  await db.verificationSession.updateMany({
+    where: { id: session.id },
+    data: { livenessChallenge: { version: 1, actions: ["turn_left"], nonce: "n-prod", issuedAt: new Date(now).toISOString() } }
+  });
+  // Fresh-but-unbound frame (bypassed uploadService): dev accepts via the
+  // time fence; production must not.
+  await addEvidence("liveness_frame", { label: "turn_left", checksum: "a", createdAt: new Date(now + 1000) });
+
+  const provider = stubProvider({ liveness: { pose: { yaw: -20, pitch: 0 } } });
+  const out = await runVerification({ sessionUid: "vps_PIPE1" }, { db, provider, evidenceKey: KEY, env: "production" });
+  assert.equal(out.status, "rejected");
+  assert.ok(out.reasonCodes.includes("LIVENESS_CHALLENGE_INCOMPLETE"), `got ${out.reasonCodes}`);
 });
