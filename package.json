@@ -7,7 +7,7 @@
     "start": "node scripts/start-all.js",
     "dev": "node scripts/start-all.js",
     "dev:backend": "node scripts/dev-stack.js",
-    "test": "npm test --prefix backend && npm test --prefix frontend/sdk/core",
+    "test": "npm test --prefix backend && npm test --prefix frontend/sdk/core && npm test --prefix frontend/dashboard",
     "test:backend": "npm test --prefix backend",
     "test:sdk": "npm test --prefix frontend/sdk/core",
     "build": "(cd frontend/sdk/js && npm run build) && (cd frontend/dashboard && npm run build) && (cd frontend/verify-page && npm run build) && (cd sample-app && npm run build)",

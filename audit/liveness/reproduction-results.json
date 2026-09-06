@@ -1,0 +1,54 @@
+{
+  "date": "2026-09-06T05:28:59.389Z",
+  "proofs": 12,
+  "findings": [
+    {
+      "id": "L01",
+      "evidence": "Blink with one frame and no expression data returns ok:true under enforcePose:true."
+    },
+    {
+      "id": "L02/L03",
+      "evidence": "Same-sign turns, one frame per action: ok:true; consistency false and missing trajectory are not blocking by default."
+    },
+    {
+      "id": "L04",
+      "evidence": "High liveness on frontal frame plus zero-liveness turned frame satisfies action; no one frame satisfies both."
+    },
+    {
+      "id": "L05/L06",
+      "evidence": "NaN passive score and missing identity score each permit approved decisions at the decision boundary."
+    },
+    {
+      "id": "L07",
+      "evidence": "Excluding four head movements leaves only two expression actions."
+    },
+    {
+      "id": "L08",
+      "evidence": "Challenge issued one day in the future is treated as fresh."
+    },
+    {
+      "id": "L09",
+      "evidence": "Synthetic uniform-color tile means score as valid flash response without any face evidence (scorer-level proof)."
+    },
+    {
+      "id": "L10",
+      "evidence": "Two-argument uploadLivenessFrame used by vanilla button labels manual capture as auto."
+    },
+    {
+      "id": "L11",
+      "evidence": "Production-mode pipeline approves selfie score 0.01 with three challenge scores 0.95; persisted score remains 0.01. Stub provider, real encrypted evidence."
+    },
+    {
+      "id": "L12",
+      "evidence": "Production-mode pipeline approves with enforceFlash:true and no flash evidence."
+    },
+    {
+      "id": "L06",
+      "evidence": "Production-mode pipeline approves when identity comparison throws."
+    },
+    {
+      "id": "L13",
+      "evidence": "Result persistence failure leaves approved session without result; job retry skips it."
+    }
+  ]
+}

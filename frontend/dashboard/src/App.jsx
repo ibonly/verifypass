@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, apiDownload, setAuth, getToken } from "./api";
+import Auth from "./Auth";
+import Onboarding from "./Onboarding";
 
 const PRIMARY = "#6D28D9";
 const STATUS_COLORS = {
@@ -34,48 +36,69 @@ export default function App() {
   const [view, setView] = useState("overview");
   const [selectedSession, setSelectedSession] = useState(null);
 
-  if (!getToken() || !user) return <Login onLogin={setUser} />;
+  const [restoring, setRestoring] = useState(Boolean(getToken()));
+  const [authError, setAuthError] = useState("");
+  useEffect(() => {
+    if (!getToken()) return;
+    let active = true;
+    api("/v1/auth/me").then(u => { if (active) setUser(u); }).catch(e => {
+      if (!active) return;
+      if (e.status === 401 || e.status === 403) setAuth(null);
+      else setAuthError(e.message);
+    }).finally(() => { if (active) setRestoring(false); });
+    return () => { active = false; };
+  }, []);
+  useEffect(() => {
+    if (!user || !["tenant_admin", "super_admin"].includes(user.role)) return;
+    let active = true;
+    api("/v1/onboarding").then(d => { if (active && (!d.completedAt || !d.ready)) setView("onboarding"); }).catch(() => {});
+    return () => { active = false; };
+  }, [user]);
+  if (restoring) return <p role="status" style={{ padding: 32 }}>Restoring your workspace…</p>;
+  if (authError) return <div className="vp-setup" style={{ padding: 32 }}><p role="alert">{authError}</p><button onClick={() => window.location.reload()}>Retry connection</button><button onClick={() => { setAuth(null); setAuthError(""); }}>Sign in again</button></div>;
+  if (!getToken() || !user) return <Auth onLogin={u => { setView("overview"); setSelectedSession(null); setUser(u); }} />;
+  const isAdmin = ["tenant_admin", "super_admin"].includes(user.role);
 
   const views = {
     overview: <Overview />,
     sessions: <Sessions onSelectSession={setSelectedSession} />,
-    review: <ReviewQueue />,
-    reports: <Reports />,
-    settings: <Settings />,
-    webhooks: <Webhooks />
+    ...(["super_admin", "tenant_admin", "compliance_reviewer"].includes(user.role) ? { review: <ReviewQueue /> } : {}),
+    ...(user.role !== "developer" ? { reports: <Reports /> } : {}),
+    ...(isAdmin ? { onboarding: <Onboarding onExit={() => setView("overview")} onSelectSession={setSelectedSession} />, settings: <Settings /> } : {}),
+    webhooks: <Webhooks canManage={isAdmin} />
   };
 
   const NAV_LABELS = {
     overview: "Overview", sessions: "Sessions", review: "Manual Review",
-    reports: "Reports", settings: "Settings", webhooks: "Webhooks"
+    reports: "Reports", settings: "Settings", webhooks: "Webhooks", onboarding: "Get started"
   };
 
   return (
-    <div style={{ display: "flex", minHeight: "100vh", fontFamily: "system-ui, -apple-system, sans-serif" }}>
-      <nav style={{ width: 200, background: "#111827", color: "#D1D5DB", padding: 16, flexShrink: 0 }}>
+    <div className="vp-dashboard-shell" style={{ display: "flex", minHeight: "100vh", fontFamily: "system-ui, -apple-system, sans-serif" }}>
+      <nav className="vp-dashboard-nav" style={{ width: 200, background: "#111827", color: "#D1D5DB", padding: 16, flexShrink: 0 }}>
         <h3 style={{ color: "#fff", margin: "0 0 20px", fontSize: 16 }}>VerifyPass</h3>
         {Object.keys(views).map((v) => (
-          <div key={v}
+          <button key={v} type="button" aria-current={view === v ? "page" : undefined}
             onClick={() => { setView(v); setSelectedSession(null); }}
             style={{
-              padding: "8px 10px", borderRadius: 6, marginBottom: 4, cursor: "pointer",
+              padding: "8px 10px", border: 0, borderRadius: 6, marginBottom: 4, cursor: "pointer",
               background: view === v ? PRIMARY : "transparent",
               color: view === v ? "#fff" : "#D1D5DB"
             }}>
             {NAV_LABELS[v]}
-          </div>
+          </button>
         ))}
         <div style={{ marginTop: 32, fontSize: 12 }}>
           {user.email}<br />
           <span style={{ color: "#9CA3AF" }}>{user.role}</span><br />
-          <button onClick={() => { setAuth(null); setUser(null); }}
+          <button onClick={() => { setAuth(null); setSelectedSession(null); setUser(null); }}
             style={{ marginTop: 8, background: "none", border: "1px solid #4B5563", color: "#D1D5DB", borderRadius: 4, padding: "4px 8px" }}>
             Sign out
           </button>
         </div>
       </nav>
 
-      <main style={{ flex: 1, padding: 24, maxWidth: 1000, overflowY: "auto" }}>
+      <main style={{ flex: 1, minWidth: 0, padding: 24, maxWidth: 1200, overflowY: "auto" }}>
         {views[view]}
       </main>
 
@@ -91,41 +114,6 @@ export default function App() {
 }
 
 // ─── Login ────────────────────────────────────────────────────────────────────
-
-function Login({ onLogin }) {
-  const [form, setForm] = useState({ email: "", password: "", totp: "", tenant: "" });
-  const [error, setError] = useState(null);
-  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
-
-  async function submit(e) {
-    e.preventDefault();
-    setError(null);
-    try {
-      const res = await api("/v1/auth/login", { method: "POST", body: form });
-      setAuth(res.token, form.tenant || null);
-      onLogin({ email: res.email, role: res.role });
-    } catch (err) {
-      setError(err.message);
-    }
-  }
-
-  const input = { width: "100%", padding: 10, marginBottom: 10, borderRadius: 6, border: "1px solid #D1D5DB", boxSizing: "border-box" };
-  return (
-    <div style={{ maxWidth: 360, margin: "12vh auto" }}>
-      <h2>Sign in to VerifyPass</h2>
-      <form onSubmit={submit}>
-        <input style={input} placeholder="Email" value={form.email} onChange={set("email")} />
-        <input style={input} type="password" placeholder="Password" value={form.password} onChange={set("password")} />
-        <input style={input} placeholder="TOTP code (if enrolled)" value={form.totp} onChange={set("totp")} />
-        <input style={input} placeholder="Tenant ID (super admin only)" value={form.tenant} onChange={set("tenant")} />
-        {error && <p style={{ color: "#DC2626", fontSize: 14 }}>{error}</p>}
-        <button type="submit" style={{ width: "100%", padding: 12, background: PRIMARY, color: "#fff", border: 0, borderRadius: 6, fontSize: 16, cursor: "pointer" }}>
-          Sign in
-        </button>
-      </form>
-    </div>
-  );
-}
 
 // ─── Shared hooks & components ────────────────────────────────────────────────
 
@@ -1089,7 +1077,7 @@ const DELIVERY_STATUS_COLORS = {
   exhausted: STATUS_COLORS.rejected
 };
 
-function Webhooks() {
+function Webhooks({ canManage }) {
   const { data, error, reload } = useData("/v1/dashboard/webhook-deliveries");
   const [configUrl, setConfigUrl] = useState("");
   const [configMsg, setConfigMsg] = useState(null);
@@ -1100,8 +1088,8 @@ function Webhooks() {
     e.preventDefault();
     setConfigMsg(null);
     try {
-      // Uses the secret key via a server-side call; dashboard shows result only
-      const res = await api("/v1/webhooks/config", { method: "PUT", body: { url: configUrl } });
+      // Dashboard session authentication; plaintext secret is returned once.
+      const res = await api("/v1/onboarding/webhook", { method: "PUT", body: { url: configUrl } });
       setConfigMsg({ type: "success", text: `Webhook configured. Signing secret (save now): ${res.secret}` });
       reload();
     } catch (err) {
@@ -1112,7 +1100,7 @@ function Webhooks() {
   async function retryDelivery(eventId) {
     setRetrying(eventId);
     try {
-      await api(`/v1/webhooks/${eventId}/retry`, { method: "POST", body: {} });
+      await api(`/v1/onboarding/webhooks/${eventId}/retry`, { method: "POST", body: {} });
       reload();
     } catch (err) {
       alert(err.message);
@@ -1137,7 +1125,7 @@ function Webhooks() {
         ) : (
           <p style={{ color: "#9CA3AF", fontSize: 13, marginTop: 0 }}>No webhook URL configured yet.</p>
         )}
-        <form onSubmit={saveWebhookUrl} style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {canManage && <form onSubmit={saveWebhookUrl} style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <input
             type="url"
             placeholder="https://your-server.com/webhook"
@@ -1148,7 +1136,7 @@ function Webhooks() {
           <button type="submit" style={{ padding: "8px 16px", background: PRIMARY, color: "#fff", border: 0, borderRadius: 6, cursor: "pointer", fontSize: 13 }}>
             Save & rotate secret
           </button>
-        </form>
+        </form>}
         {configMsg && (
           <div style={{
             marginTop: 10, padding: 10, borderRadius: 6, fontSize: 13, wordBreak: "break-all",
@@ -1161,7 +1149,7 @@ function Webhooks() {
         )}
         <p style={{ color: "#9CA3AF", fontSize: 12, margin: "10px 0 0" }}>
           Saving rotates the signing secret. Store the new secret immediately — it is not shown again.
-          Verify signatures using <code>HMAC-SHA256</code> on the raw request body with the <code>X-VP-Signature</code> header.
+          Verify <code>X-Verifypass-Signature</code> using HMAC-SHA256 over <code>timestamp.rawBody</code>, with the timestamp from <code>X-Verifypass-Timestamp</code>. Reject stale timestamps.
         </p>
       </Card>
 
@@ -1239,8 +1227,7 @@ function Webhooks() {
                   <td style={{ padding: "8px 8px" }}>
                     {["failed", "exhausted"].includes(d.status) && (
                       <button
-                        disabled={retrying === d.eventId}
-                        onClick={() => retryDelivery(d.eventId)}
+                        disabled={!canManage || retrying === d.eventId} onClick={() => retryDelivery(d.eventId)}
                         style={{ padding: "4px 10px", borderRadius: 6, border: "1px solid #D1D5DB", background: "#fff", fontSize: 12, cursor: "pointer" }}>
                         {retrying === d.eventId ? "…" : "Retry"}
                       </button>

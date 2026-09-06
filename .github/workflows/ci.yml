@@ -48,7 +48,7 @@ jobs:
         run: npm install && npm run build
       - name: Build dashboard
         working-directory: frontend/dashboard
-        run: npm install && npm run build
+        run: npm install && npm test && npm run build
       - name: Build verify-page
         working-directory: frontend/verify-page
         run: npm install && npm run build

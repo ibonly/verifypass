@@ -121,6 +121,7 @@ function standardLimiters() {
   return {
     // generous global backstop
     global: make({ windowMs: 60_000, max: 300, keyFn: ipKey, name: "global" }),
+    signup: make({ windowMs: 60 * 60_000, max: 5, keyFn: ipKey, name: "signup", failClosed: true }),
     // credential stuffing protection: per IP+email
     login: make({
       windowMs: 15 * 60_000, max: 10, name: "login", failClosed: true,

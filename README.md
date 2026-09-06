@@ -45,3 +45,13 @@ npm start                                # OR node scripts/start-all.js (API + w
   SDK_TOKEN_SECRET, AUTH_TOKEN_SECRET, EVIDENCE_ENCRYPTION_KEY.
 - **Frontend + sample-app → cPanel**: path-filtered FTPS workflows;
   secrets: CPANEL_FTP_SERVER/USERNAME/PASSWORD, VP_API_BASE.
+
+## Dashboard onboarding
+
+Open the dashboard and choose **Create a workspace** to register a sandbox business and its administrator. Existing administrators can open **Get started**. The workflow covers business/integration details, MFA, test credentials, result delivery, retention/review policies, a first verification, and a final readiness checklist.
+
+Saved progress is tenant-scoped and survives refresh/sign-in. Completing setup does not activate production. For test links to work, run the backend worker and hosted verification app, and configure `API_PUBLIC_URL` and `HOSTED_BASE_URL` for that deployment. Sandbox checks still process submitted images.
+
+Email ownership verification, email-based password recovery, team invitations, and production approval are not implemented; existing administration is required for those operations. See [dashboard analysis and onboarding workflow](DASHBOARD_ONBOARDING_ANALYSIS.md) for API details, validation and remaining gaps.
+
+Dashboard client tests: `npm test --prefix frontend/dashboard` (also included in root `npm test`).

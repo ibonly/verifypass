@@ -90,6 +90,7 @@ router.post("/api-keys", async (req, res, next) => {
   try {
     const { keyType, isLive } = req.body || {};
     if (!["public", "secret"].includes(keyType)) throw new AppError("VALIDATION_ERROR", "keyType must be public or secret");
+    if (isLive && req.tenant.status !== "active") throw new AppError("FORBIDDEN", "Production activation is required before creating live keys");
     const issued = await issueKey(req.tenant.id, keyType, Boolean(isLive));
     await audit({
       tenantId: req.tenant.id, actorType: "tenant_user", actorId: `user:${req.user.id}`,

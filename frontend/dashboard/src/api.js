@@ -1,5 +1,4 @@
-// Dashboard API client. Auth token held in memory only (no localStorage of
-// credentials beyond the session token, which expires server-side in 8h).
+// Dashboard session token is scoped to this browser tab in sessionStorage.
 
 let token = sessionStorage.getItem("vp_token") || null;
 let tenantId = sessionStorage.getItem("vp_tenant") || null;
@@ -7,7 +6,8 @@ let tenantId = sessionStorage.getItem("vp_tenant") || null;
 export function setAuth(t, tenant) {
   token = t;
   if (t) sessionStorage.setItem("vp_token", t); else sessionStorage.removeItem("vp_token");
-  if (tenant) { tenantId = tenant; sessionStorage.setItem("vp_tenant", tenant); }
+  tenantId = t && tenant ? tenant : null;
+  if (tenantId) sessionStorage.setItem("vp_tenant", tenantId); else sessionStorage.removeItem("vp_tenant");
 }
 
 export function getToken() { return token; }

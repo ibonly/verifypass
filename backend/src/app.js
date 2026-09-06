@@ -36,6 +36,7 @@ app.use("/v1/verification-sessions", require("./routes/captures"));
 app.use("/v1/verification-sessions", require("./routes/sessions"));
 app.use("/v1/api-keys", require("./routes/keys"));
 app.use("/v1/auth/login", limiters.login);
+app.use("/v1/auth/register", limiters.signup);
 app.use("/v1/auth", require("./routes/auth"));
 app.use("/v1/customers", require("./routes/customers"));
 app.use("/v1/manual-review", require("./routes/review"));
@@ -43,6 +44,7 @@ app.use("/v1/dashboard", require("./routes/dashboard"));
 app.use("/v1/webhooks", require("./routes/webhooks"));
 app.use("/v1/reports", require("./routes/reports"));
 app.use("/v1/settings", require("./routes/settings"));
+app.use("/v1/onboarding", require("./routes/onboarding"));
 
 app.use(notFound);
 app.use(errorHandler);
