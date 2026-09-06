@@ -32,6 +32,7 @@ async function computeRiskSignals(db, session, thresholds, now = new Date(), opt
     deviceSharedAcrossIdentities: false,
     ipVelocityExceeded: false,
     virtualCameraSuspected: false,
+    captureAnomaly: false,
     counts: { priorFailures: 0, deviceIdentities: 0, ipSessionsLastHour: 0 }
   };
 
@@ -46,6 +47,14 @@ async function computeRiskSignals(db, session, thresholds, now = new Date(), opt
     if (capture.virtualCameraSuspected === true || serverLabelHit) {
       out.virtualCameraSuspected = true;
     }
+  }
+  // 0b. Capture telemetry anomalies (v5 E1): a head movement that "triggered"
+  //     faster than a human can start one (<300 ms after the instruction) on
+  //     two or more actions reads as scripted/injected frames. Soft signal.
+  const tel = session.deviceMeta && session.deviceMeta.telemetry;
+  if (tel && Array.isArray(tel.actions)) {
+    const instant = tel.actions.filter((a) => typeof a.msToTrigger === "number" && a.msToTrigger >= 0 && a.msToTrigger < 300).length;
+    if (instant >= 2) out.captureAnomaly = true;
   }
 
   // 1. Repeated failed attempts for the same customer reference

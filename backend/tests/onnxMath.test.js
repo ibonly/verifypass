@@ -48,21 +48,40 @@ test("nms keeps the highest-score box and suppresses its heavy overlap", () => {
   assert.ok(keep.length < 3);  // the two overlapping boxes collapse
 });
 
-test("bestFaceBox: picks largest face, returns count; empty when below conf", () => {
-  // one prior, strong confidence, zero regression
-  const priors = definePriorBox([320, 240], DETECT_CONFIG);
+test("bestFaceBox (deltas format): picks largest face, returns count; empty when below conf", () => {
+  // one prior, strong confidence, zero regression — RetinaFace-style model
+  const DELTAS = { ...DETECT_CONFIG, boxFormat: "deltas" };
+  const priors = definePriorBox([320, 240], DELTAS);
   const n = priors.length;
   const loc = new Float32Array(n * 4); // all zeros
   const scores = new Float32Array(n * 2);
   scores[1] = 0.99; // first prior class-1 conf high
-  const r = bestFaceBox({ loc, scores, imgWidth: 640, imgHeight: 480, config: DETECT_CONFIG });
+  const r = bestFaceBox({ loc, scores, imgWidth: 640, imgHeight: 480, config: DELTAS });
   assert.ok(r.best);
   assert.equal(r.count, 1);
   assert.ok(r.best.x2 > r.best.x1 && r.best.y2 > r.best.y1);
 
-  const none = bestFaceBox({ loc, scores: new Float32Array(n * 2), imgWidth: 640, imgHeight: 480, config: DETECT_CONFIG });
+  const none = bestFaceBox({ loc, scores: new Float32Array(n * 2), imgWidth: 640, imgHeight: 480, config: DELTAS });
   assert.equal(none.best, null);
   assert.equal(none.count, 0);
+});
+
+test("bestFaceBox (corners format, shipped fr_detect): uses boxes as-is, drops whole-frame artifacts", () => {
+  assert.equal(DETECT_CONFIG.boxFormat, "corners");
+  const n = 4420;
+  const loc = new Float32Array(n * 4);
+  const scores = new Float32Array(n * 2);
+  // anchor 0: a real face at normalized [0.35,0.15,0.7,0.75]
+  loc.set([0.35, 0.15, 0.7, 0.75], 0); scores[1] = 0.98;
+  // anchor 1: whole-frame artifact (partly outside), higher score — must be ignored
+  loc.set([-0.1, -0.05, 0.9, 0.9], 4); scores[3] = 0.99;
+  const r = bestFaceBox({ loc, scores, imgWidth: 640, imgHeight: 480, config: DETECT_CONFIG });
+  assert.ok(r.best);
+  assert.equal(r.count, 1);
+  // scaled to 640x480 then squared about centre: x centre ≈ 0.525*640 = 336
+  const cx = (r.best.x1 + r.best.x2) / 2;
+  assert.ok(Math.abs(cx - 336) < 2, `cx ${cx}`);
+  assert.ok(r.best.y2 - r.best.y1 > 200 && r.best.y2 - r.best.y1 < 300);
 });
 
 test("livenessCrop / poseCrop stay within the image", () => {

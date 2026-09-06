@@ -30,6 +30,8 @@ function uploadRoute(kind) {
         kind,
         side: req.body?.side,
         action: req.body?.action,
+        captureMode: req.body?.captureMode,
+        meta: req.body?.meta,
         imageBase64: req.body?.imageBase64,
         retentionDays: retentionFor(req.tenant).rawEvidenceDays // per-tenant policy
       });
@@ -55,6 +57,11 @@ router.post("/:sessionId/face", bigBody, ...sdkAuth, uploadRoute("face"));
 // challenge frame; body { sdkToken, action, imageBase64 }.
 router.post("/:sessionId/liveness-frame", bigBody, ...sdkAuth, uploadRoute("liveness"));
 
+// POST /v1/verification-sessions/:sessionId/flash — screen-flash mosaic
+// (baseline + one face tile per colour); body { sdkToken, imageBase64,
+// meta: { sequence: [[r,g,b]×4], tile } }. Record-first liveness signal.
+router.post("/:sessionId/flash", bigBody, ...sdkAuth, uploadRoute("flash"));
+
 // POST /v1/verification-sessions/:sessionId/verify (PRD §12.5)
 router.post("/:sessionId/verify", bigBody, ...sdkAuth, async (req, res, next) => {
   try {
@@ -70,7 +77,7 @@ router.post("/:sessionId/verify", bigBody, ...sdkAuth, async (req, res, next) =>
 
     // Device fingerprint + client IP for fraud-signal checks (Phase 2)
     const clientIp = req.ip || req.socket?.remoteAddress || null;
-    await attachDeviceInfo(req.scopedDb, req.tenant.tenantUid, session.sessionUid, req.body?.device, clientIp, req.body?.capture);
+    await attachDeviceInfo(req.scopedDb, req.tenant.tenantUid, session.sessionUid, req.body?.device, clientIp, req.body?.capture, req.body?.telemetry);
 
     await req.scopedDb.sessions.update(session.sessionUid, { status: "submitted" });
     await enqueue("run_verification", { sessionUid: session.sessionUid, tenantId: String(req.tenant.id) });
@@ -106,6 +113,21 @@ router.post("/:sessionId/retry", bigBody, ...sdkAuth, async (req, res, next) => 
   }
 });
 
+// POST /v1/verification-sessions/:sessionId/challenge/reissue — the user
+// cannot perform an action ("try a different movement"); body
+// { sdkToken, excludeActions: [...] }. Capped + audited (sessionService).
+router.post("/:sessionId/challenge/reissue", bigBody, ...sdkAuth, async (req, res, next) => {
+  try {
+    const { reissueChallenge } = require("../services/sessionService");
+    const payload = await reissueChallenge(req.scopedDb, req.params.sessionId, req.body?.sdkToken, {
+      excludeActions: req.body?.excludeActions, tenantId: req.tenant.id, actorId: `key:${req.apiKey.prefix}`, req
+    });
+    res.json(payload);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /v1/verification-sessions/:sessionId/consent — record the user's
 // biometric-processing consent (set-once, idempotent, audit-logged). In
 // production uploads are refused until this has been called.
@@ -130,14 +152,40 @@ router.get("/:sessionId/status", ...sdkAuth, async (req, res, next) => {
     const session = await req.scopedDb.sessions.findByUid(req.params.sessionId);
     if (!session) throw new AppError("SESSION_NOT_FOUND");
     const { verifySdkToken } = require("../services/sessionService");
-    if (!req.query.sdkToken || !verifySdkToken(session.sessionUid, req.query.sdkToken, session.sdkTokenHash)) {
+    const sdkTokenIn = req.headers["x-vp-sdk-token"] || req.query.sdkToken;
+    if (!sdkTokenIn || !verifySdkToken(session.sessionUid, sdkTokenIn, session.sdkTokenHash)) {
       throw new AppError("INVALID_API_KEY", "invalid SDK token for this session");
     }
-    res.json({ success: true, sessionId: session.sessionUid, status: session.status });
+    // Terminal outcomes carry the USER-ACTIONABLE reason codes only: things
+    // the person can fix (lighting, framing, doing the movement). Fraud and
+    // integrity signals are deliberately withheld from the SDK — telling an
+    // attacker which signal caught them is a free oracle. Tenants see the
+    // full set via the secret-key result endpoint.
+    const terminal = ["approved", "rejected", "manual_review", "failed", "expired"].includes(session.status);
+    const codes = terminal ? (session.decisionReason?.reasonCodes || []).filter((c) => USER_SAFE_REASON_CODES.has(c)) : [];
+    res.json({
+      success: true,
+      sessionId: session.sessionUid,
+      status: session.status,
+      ...(terminal ? { decision: { status: session.status, reasonCodes: codes } } : {})
+    });
   } catch (err) {
     next(err);
   }
 });
+
+// Reason codes an END USER may see (they describe something the user can act
+// on). Everything else — device/IP/velocity/integrity/screening/binding —
+// stays server-side.
+const USER_SAFE_REASON_CODES = new Set([
+  "LIVENESS_FAILED", "LIVENESS_BORDERLINE",
+  "LIVENESS_CHALLENGE_FAILED", "LIVENESS_CHALLENGE_INCOMPLETE", "LIVENESS_CHALLENGE_EXPIRED",
+  "LIVENESS_POSE_UNAVAILABLE",
+  "FACE_MATCH_FAILED", "FACE_MATCH_BORDERLINE",
+  "NO_FACE_ON_SELFIE", "NO_FACE_ON_DOCUMENT", "MULTIPLE_FACES_DETECTED",
+  "DOCUMENT_IMAGE_LOW_QUALITY", "DOCUMENT_OCR_FAILED", "DOCUMENT_EXPIRED", "DOCUMENT_IS_LIVE_FACE",
+  "SESSION_TIMEOUT"
+]);
 
 // GET /v1/verification-sessions/:sessionId/challenge?sdkToken=... — SDK fetches
 // the server-issued active-liveness actions to prompt the user through. The
@@ -147,7 +195,8 @@ router.get("/:sessionId/challenge", ...sdkAuth, async (req, res, next) => {
     const session = await req.scopedDb.sessions.findByUid(req.params.sessionId);
     if (!session) throw new AppError("SESSION_NOT_FOUND");
     const { verifySdkToken } = require("../services/sessionService");
-    if (!req.query.sdkToken || !verifySdkToken(session.sessionUid, req.query.sdkToken, session.sdkTokenHash)) {
+    const sdkTokenIn = req.headers["x-vp-sdk-token"] || req.query.sdkToken;
+    if (!sdkTokenIn || !verifySdkToken(session.sessionUid, sdkTokenIn, session.sdkTokenHash)) {
       throw new AppError("INVALID_API_KEY", "invalid SDK token for this session");
     }
     // Attempt state travels with the challenge so a page refresh mid-retry

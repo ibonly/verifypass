@@ -17,7 +17,8 @@ const COPY = {
 };
 
 const ACTION_COPY = {
-  blink: "Blink your eyes",
+  blink: "Close your eyes for a second, then open them",
+  open_mouth: "Open your mouth wide and hold it for a moment",
   turn_left: "Slowly turn your head to the LEFT",
   turn_right: "Slowly turn your head to the RIGHT",
   look_up: "Tilt your head UP",

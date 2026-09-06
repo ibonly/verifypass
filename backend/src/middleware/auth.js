@@ -67,8 +67,15 @@ function sdkOrHostedAuth(req, res, next) {
     const { getDb } = require("../lib/db");
     const { verifySdkToken } = require("../services/sessionService");
     const sessionUid = req.params.sessionId;
-    const token = req.body?.sdkToken || req.query?.sdkToken;
+    // Header first (v5 A5): a token in the query string lands in access,
+    // proxy and CDN logs. Query stays accepted for one release for older
+    // SDKs; body stays for uploads.
+    const token = req.headers["x-vp-sdk-token"] || req.body?.sdkToken || req.query?.sdkToken;
     if (!sessionUid || !token) throw new AppError("INVALID_API_KEY");
+    if (!req.headers["x-vp-sdk-token"] && req.query?.sdkToken && !req.body?.sdkToken && res && typeof res.setHeader === "function") {
+      res.setHeader("Deprecation", "true");
+      res.setHeader("X-VP-Deprecated", "sdkToken in query string; send X-VP-SDK-Token header");
+    }
 
     const db = getDb();
     const session = await db.verificationSession.findFirst({ where: { sessionUid } });

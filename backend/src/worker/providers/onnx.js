@@ -207,6 +207,36 @@ function createOnnxProvider({ modelsDir, matchThreshold = 0.6, livenessThreshold
   return {
     name: "onnx",
 
+    /**
+     * 68-point landmarks (image pixels) + the five anchor points + EAR/MAR
+     * for the best face, or null when no face. Feeds rigidity (nose parallax)
+     * and expression (blink / open-mouth) verification — zero extra models.
+     */
+    async faceLandmarks(buf) {
+      const det = await detect(buf);
+      if (!det.best) return null;
+      const lm = await landmark68(buf, det.best, det.width, det.height);
+      const five = M.convert68to5(lm);
+      const { eyeAspectRatio, mouthAspectRatio } = require("@verifypass/shared");
+      return {
+        points: { leftEye: five[0], rightEye: five[1], nose: five[2], mouthLeft: five[3], mouthRight: five[4] },
+        expr: { ear: eyeAspectRatio(lm), mar: mouthAspectRatio(lm) },
+        box: det.best, faceCount: det.count
+      };
+    },
+
+    /** Face embedding for the best face (null when no face). */
+    async faceEmbedding(buf) {
+      const det = await detect(buf);
+      if (!det.best) return null;
+      return feature(buf, det.best, det.width, det.height);
+    },
+
+    /** Cosine-style similarity between two embeddings (same scale as compareFaces.score). */
+    compareEmbeddings(a, b) {
+      return M.matchFeature(a, b);
+    },
+
     async checkLiveness(selfieBuffer) {
       const det = await detect(selfieBuffer);
       if (!det.best) return { score: null, verdict: "No face", faceCount: 0, occluded: false, quality: null, pose: null, raw: { faces: 0 } };

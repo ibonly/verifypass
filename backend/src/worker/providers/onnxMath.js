@@ -115,18 +115,44 @@ function nms(boxes, scores, thresh) {
  * scaleResult + getBestFace.
  * @returns {{best: object|null, count: number}}
  */
+/**
+ * Normalized [x1,y1,x2,y2] per anchor, honouring config.boxFormat:
+ *   "corners" — the model already decoded them (shipped fr_detect.onnx, an
+ *               Ultra-Light-RFB-320 export: `scores` [1,4420,2] + `boxes`
+ *               [1,4420,4]). Prior-box decoding of this output (the previous
+ *               behaviour) produced anchor-snapped, mostly whole-frame boxes,
+ *               which fed garbage crops to liveness/pose/landmark/feature.
+ *   "deltas"  — RetinaFace-style regression deltas (prior-box decode).
+ */
+function normalizedBoxes(loc, config) {
+  if (config.boxFormat === "deltas") {
+    const priors = definePriorBox(config.inputSize, config);
+    return decodeBoxes(loc, priors, config.variance);
+  }
+  const out = [];
+  for (let n = 0; n * 4 + 3 < loc.length; n++) out.push([loc[n * 4], loc[n * 4 + 1], loc[n * 4 + 2], loc[n * 4 + 3]]);
+  return out;
+}
+
+function plausibleBox([x1, y1, x2, y2], W, H, config) {
+  const bw = x2 - x1, bh = y2 - y1;
+  if (!(bw > 0 && bh > 0)) return false;
+  if (x1 < -0.15 * bw || y1 < -0.15 * bh || x2 > W + 0.15 * bw || y2 > H + 0.15 * bh) return false;
+  if (bw * bh > (config.maxBoxAreaFrac ?? 0.6) * W * H) return false;
+  return true;
+}
+
 function bestFaceBox({ loc, scores, imgWidth, imgHeight, config }) {
   const [W, H] = config.inputSize; // [320,240]
-  const priors = definePriorBox([W, H], config);
-  const decoded = decodeBoxes(loc, priors, config.variance); // 0..1 corners
+  const decoded = normalizedBoxes(loc, config); // 0..1 corners
   // scale to detector input pixel space
   const boxesPx = decoded.map(([x1, y1, x2, y2]) => [x1 * W, y1 * H, x2 * W, y2 * H]);
 
-  // screen by confidence (scores flat [N,2], take class-1 prob)
+  // screen by confidence (scores flat [N,2], take class-1 prob) + plausibility
   const kept = [];
   for (let i = 0; i < boxesPx.length; i++) {
     const conf = scores[i * 2 + 1];
-    if (conf >= config.confidenceThreshold) kept.push({ box: boxesPx[i], score: conf });
+    if (conf >= config.confidenceThreshold && plausibleBox(boxesPx[i], W, H, config)) kept.push({ box: boxesPx[i], score: conf });
   }
   if (kept.length === 0) return { best: null, count: 0 };
   kept.sort((a, b) => b.score - a.score);
@@ -303,6 +329,8 @@ function matchFeature(f1, f2) {
 
 const DETECT_CONFIG = Object.freeze({
   inputSize: [320, 240],
+  boxFormat: "corners",   // see normalizedBoxes()
+  maxBoxAreaFrac: 0.6,
   minSizes: [[10, 16, 24], [32, 48], [64, 96], [128, 192, 256]],
   steps: [8, 16, 32, 64],
   variance: [0.1, 0.2],
@@ -312,6 +340,8 @@ const DETECT_CONFIG = Object.freeze({
 });
 
 module.exports = {
+  normalizedBoxes,
+  plausibleBox,
   softmax,
   poseAngleFromBins,
   definePriorBox,

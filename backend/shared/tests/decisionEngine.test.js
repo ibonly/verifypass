@@ -150,3 +150,44 @@ test("P0 capture integrity: virtualCameraSuspected routes to manual review", () 
   assert.equal(r.status, "manual_review");
   assert.ok(r.reasonCodes.includes("CAPTURE_INTEGRITY_RISK"));
 });
+
+test("LIVENESS_MOTION_UNVERIFIED routes to manual review, not reject", () => {
+  const { decide, resolveThresholds } = require("../src/decisionEngine");
+  const r = decide({
+    selfie: { faceCount: 1 }, liveness: { score: 0.95 },
+    livenessChallenge: { ok: true, reasonCodes: [], motionUnverified: true }
+  }, resolveThresholds({}));
+  assert.equal(r.status, "manual_review");
+  assert.ok(r.reasonCodes.includes("LIVENESS_MOTION_UNVERIFIED"));
+});
+
+test("LIVENESS_MANUAL_CAPTURE routes to manual review", () => {
+  const { decide, resolveThresholds } = require("../src/decisionEngine");
+  const r = decide({ selfie: { faceCount: 1 }, liveness: { score: 0.95 }, livenessChallenge: { ok: true, reasonCodes: [], manualCapture: true } }, resolveThresholds({}));
+  assert.equal(r.status, "manual_review");
+  assert.ok(r.reasonCodes.includes("LIVENESS_MANUAL_CAPTURE"));
+});
+
+test("identity continuity: low selfie↔challenge similarity rejects, borderline reviews; occlusion reviews; multi-face challenge reviews", () => {
+  const { decide, resolveThresholds } = require("../src/decisionEngine");
+  const t = resolveThresholds({});
+  const base = { selfie: { faceCount: 1 }, liveness: { score: 0.95 }, livenessChallenge: { ok: true, reasonCodes: [] } };
+  assert.equal(decide({ ...base, livenessIdentity: { score: 0.3 } }, t).status, "rejected");
+  assert.ok(decide({ ...base, livenessIdentity: { score: 0.3 } }, t).reasonCodes.includes("LIVENESS_IDENTITY_MISMATCH"));
+  const mid = decide({ ...base, livenessIdentity: { score: (t.faceMatch.reject + t.faceMatch.pass) / 2 } }, t);
+  assert.equal(mid.status, "manual_review"); assert.ok(mid.reasonCodes.includes("LIVENESS_IDENTITY_BORDERLINE"));
+  assert.equal(decide({ ...base, livenessIdentity: { score: 0.95 } }, t).status, "approved");
+  const occ = decide({ ...base, selfie: { faceCount: 1, occluded: true } }, t);
+  assert.equal(occ.status, "manual_review"); assert.ok(occ.reasonCodes.includes("FACE_OCCLUDED"));
+  const mf = decide({ ...base, livenessChallenge: { ok: true, reasonCodes: [], multiFaceActions: 2 } }, t);
+  assert.equal(mf.status, "manual_review"); assert.ok(mf.reasonCodes.includes("MULTIPLE_FACES_DURING_CHALLENGE"));
+});
+
+test("pose provider outage routes to manual review; capture anomaly routes to review", () => {
+  const { decide, resolveThresholds } = require("../src/decisionEngine");
+  const t = resolveThresholds({});
+  const r = decide({ selfie: { faceCount: 1 }, liveness: { score: 0.95 }, livenessChallenge: { ok: true, reasonCodes: [], poseProviderUnavailable: true } }, t);
+  assert.equal(r.status, "manual_review"); assert.ok(r.reasonCodes.includes("LIVENESS_POSE_PROVIDER_UNAVAILABLE"));
+  const a = decide({ selfie: { faceCount: 1 }, liveness: { score: 0.95 }, risk: { captureAnomaly: true } }, t);
+  assert.equal(a.status, "manual_review"); assert.ok(a.reasonCodes.includes("CAPTURE_INTEGRITY_RISK"));
+});

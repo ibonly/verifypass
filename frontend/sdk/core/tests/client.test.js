@@ -70,7 +70,8 @@ test("uploadLivenessFrame posts action + image to the liveness-frame endpoint", 
   assert.equal(res.label, "blink");
   const call = fetch.calls[0];
   assert.equal(call.url, "https://api.test/v1/verification-sessions/vps_1/liveness-frame");
-  assert.deepEqual(JSON.parse(call.opts.body), { sdkToken: "sdk_tok", action: "blink", imageBase64: "IMG64" });
+  assert.deepEqual(JSON.parse(call.opts.body), { sdkToken: "sdk_tok", action: "blink", imageBase64: "IMG64", captureMode: "auto" });
+  assert.equal(call.opts.headers["X-VP-SDK-Token"], "sdk_tok");
 });
 
 test("getChallenge fetches the server-issued actions", async () => {
@@ -78,14 +79,35 @@ test("getChallenge fetches the server-issued actions", async () => {
   const client = new VerifyPassClient({ ...BASE, fetchImpl: fetch });
   const res = await client.getChallenge();
   assert.deepEqual(res.livenessActions, ["blink", "turn_left"]);
-  assert.ok(fetch.calls[0].url.endsWith(`/challenge?sdkToken=${encodeURIComponent("sdk_tok")}`));
+  // v5 A5: the session credential rides in a header, never the query string
+  assert.ok(fetch.calls[0].url.endsWith("/challenge"));
+  assert.ok(!fetch.calls[0].url.includes("sdkToken="));
+  assert.equal(fetch.calls[0].opts.headers["X-VP-SDK-Token"], "sdk_tok");
 });
 
-test("getStatus URL-encodes the sdk token", async () => {
+test("getStatus sends the sdk token as a header (not in the URL)", async () => {
   const fetch = mockFetch([{ body: { success: true, status: "submitted" } }]);
   const client = new VerifyPassClient({ ...BASE, sdkToken: "sdk_a+b/c", fetchImpl: fetch });
   await client.getStatus();
-  assert.ok(fetch.calls[0].url.endsWith(`/status?sdkToken=${encodeURIComponent("sdk_a+b/c")}`));
+  assert.ok(fetch.calls[0].url.endsWith("/status"));
+  assert.equal(fetch.calls[0].opts.headers["X-VP-SDK-Token"], "sdk_a+b/c");
+});
+
+test("reissueChallenge posts the excluded actions; submit carries capture + telemetry", async () => {
+  const fetch = mockFetch([
+    { body: { success: true, reissue: 1, livenessChallenge: { actions: ["turn_left", "turn_right", "look_down"] } } },
+    { body: { success: true, status: "submitted" } }
+  ]);
+  const client = new VerifyPassClient({ ...BASE, fetchImpl: fetch });
+  const r = await client.reissueChallenge(["look_up"]);
+  assert.deepEqual(r.livenessChallenge.actions, ["turn_left", "turn_right", "look_down"]);
+  assert.deepEqual(JSON.parse(fetch.calls[0].opts.body).excludeActions, ["look_up"]);
+  client.setCaptureSignals({ cameraLabel: "FaceTime" });
+  client.setCaptureTelemetry({ actions: [{ action: "turn_left", msToTrigger: 900, mode: "auto" }] });
+  await client.submit();
+  const body = JSON.parse(fetch.calls[1].opts.body);
+  assert.equal(body.capture.cameraLabel, "FaceTime");
+  assert.equal(body.telemetry.actions[0].msToTrigger, 900);
 });
 
 test("waitForResult polls until terminal status", async () => {

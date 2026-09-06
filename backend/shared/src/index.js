@@ -7,5 +7,6 @@ module.exports = {
   ...require("./evidenceCrypto"),
   ...require("./webhookSigner"),
   ...require("./livenessChallenge"),
+  ...require("./livenessFlash"),
   storage: require("./storage")
 };

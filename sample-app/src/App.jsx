@@ -86,10 +86,25 @@ export default function App() {
   }
 
   function reset() {
+    // Synchronous state clear; guarded so a double click can't race a fetch.
+    setDetails(null);
     setSession(null);
     setResult(null);
     setError(null);
   }
+
+  // DEV-ONLY: after a terminal result, pull the tenant result (secret key) so
+  // testers see the FULL reason codes + per-action challenge detail that the
+  // end-user widget deliberately does not show.
+  const [details, setDetails] = useState(null);
+  useEffect(() => {
+    if (!result || !session || !secretKey.trim()) return undefined;
+    let cancelled = false;
+    fetch(`${API_BASE}/v1/verification-sessions/${session.sessionId}/result`, {
+      headers: { Authorization: `Bearer ${secretKey.trim()}` }
+    }).then((r) => r.json()).then((j) => { if (!cancelled) setDetails(j); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [result, session, secretKey]);
 
   return (
     <div style={{ minHeight: "100vh", fontFamily: "system-ui, sans-serif", color: "#111827" }}>
@@ -169,6 +184,7 @@ export default function App() {
               />
             </VerifyPassProvider>
             {error && <p style={{ color: "#DC2626", fontSize: 14, marginTop: 12 }}>{error}</p>}
+            {result && <DevDetails details={details} />}
             <button onClick={reset} style={linkBtn}>Cancel</button>
           </Card>
         )}
@@ -183,6 +199,7 @@ export default function App() {
             <pre style={{ background: "#F9FAFB", padding: 12, borderRadius: 8, fontSize: 12, overflow: "auto" }}>
               {JSON.stringify(result, null, 2)}
             </pre>
+            <DevDetails details={details} />
             <button onClick={reset} style={{
               width: "100%", marginTop: 8, padding: 12, borderRadius: 8, border: 0,
               background: PRIMARY, color: "#fff", fontSize: 16, cursor: "pointer"
@@ -192,6 +209,31 @@ export default function App() {
           </Card>
         )}
       </main>
+    </div>
+  );
+}
+
+function DevDetails({ details }) {
+  if (!details) return null;
+  const codes = details.decision?.reasonCodes || [];
+  const lc = details.livenessChallenge;
+  return (
+    <div style={{ marginTop: 12, fontSize: 12, background: "#111827", color: "#E5E7EB", borderRadius: 8, padding: 12 }}>
+      <div style={{ color: "#9CA3AF", marginBottom: 6 }}>Developer details (secret-key result — not shown to end users)</div>
+      <div><b>status</b> {details.status} · <b>risk</b> {details.riskLevel || "-"} · <b>liveness</b> {details.liveness ? `${details.liveness.status} (${details.liveness.score ?? "-"})` : "n/a"}
+        {details.faceMatch ? <> · <b>faceMatch</b> {details.faceMatch.status} ({details.faceMatch.similarityScore ?? "-"})</> : null}</div>
+      <div style={{ marginTop: 4 }}><b>reasonCodes</b> {codes.length ? codes.join(", ") : "(none)"}</div>
+      {lc && (
+        <div style={{ marginTop: 4 }}>
+          <b>challenge</b> {lc.ok ? "ok" : "FAILED"} {lc.reasonCodes?.length ? `(${lc.reasonCodes.join(", ")})` : ""}
+          <div style={{ marginLeft: 8 }}>
+            {(lc.actions || []).map((a) => {
+              const pa = lc.perAction?.[a] || {};
+              return <div key={a}>{a}: present={String(pa.present)} live={String(pa.live)} pose={pa.poseChecked ? String(pa.poseOk) : "n/a"}{pa.peakYaw != null ? ` yaw=${pa.peakYaw > 0 ? "+" : ""}${pa.peakYaw}°` : pa.maxAbsYaw != null ? ` |yaw|=${Number(pa.maxAbsYaw).toFixed(1)}°` : ""}{pa.peakPitch != null ? ` pitch=${pa.peakPitch > 0 ? "+" : ""}${pa.peakPitch}°` : ""}{pa.trajectoryChecked ? ` motion=${pa.trajectoryOk ? "ok" : "static"}` : ""}{pa.score != null ? ` score=${Number(pa.score).toFixed(2)}` : ""}</div>;
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

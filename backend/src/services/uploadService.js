@@ -29,8 +29,16 @@ const MIN_IMAGE_BYTES = 1024;
 // inference, and (optionally) mirrored to Cloudinary during verification, so an
 // unbounded frame count is a worker-compute + third-party-cost DoS. These caps
 // sit well above what an honest capture flow produces (a few frames per action).
-const MAX_EVIDENCE_PER_SESSION = Number(process.env.MAX_EVIDENCE_PER_SESSION || 40);
-const MAX_LIVENESS_FRAMES_PER_ACTION = Number(process.env.MAX_LIVENESS_FRAMES_PER_ACTION || 6);
+// Per-attempt worst case: 3 liveness actions × MAX_LIVENESS_FRAMES_PER_ACTION
+// (6) + 2 document sides + 1 selfie ≈ 21 rows. RETRY_MAX_ATTEMPTS allows 5
+// attempts per session (~105 rows), so a cap below that makes later retries
+// mathematically unable to complete — every upload 400s mid-liveness. This
+// unfenced whole-session count stays the storage/DoS backstop; it must leave
+// headroom for the retry policy.
+const MAX_EVIDENCE_PER_SESSION = Number(process.env.MAX_EVIDENCE_PER_SESSION || 120);
+// 8 = two full capture cycles (early shot + 3-frame burst, twice): a stalled
+// burst followed by a redo must fit without exhausting the budget mid-cycle.
+const MAX_LIVENESS_FRAMES_PER_ACTION = Number(process.env.MAX_LIVENESS_FRAMES_PER_ACTION || 8);
 const MAX_SELFIES_PER_SESSION = Number(process.env.MAX_SELFIES_PER_SESSION || 8);
 
 const MAGIC = [
@@ -95,14 +103,23 @@ async function sanitizeImage(buffer) {
 const UPLOAD_KINDS = {
   document: { fileTypes: { front: "id_front", back: "id_back" }, nextStatus: "started" },
   face: { fileTypes: { selfie: "selfie", frame: "liveness_frame" }, nextStatus: "started" },
-  liveness: { fileTypes: { frame: "liveness_frame" }, nextStatus: "started" }
+  liveness: { fileTypes: { frame: "liveness_frame" }, nextStatus: "started" },
+  // Screen-flash mosaic (roadmap 1.1): one liveness_frame labelled "flash",
+  // bound to the current challenge nonce like every other liveness frame;
+  // the emitted colour sequence rides in `meta`. Excluded from the challenge
+  // action set in the worker.
+  flash: { fileTypes: { frame: "liveness_frame" }, nextStatus: "started", label: "flash" }
 };
+const FLASH_LABEL = "flash";
+const MAX_FLASH_MOSAICS = 2;
 
 /**
  * Validate token + session state, store encrypted evidence, advance status.
  * @param {"document"|"face"|"liveness"} kind
  */
-async function handleUpload({ scopedDb, tenantUid, sessionUid, sdkToken, kind, side, action, imageBase64, evidenceDir, retentionDays }) {
+const CAPTURE_MODES = new Set(["auto", "manual", "fallback"]);
+
+async function handleUpload({ scopedDb, tenantUid, sessionUid, sdkToken, kind, side, action, captureMode, imageBase64, meta, evidenceDir, retentionDays }) {
   const spec = UPLOAD_KINDS[kind];
   if (!spec) throw new AppError("VALIDATION_ERROR", "unknown upload kind");
 
@@ -146,6 +163,18 @@ async function handleUpload({ scopedDb, tenantUid, sessionUid, sdkToken, kind, s
     label = action;
   }
 
+  let fileMeta = null;
+  if (kind === "flash") {
+    const { validFlashSequence, FLASH } = require("@verifypass/shared");
+    if (!meta || !validFlashSequence(meta.sequence)) throw new AppError("VALIDATION_ERROR", "flash upload needs a valid colour sequence");
+    label = FLASH_LABEL;
+    fileMeta = {
+      sequence: meta.sequence,
+      baselineIndex: 0,
+      tile: Number.isInteger(meta.tile) && meta.tile >= 32 && meta.tile <= 256 ? meta.tile : FLASH.tile
+    };
+    side = "frame";
+  }
   const sideKey = side || (kind === "document" ? "front" : "frame" in spec.fileTypes && kind === "liveness" ? "frame" : "selfie");
   const fileType = spec.fileTypes[sideKey];
   if (!fileType) throw new AppError("VALIDATION_ERROR", `invalid side '${sideKey}' for ${kind} upload`);
@@ -172,7 +201,10 @@ async function handleUpload({ scopedDb, tenantUid, sessionUid, sdkToken, kind, s
   const inAttempt = (e) => e.challengeNonce
     ? e.challengeNonce === currentNonce // nonce-stamped rows: exact challenge match
     : (!fenceAt || !e.createdAt || new Date(e.createdAt).getTime() >= fenceAt); // legacy rows: time fence
-  if (fileType === "liveness_frame") {
+  if (kind === "flash") {
+    const mosaics = existing.filter((e) => e.fileType === "liveness_frame" && e.label === FLASH_LABEL && inAttempt(e)).length;
+    if (mosaics >= MAX_FLASH_MOSAICS) throw new AppError("VALIDATION_ERROR", `too many flash captures for this session (max ${MAX_FLASH_MOSAICS})`);
+  } else if (fileType === "liveness_frame") {
     const forAction = existing.filter((e) => e.fileType === "liveness_frame" && e.label === label && inAttempt(e)).length;
     if (forAction >= MAX_LIVENESS_FRAMES_PER_ACTION) {
       throw new AppError("VALIDATION_ERROR", `too many liveness frames for action '${label}' (max ${MAX_LIVENESS_FRAMES_PER_ACTION})`);
@@ -210,6 +242,13 @@ async function handleUpload({ scopedDb, tenantUid, sessionUid, sdkToken, kind, s
   // P0 binding: stamp liveness frames with the challenge nonce and an HMAC
   // over (nonce:action:checksum), keyed with the server-side SDK token secret.
   // The worker verifies this before counting a frame toward the challenge.
+  // How the SDK took this frame (advisory, but manual frames are never
+  // auto-approved — see decisionEngine LIVENESS_MANUAL_CAPTURE). Unknown or
+  // absent values are stored as "unknown" so legacy/third-party clients are
+  // distinguishable from the widget's explicit modes.
+  const mode = fileType === "liveness_frame"
+    ? (kind === "flash" ? "auto" : CAPTURE_MODES.has(captureMode) ? captureMode : "unknown")
+    : null;
   const binding = fileType === "liveness_frame" && currentNonce && stored.checksum
     ? {
         challengeNonce: currentNonce,
@@ -222,6 +261,8 @@ async function handleUpload({ scopedDb, tenantUid, sessionUid, sdkToken, kind, s
     fileType,
     label,
     ...binding,
+    ...(mode ? { captureMode: mode } : {}),
+    ...(fileMeta ? { meta: fileMeta } : {}),
     storagePath: stored.storagePath,
     checksum: stored.checksum,
     encrypted: true,

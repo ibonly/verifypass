@@ -7,6 +7,20 @@
 
 const DETECT_CONFIG = Object.freeze({
   inputSize: [320, 240], // [W, H]
+  // How the model's "boxes" output is encoded.
+  //   "corners": ALREADY-DECODED normalized [x1,y1,x2,y2] per anchor. This is
+  //              what the shipped fr_detect.onnx (Ultra-Light-RFB-320 export:
+  //              outputs `scores` [1,4420,2] + `boxes` [1,4420,4]) emits.
+  //   "deltas":  RetinaFace-style regression deltas that need prior-box
+  //              decoding (definePriorBox + decodeBoxes).
+  // Running prior-box decoding on corner output (the previous default) yields
+  // anchor-snapped boxes — whole-frame "faces", positions quantised to the
+  // anchor grid — which broke framing, action geometry and the overlay.
+  // Replay of real capture sessions (2026-09-04) confirmed "corners".
+  boxFormat: "corners",
+  // Plausibility filter: a box mostly outside the frame or covering more than
+  // this fraction of it is an artifact, never the subject's face.
+  maxBoxAreaFrac: 0.6,
   minSizes: [[10, 16, 24], [32, 48], [64, 96], [128, 192, 256]],
   steps: [8, 16, 32, 64],
   variance: [0.1, 0.2],
@@ -86,15 +100,40 @@ function nms(boxes, scores, thresh) {
  * Best (largest) face box in the DETECTOR input space (0..W, 0..H), or null.
  * @returns {{x1,y1,x2,y2,score}|null}
  */
+/**
+ * Normalized [x1,y1,x2,y2] boxes for every anchor, honouring config.boxFormat.
+ */
+function normalizedBoxes(loc, config = DETECT_CONFIG) {
+  if (config.boxFormat === "deltas") {
+    const priors = definePriorBox(config.inputSize, config);
+    return decodeBoxes(loc, priors, config.variance);
+  }
+  const out = [];
+  for (let n = 0; n * 4 + 3 < loc.length; n++) {
+    out.push([loc[n * 4], loc[n * 4 + 1], loc[n * 4 + 2], loc[n * 4 + 3]]);
+  }
+  return out;
+}
+
+/** True when a pixel box is a plausible face (mostly inside, not whole-frame). */
+function plausibleBox([x1, y1, x2, y2], W, H, config = DETECT_CONFIG) {
+  const bw = x2 - x1, bh = y2 - y1;
+  if (!(bw > 0 && bh > 0)) return false;
+  if (x1 < -0.15 * bw || y1 < -0.15 * bh || x2 > W + 0.15 * bw || y2 > H + 0.15 * bh) return false;
+  if (bw * bh > (config.maxBoxAreaFrac ?? 0.6) * W * H) return false;
+  return true;
+}
+
 function bestFaceBox({ loc, scores, config = DETECT_CONFIG }) {
   const [W, H] = config.inputSize;
-  const priors = definePriorBox([W, H], config);
-  const decoded = decodeBoxes(loc, priors, config.variance);
+  const decoded = normalizedBoxes(loc, config);
   const kept = [];
   for (let i = 0; i < decoded.length; i++) {
     const conf = scores[i * 2 + 1];
     if (conf >= config.confidenceThreshold) {
-      kept.push({ box: [decoded[i][0] * W, decoded[i][1] * H, decoded[i][2] * W, decoded[i][3] * H], score: conf });
+      const box = [decoded[i][0] * W, decoded[i][1] * H, decoded[i][2] * W, decoded[i][3] * H];
+      if (!plausibleBox(box, W, H, config)) continue;
+      kept.push({ box, score: conf });
     }
   }
   if (kept.length === 0) return null;
@@ -146,6 +185,8 @@ module.exports = {
   DETECT_CONFIG,
   definePriorBox,
   decodeBoxes,
+  normalizedBoxes,
+  plausibleBox,
   nms,
   bestFaceBox,
   assessFraming

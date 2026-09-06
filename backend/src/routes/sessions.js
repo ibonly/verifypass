@@ -74,6 +74,16 @@ router.get("/:sessionId/result", async (req, res, next) => {
         liveness: r ? {
           status: r.livenessStatus,
           score: r.livenessScore != null ? Number(r.livenessScore) : null
+        } : null,
+        // Active-challenge detail for integrators/testers: which action
+        // passed/failed and why (present/live/pose), plus observed pose
+        // magnitudes for threshold calibration. Secret-key only.
+        livenessChallenge: r?.rawResult?.livenessChallenge ? {
+          ok: r.rawResult.livenessChallenge.ok,
+          actions: r.rawResult.livenessChallenge.actions || [],
+          reasonCodes: r.rawResult.livenessChallenge.reasonCodes || [],
+          perAction: r.rawResult.livenessChallenge.perAction || {},
+          bindingRejected: r.rawResult.livenessChallenge.bindingRejected || 0
         } : null
       } : {}),
       ...(hasFace && hasDocument ? {

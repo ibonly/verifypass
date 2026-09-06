@@ -89,22 +89,31 @@ function stopCamera(videoEl) {
   }
 }
 
-/** Grab current frame → {imageData, base64} (jpeg, quality 0.9). */
-function captureFrame(videoEl, canvasEl) {
-  const w = videoEl.videoWidth;
-  const h = videoEl.videoHeight;
-  if (!w || !h) {
+/**
+ * Grab current frame → {imageData, base64} (jpeg).
+ * @param {object} [opts] { maxSide, quality } — liveness frames are downscaled
+ *   (server models run at 320×240 / 64×64 / 112×112; a 1280×720 JPEG per
+ *   frame was 2–3 MB per session on mobile data for no verification gain).
+ */
+function captureFrame(videoEl, canvasEl, opts = {}) {
+  const vw = videoEl.videoWidth;
+  const vh = videoEl.videoHeight;
+  if (!vw || !vh) {
     const err = new Error("Camera is still starting — please try again in a moment.");
     err.code = "CAMERA_NOT_READY";
     throw err;
   }
+  const maxSide = opts.maxSide || 0;
+  const scale = maxSide > 0 ? Math.min(1, maxSide / Math.max(vw, vh)) : 1;
+  const w = Math.max(1, Math.round(vw * scale));
+  const h = Math.max(1, Math.round(vh * scale));
   const canvas = canvasEl || document.createElement("canvas");
   canvas.width = w;
   canvas.height = h;
   const ctx = canvas.getContext("2d");
-  ctx.drawImage(videoEl, 0, 0);
+  ctx.drawImage(videoEl, 0, 0, w, h);
   const imageData = ctx.getImageData(0, 0, w, h);
-  const base64 = canvas.toDataURL("image/jpeg", 0.9);
+  const base64 = canvas.toDataURL("image/jpeg", opts.quality || 0.9);
   return { imageData, base64 };
 }
 

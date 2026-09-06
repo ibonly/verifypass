@@ -55,7 +55,17 @@ function decide(signals, thresholds = DEFAULT_THRESHOLDS) {
   const reviews = [];
   const R = REASON_CODES;
 
-  const { selfie, liveness, idFace, faceMatch, document, risk, livenessChallenge } = signals;
+  const { selfie, liveness, idFace, faceMatch, document, risk, livenessChallenge, livenessIdentity } = signals;
+
+  // Identity continuity (v5 A4): the challenge performer must be the selfie
+  // subject. Same bands as face match (the same embedding model produces it).
+  if (livenessIdentity && typeof livenessIdentity.score === "number") {
+    if (livenessIdentity.score < thresholds.faceMatch.reject) rejects.push(R.LIVENESS_IDENTITY_MISMATCH);
+    else if (livenessIdentity.score < thresholds.faceMatch.pass) reviews.push(R.LIVENESS_IDENTITY_BORDERLINE);
+  }
+  // Occlusion on the selfie (mask/hand/sunglasses per the liveness model) →
+  // a reviewer looks (v5 A6); never auto-approve an occluded selfie.
+  if (selfie && selfie.occluded === true) reviews.push(R.FACE_OCCLUDED);
 
   if (risk) {
     if (risk.repeatedFailedAttempts) reviews.push(R.REPEATED_FAILED_ATTEMPTS);
@@ -64,12 +74,28 @@ function decide(signals, thresholds = DEFAULT_THRESHOLDS) {
     // P0 capture integrity: a suspected virtual/injected camera is a soft
     // signal (labels are spoofable and absence proves nothing) — it routes to
     // manual review, never auto-reject.
-    if (risk.virtualCameraSuspected) reviews.push(R.CAPTURE_INTEGRITY_RISK);
+    if (risk.virtualCameraSuspected || risk.captureAnomaly) reviews.push(R.CAPTURE_INTEGRITY_RISK);
   }
 
   // Active liveness challenge (server-authoritative anti-spoofing). A failed or
   // incomplete challenge is a hard gate — replay/deepfake can't satisfy an
   // unpredictable, server-issued action sequence.
+  // Soft: the challenge passed on magnitude but the burst showed no motion
+  // trajectory (all frames already at the angle / constant pose): review.
+  if (livenessChallenge && livenessChallenge.motionUnverified) reviews.push(R.LIVENESS_MOTION_UNVERIFIED);
+  // Manually captured challenge frames bypass the client-side action check —
+  // a reviewer decides, never the auto path.
+  if (livenessChallenge && livenessChallenge.manualCapture) reviews.push(R.LIVENESS_MANUAL_CAPTURE);
+  if (livenessChallenge && (livenessChallenge.multiFaceActions || 0) >= 2) reviews.push(R.MULTIPLE_FACES_DURING_CHALLENGE);
+  // Pose provider outage: queue for a human + ops alert, do not reject customers (v5 C2)
+  if (livenessChallenge && livenessChallenge.poseProviderUnavailable) reviews.push(R.LIVENESS_POSE_PROVIDER_UNAVAILABLE);
+  // No nose parallax during a head turn = a flat object (print/screen). Soft
+  // by default (review); the worker adds the reject code when enforced.
+  if (livenessChallenge && livenessChallenge.flatObject && !(livenessChallenge.reasonCodes || []).includes("LIVENESS_FLAT_OBJECT")) reviews.push(R.LIVENESS_FLAT_OBJECT);
+  // Screen-flash: the face did not answer the random colour sequence (a
+  // conclusive negative — inconclusive/low-light is ok:null and never flags).
+  // Only when the worker enforces it (flash.enforced); otherwise record-only.
+  if (liveness && liveness.flash && liveness.flash.enforced && liveness.flash.ok === false) reviews.push(R.LIVENESS_FLASH_UNVERIFIED);
   if (livenessChallenge && livenessChallenge.ok === false) {
     for (const code of livenessChallenge.reasonCodes || []) {
       if (R[code]) rejects.push(R[code]);

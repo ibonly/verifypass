@@ -119,6 +119,18 @@ router.get("/sessions/:sessionId", anyUser, requireTenant, tenantScope, async (r
       } : null,
       // Which pipeline judged this session + what evidence it saw — settles
       // "the photo is right there!" confusion (stale worker, type mismatch).
+      // Active-challenge detail for reviewers (v5 E2): per-action
+      // present/live/pose/peaks/trajectory/manual + consistency & sequence.
+      livenessChallenge: r?.rawResult?.livenessChallenge || null,
+      livenessIdentity: r?.rawResult?.livenessIdentity || null,
+      captureTelemetry: session.deviceMeta?.telemetry || null,
+      // v7 free anti-spoof signals: flash response, texture heuristics,
+      // nightly telemetry anomaly flags (all record-first)
+      livenessSignals: r ? {
+        flash: r.rawResult?.liveness?.flash || null,
+        texture: r.rawResult?.liveness?.texture || null,
+        telemetryAnomaly: r.rawResult?.riskSignals?.telemetryAnomaly || null
+      } : null,
       diagnostics: r ? {
         pipelineVersion: r.rawResult?.pipelineVersion || null,
         missing: r.rawResult?.missing || null,

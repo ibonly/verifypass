@@ -121,3 +121,21 @@ test("cross-tenant session is invisible to retry (404, never 403)", async () => 
     (err) => err.code === "SESSION_NOT_FOUND"
   );
 });
+
+// --- v5 D3: challenge reissue with exclusions (mid-capture, capped, audited) ---
+test("reissueChallenge: new nonce, excluded action absent, capped at REISSUE_MAX_PER_SESSION, audited", async () => {
+  const { reissueChallenge, REISSUE_MAX_PER_SESSION } = require("../src/services/sessionService");
+  const { db, tenant, scope, created } = await setup({ status: "started" });
+  const beforeNonce = (await scope.sessions.findByUid(created.sessionId)).livenessChallenge.nonce; // copy: the mock row is a live reference
+  const r1 = await reissueChallenge(scope, created.sessionId, created.sdkToken, { excludeActions: ["look_up"], tenantId: tenant.id });
+  assert.equal(r1.reissue, 1);
+  assert.ok(!r1.livenessChallenge.actions.includes("look_up"));
+  assert.ok(r1.livenessChallenge.actions.includes("turn_left") && r1.livenessChallenge.actions.includes("turn_right"));
+  const after = await scope.sessions.findByUid(created.sessionId);
+  assert.notEqual(after.livenessChallenge.nonce, beforeNonce);
+  await reissueChallenge(scope, created.sessionId, created.sdkToken, { excludeActions: [], tenantId: tenant.id });
+  await assert.rejects(() => reissueChallenge(scope, created.sessionId, created.sdkToken, { tenantId: tenant.id }), (e) => /at most/.test(e.message));
+  const audits = await db.auditLog.findMany({ where: { action: "challenge.reissued" } });
+  assert.equal(audits.length, REISSUE_MAX_PER_SESSION);
+  await assert.rejects(() => reissueChallenge(scope, created.sessionId, "bad-token", { tenantId: tenant.id }));
+});

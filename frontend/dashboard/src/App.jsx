@@ -465,6 +465,8 @@ function SessionDetail({ sessionId, onClose }) {
                 Judged by pipeline {data.diagnostics.pipelineVersion}
               </p>
             )}
+            {/* v5 E2: active-liveness evidence for the reviewer */}
+            {data.livenessChallenge && <ChallengeDetail lc={data.livenessChallenge} identity={data.livenessIdentity} telemetry={data.captureTelemetry} signals={data.livenessSignals} />}
             <div style={rowStyle}>
               <span style={labelStyle}>Consent</span>
               <span style={valStyle}>
@@ -596,6 +598,67 @@ function EvidenceGallery({ sessionId }) {
   );
 }
 
+
+/** Per-action active-liveness evidence (v5 E2) — why the challenge passed or failed. */
+function ChallengeDetail({ lc, identity, telemetry, signals }) {
+  const telByAction = new Map((telemetry?.actions || []).map((a) => [a.action, a]));
+  const cell = { padding: "4px 8px", borderBottom: "1px solid #F3F4F6", fontSize: 12, whiteSpace: "nowrap" };
+  const head = { ...cell, fontWeight: 600, color: "#6B7280", textTransform: "uppercase", fontSize: 10, letterSpacing: 0.5 };
+  const yes = (v) => (v === true ? "✓" : v === false ? "✗" : "–");
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <h4 style={{ margin: "0 0 8px", fontSize: 13, color: "#374151", textTransform: "uppercase", letterSpacing: 0.5 }}>
+        Liveness challenge {lc.ok ? <span style={{ color: "#059669" }}>passed</span> : <span style={{ color: "#DC2626" }}>failed</span>}
+        {lc.reasonCodes?.length ? <span style={{ color: "#6B7280", fontWeight: 400 }}> — {lc.reasonCodes.join(", ")}</span> : null}
+      </h4>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ borderCollapse: "collapse", width: "100%" }}>
+          <thead><tr>
+            {["Action", "Face", "Live", "Pose", "Yaw°", "Pitch°", "Motion", "3D", "Expr", "Frames", "Mode", "Trigger", "Coaching"].map((h) => <th key={h} style={head}>{h}</th>)}
+          </tr></thead>
+          <tbody>
+            {(lc.actions || []).map((a) => {
+              const pa = lc.perAction?.[a] || {};
+              const t = telByAction.get(a);
+              return (
+                <tr key={a}>
+                  <td style={cell}>{a}</td>
+                  <td style={cell}>{yes(pa.present)}</td>
+                  <td style={cell}>{yes(pa.live)}</td>
+                  <td style={cell}>{pa.poseChecked ? yes(pa.poseOk) : pa.poseProviderUnavailable ? "no provider" : "n/a"}</td>
+                  <td style={cell}>{pa.peakYaw != null ? `${pa.peakYaw > 0 ? "+" : ""}${pa.peakYaw}` : "–"}</td>
+                  <td style={cell}>{pa.peakPitch != null ? `${pa.peakPitch > 0 ? "+" : ""}${pa.peakPitch}` : "–"}</td>
+                  <td style={cell}>{pa.trajectoryChecked ? (pa.trajectoryOk ? "ok" : "static") : "–"}</td>
+                  <td style={cell} title={pa.rigidity ? `nose residual ${pa.rigidity.maxResidual} / IOD, motion ${pa.rigidity.motion}` : ""}>{pa.rigidity ? (pa.rigidity.ok ? "ok" : "FLAT") : "–"}</td>
+                  <td style={cell} title={pa.expression ? JSON.stringify(pa.expression) : ""}>{pa.expression ? (pa.expression.ok ? "ok" : "✗") : "–"}</td>
+                  <td style={cell}>{t?.frames ?? "–"}{pa.manualFrames ? ` (${pa.manualFrames} manual)` : ""}</td>
+                  <td style={cell}>{t?.mode || "–"}{t?.reissued ? " · reissued" : ""}</td>
+                  <td style={cell}>{t?.msToTrigger != null ? `${t.msToTrigger} ms` : "–"}</td>
+                  <td style={cell}>{t?.hints?.length ? t.hints.join(", ") : "–"}{t?.wrongWay ? ` (wrong way ×${t.wrongWay})` : ""}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <p style={{ fontSize: 12, color: "#6B7280", margin: "8px 0 0" }}>
+        Direction consistency: {lc.consistency ? (lc.consistency.ok ? "ok" : "INCONSISTENT") : "n/a"} ·
+        Sequence: {lc.sequence ? (lc.sequence.ok ? `ok (${Math.round((lc.sequence.challengeSpanMs || 0) / 1000)} s)` : "INVALID") : "n/a"} ·
+        Binding rejects: {lc.bindingRejected || 0} ·
+        Performer ↔ selfie: {identity && typeof identity.score === "number" ? identity.score.toFixed(2) : "n/a"}
+        {telemetry?.detectMs ? ` · detect ${telemetry.detectMs} ms/pass` : ""}
+      </p>
+      {signals && (signals.flash || signals.texture || signals.telemetryAnomaly) && (
+        <p style={{ fontSize: 12, color: "#6B7280", margin: "4px 0 0" }}>
+          Screen flash: {signals.flash ? (signals.flash.ok === true ? `responded (r=${signals.flash.score})` : signals.flash.ok === false ? `${signals.flash.reason} (r=${signals.flash.score}, Δ=${signals.flash.magnitude})` : `inconclusive (${signals.flash.reason})`) : "not captured"}
+          {signals.flash?.enforced ? " · enforced" : ""}
+          {signals.texture ? ` · texture: moiré ${signals.texture.moire ?? "–"}, HF ${signals.texture.hfRatio ?? "–"}, glow ${signals.texture.glowFrac ?? "–"}` : ""}
+          {signals.telemetryAnomaly ? ` · telemetry anomaly: ${(signals.telemetryAnomaly.flags || []).join(", ")}` : ""}
+        </p>
+      )}
+    </div>
+  );
+}
 
 function ReviewQueue() {
   const { data, error, reload } = useData("/v1/manual-review");

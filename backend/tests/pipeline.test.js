@@ -496,3 +496,48 @@ test("P0 binding: PRODUCTION ignores unbound liveness frames when a challenge no
   assert.equal(out.status, "rejected");
   assert.ok(out.reasonCodes.includes("LIVENESS_CHALLENGE_INCOMPLETE"), `got ${out.reasonCodes}`);
 });
+
+test("v5 A4/C3: challenge performer must match the selfie; decision liveness uses the multi-frame median", async () => {
+  const { computeFrameBinding } = require("@verifypass/shared");
+  const secret = require("../src/config").sdkTokenSecret;
+  const { db, session, addEvidence } = await seed();
+  const now = Date.now();
+  await db.verificationSession.updateMany({ where: { id: session.id }, data: { livenessChallenge: { version: 1, actions: ["turn_left"], nonce: "n-id", issuedAt: new Date(now).toISOString() } } });
+  await addEvidence("liveness_frame", { label: "turn_left", checksum: "c1", createdAt: new Date(now + 1000), challengeNonce: "n-id", bindingHmac: computeFrameBinding(secret, "n-id", "turn_left", "c1") });
+  // provider: selfie↔ID matches (first compareFaces call), selfie↔challenge frame does NOT (second call)
+  const provider = stubProvider({ liveness: { pose: { yaw: -20, pitch: 0 } } });
+  let calls = 0;
+  provider.compareFaces = async () => ({ score: ++calls === 1 ? 0.9 : 0.2, idFaceFound: true, raw: {} });
+  const out = await runVerification({ sessionUid: "vps_PIPE1" }, { db, provider, evidenceKey: KEY });
+  assert.equal(out.status, "rejected", `got ${out.reasonCodes}`);
+  assert.ok(out.reasonCodes.includes("LIVENESS_IDENTITY_MISMATCH"));
+  const r = await db.verificationResult.findFirst({ where: { sessionId: session.id } });
+  assert.equal(r.rawResult.livenessIdentity.score, 0.2);
+  assert.ok(r.rawResult.liveness.passiveAggregate && r.rawResult.liveness.passiveAggregate.n >= 2);
+});
+
+test("v7 1.1 screen-flash: mosaic scored against the emitted sequence; review only when enforced", async () => {
+  const { computeFrameBinding } = require("@verifypass/shared");
+  const secret = require("../src/config").sdkTokenSecret;
+  const seq = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255]];
+  const base = [110, 90, 80];
+  const respond = () => [base, ...seq.map((c) => c.map((v, ch) => base[ch] + 14 * v / 255 + 1))];
+  const flat = () => [base, ...seq.map(() => base.map((v) => v + 1))];
+
+  for (const [tileMeans, enforce, expectStatus, expectOk] of [[respond, false, "approved", true], [flat, false, "approved", false], [flat, true, "manual_review", false]]) {
+    const { db, session, addEvidence } = await seed({ settings: enforce ? { challenge: { enforceFlash: true } } : {} });
+    const now = Date.now();
+    await db.verificationSession.updateMany({ where: { id: session.id }, data: { livenessChallenge: { version: 1, actions: ["turn_left"], nonce: "n-fl", issuedAt: new Date(now).toISOString() } } });
+    await addEvidence("liveness_frame", { label: "turn_left", checksum: "c1", createdAt: new Date(now + 1000), challengeNonce: "n-fl", bindingHmac: computeFrameBinding(secret, "n-fl", "turn_left", "c1") });
+    await addEvidence("liveness_frame", { label: "flash", checksum: "cf", createdAt: new Date(now + 2000), challengeNonce: "n-fl", meta: { sequence: seq, baselineIndex: 0, tile: 96 } });
+    const provider = stubProvider({ liveness: { pose: { yaw: -20, pitch: 0 } } });
+    const out = await runVerification({ sessionUid: "vps_PIPE1" }, { db, provider, evidenceKey: KEY, flashTileMeans: async () => tileMeans() });
+    assert.equal(out.status, expectStatus, `enforce=${enforce}: ${out.reasonCodes}`);
+    const r = await db.verificationResult.findFirst({ where: { sessionId: session.id } });
+    assert.equal(r.rawResult.liveness.flash.ok, expectOk);
+    assert.deepEqual(r.rawResult.liveness.flash.sequence, seq);
+    // the mosaic is never counted as a challenge frame
+    assert.deepEqual(Object.keys(r.rawResult.livenessChallenge.perAction), ["turn_left"]);
+    if (enforce) assert.ok(out.reasonCodes.includes("LIVENESS_FLASH_UNVERIFIED"));
+  }
+});

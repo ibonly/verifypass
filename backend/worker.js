@@ -91,6 +91,13 @@ const HANDLERS = {
     const timedOut = await failStuckSubmitted(db);
     if (timedOut) console.log(`expire_sessions: ${timedOut} stuck submitted session(s) → SESSION_TIMEOUT`);
   },
+  // Nightly (0 3 * * *  node scripts/enqueueJob.js telemetry_anomaly):
+  // robust-statistics anomaly flags over capture telemetry (roadmap 0.5).
+  telemetry_anomaly: async (payload) => {
+    const { runTelemetryAnomaly } = require("./src/worker/telemetryAnomaly");
+    const r = await runTelemetryAnomaly(getDb(), payload || {});
+    console.log(`telemetry_anomaly: analysed ${r.analysed}, flagged ${r.flagged}, written ${r.written}`);
+  },
   retention_cleanup: async () => {
     const { storage } = require("@verifypass/shared");
     const db = getDb();

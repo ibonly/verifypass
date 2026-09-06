@@ -71,6 +71,8 @@ class VerifyPassClient {
   _headers(extra = {}) {
     const h = { ...extra };
     if (this.publicKey) h.Authorization = `Bearer ${this.publicKey}`;
+    // Session credential travels in a header, never the query string (logs).
+    if (this.sdkToken) h["X-VP-SDK-Token"] = this.sdkToken;
     return h;
   }
 
@@ -119,15 +121,32 @@ class VerifyPassClient {
   }
 
   /** Upload one active-liveness challenge frame for a given action. */
-  uploadLivenessFrame(action, imageBase64) {
+  /**
+   * @param {"auto"|"manual"|"fallback"} [captureMode] how the frame was taken:
+   *   auto     — the action detector saw the instructed movement
+   *   fallback — timer burst with no detector verdict
+   *   manual   — the user tapped Capture (never auto-approved server-side)
+   */
+  uploadLivenessFrame(action, imageBase64, captureMode = "auto") {
     return this._post(`/v1/verification-sessions/${this.sessionId}/liveness-frame`, {
-      sdkToken: this.sdkToken, action, imageBase64
+      sdkToken: this.sdkToken, action, imageBase64, captureMode
+    });
+  }
+
+  /**
+   * Upload the screen-flash mosaic (baseline tile + one face tile per emitted
+   * colour, left to right) with the colour sequence the widget showed.
+   * Record-first liveness signal; failures are non-fatal for the flow.
+   */
+  uploadFlash(imageBase64, sequence, tile) {
+    return this._post(`/v1/verification-sessions/${this.sessionId}/flash`, {
+      sdkToken: this.sdkToken, imageBase64, meta: { sequence, tile }
     });
   }
 
   /** Fetch the server-issued active-liveness actions + verification type. */
   getChallenge() {
-    return this._get(`/v1/verification-sessions/${this.sessionId}/challenge?sdkToken=${encodeURIComponent(this.sdkToken)}`);
+    return this._get(`/v1/verification-sessions/${this.sessionId}/challenge`);
   }
 
   /**
@@ -160,17 +179,33 @@ class VerifyPassClient {
     this._captureSignals = signals || null;
   }
 
+  /** Capture telemetry (how each action was captured) — sent with submit. */
+  setCaptureTelemetry(telemetry) {
+    this._captureTelemetry = telemetry || null;
+  }
+
+  /**
+   * Ask for a different liveness challenge because the user cannot perform an
+   * action (capped + audited server-side). Returns the new action list.
+   */
+  reissueChallenge(excludeActions = []) {
+    return this._post(`/v1/verification-sessions/${this.sessionId}/challenge/reissue`, {
+      sdkToken: this.sdkToken, excludeActions
+    });
+  }
+
   submit() {
     const { collectDeviceSignals } = require("./device");
     return this._post(`/v1/verification-sessions/${this.sessionId}/verify`, {
       sdkToken: this.sdkToken,
       device: collectDeviceSignals(), // null outside browsers; server treats as optional
-      capture: this._captureSignals || null
+      capture: this._captureSignals || null,
+      telemetry: this._captureTelemetry || null
     });
   }
 
   getStatus() {
-    return this._get(`/v1/verification-sessions/${this.sessionId}/status?sdkToken=${encodeURIComponent(this.sdkToken)}`);
+    return this._get(`/v1/verification-sessions/${this.sessionId}/status`);
   }
 
   /**

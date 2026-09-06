@@ -29,6 +29,20 @@ exports.grabFixedFrame = camera.grabFixedFrame;
 exports.grabSquareFrame = camera.grabSquareFrame;
 exports.collectDeviceSignals = device.collectDeviceSignals;
 exports.collectCaptureSignals = require("./captureIntegrity").collectCaptureSignals;
+const landmarks = require("./landmarks");
+exports.poseFromLandmarks = landmarks.poseFromLandmarks;
+exports.landmarkInputFromImageData = landmarks.landmarkInputFromImageData;
+exports.poseActionVerdict = landmarks.poseActionVerdict;
+exports.isFrontalPose = landmarks.isFrontalPose;
+exports.isReferencePose = landmarks.isReferencePose;
+exports.frontalRefFromSamples = landmarks.frontalRefFromSamples;
+exports.createPoseSmoother = landmarks.createPoseSmoother;
+exports.POSE_THRESHOLDS = landmarks.POSE_THRESHOLDS;
+exports.LANDMARK_INPUT = landmarks.LANDMARK_INPUT;
+exports.exprFromLandmarks = landmarks.exprFromLandmarks;
+exports.eyeAspectRatio = landmarks.eyeAspectRatio;
+exports.mouthAspectRatio = landmarks.mouthAspectRatio;
+exports.EXPRESSION = landmarks.EXPRESSION;
 
 const actionSignals = require("./actionSignals");
 exports.actionGeometry = actionSignals.actionGeometry;
@@ -51,6 +65,12 @@ exports.ACTION_TRIGGER = stabilizer.ACTION_TRIGGER;
 exports.DETECT_CONFIG = faceDetectMath.DETECT_CONFIG;
 exports.bestFaceBox = faceDetectMath.bestFaceBox;
 exports.assessFraming = faceDetectMath.assessFraming;
+
+const flash = require("./flash");
+exports.FLASH = flash.FLASH;
+exports.randomFlashSequence = flash.randomFlashSequence;
+exports.flashCropRect = flash.flashCropRect;
+exports.meanRgb = flash.meanRgb;
 
 const modelCache = require("./modelCache");
 exports.fetchWithCache = modelCache.fetchWithCache;

@@ -197,6 +197,8 @@ model EvidenceFile {
   label              String?
   challengeNonce     String?  @map("challenge_nonce")
   bindingHmac        String?  @map("binding_hmac")
+  captureMode        String?  @map("capture_mode") // liveness frames: auto | fallback | manual | unknown
+  meta               Json?    // per-file client metadata (flash: {sequence, baselineIndex, tile})
   storagePath        String   @map("storage_path")
   checksum           String?
   cloudinaryUrl      String?  @map("cloudinary_url")

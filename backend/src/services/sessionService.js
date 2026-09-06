@@ -131,7 +131,7 @@ async function getSession(scopedDb, sessionUid) {
  * will use). The fingerprint hash is computed SERVER-side from the raw
  * signals, salted per tenant so it can't be correlated across tenants.
  */
-async function attachDeviceInfo(scopedDb, tenantUid, sessionUid, device, clientIp, capture) {
+async function attachDeviceInfo(scopedDb, tenantUid, sessionUid, device, clientIp, capture, telemetry) {
   const session = await scopedDb.sessions.findByUid(sessionUid);
   if (!session || session.deviceFingerprint) return false;
 
@@ -161,6 +161,26 @@ async function attachDeviceInfo(scopedDb, tenantUid, sessionUid, device, clientI
       meta.capture = cap;
     }
   }
+  // v5 E1: capture telemetry from the widget (how frames were taken). Bounded
+  // and whitelisted; feeds risk signals (instant triggers, manual use) and
+  // the developer/review views. Never trusted for the decision itself.
+  if (telemetry && typeof telemetry === "object") {
+    const tel = {};
+    const num = (v) => (typeof v === "number" && Number.isFinite(v) ? Math.round(v) : null);
+    for (const k of ["detectMs", "landmarkMs", "modelLoadMs", "totalMs"]) if (num(telemetry[k]) !== null) tel[k] = num(telemetry[k]);
+    if (Array.isArray(telemetry.actions)) {
+      tel.actions = telemetry.actions.slice(0, 8).map((a) => ({
+        action: typeof a.action === "string" ? a.action.slice(0, 20) : null,
+        msToTrigger: num(a.msToTrigger),
+        wrongWay: num(a.wrongWay) ?? 0,
+        hints: Array.isArray(a.hints) ? a.hints.slice(0, 6).map((h) => String(h).slice(0, 16)) : [],
+        frames: num(a.frames) ?? 0,
+        mode: ["auto", "manual", "fallback"].includes(a.mode) ? a.mode : "unknown",
+        reissued: a.reissued === true
+      }));
+    }
+    if (Object.keys(tel).length) { meta = meta || {}; meta.telemetry = tel; }
+  }
   if (!fingerprint && !meta && !clientIp) return false;
 
   await scopedDb.sessions.update(sessionUid, {
@@ -173,6 +193,43 @@ async function attachDeviceInfo(scopedDb, tenantUid, sessionUid, device, clientI
 // --- Retry flow (end-user "try again" after rejected/review/failed) --------
 
 const RETRY_MAX_ATTEMPTS = 5;        // total attempts (1 initial + 4 retries)
+const REISSUE_MAX_PER_SESSION = 2;   // "I can't do this movement" swaps per session
+
+/**
+ * Reissue the liveness challenge mid-capture, excluding actions the user
+ * cannot perform (v5 D3). New nonce → frames for the old challenge are
+ * superseded (the worker's nonce fence). Audited; capped per session; the
+ * decision engine routes reissued sessions to review only when other signals
+ * are borderline (the reissue count travels in rawResult via the audit log).
+ */
+async function reissueChallenge(scopedDb, sessionUid, sdkToken, { excludeActions = [], tenantId, actorId = null, req = null } = {}) {
+  const { audit } = require("./auditLogger");
+  const session = await scopedDb.sessions.findByUid(sessionUid);
+  if (!session) throw new AppError("SESSION_NOT_FOUND");
+  if (!sdkToken || !verifySdkToken(session.sessionUid, sdkToken, session.sdkTokenHash)) {
+    throw new AppError("INVALID_API_KEY", "invalid SDK token for this session");
+  }
+  if (!["created", "started"].includes(session.status)) {
+    throw new AppError("VALIDATION_ERROR", `cannot reissue a challenge in status '${session.status}'`);
+  }
+  if (session.verificationType === "ID_ONLY") throw new AppError("VALIDATION_ERROR", "this session has no liveness challenge");
+  const prior = (await scopedDb.auditLogs.list({ sessionId: session.id, action: "challenge.reissued" })).length;
+  if (prior >= REISSUE_MAX_PER_SESSION) throw new AppError("VALIDATION_ERROR", `challenge may be reissued at most ${REISSUE_MAX_PER_SESSION} times`);
+  const exclude = (Array.isArray(excludeActions) ? excludeActions : []).filter((a) => typeof a === "string").slice(0, 4);
+  const livenessChallenge = generateLivenessChallenge({ excludeActions: exclude });
+  await scopedDb.sessions.update(session.sessionUid, { livenessChallenge });
+  await audit({
+    tenantId, sessionId: session.id, actorType: "api", actorId, action: "challenge.reissued", req,
+    metadata: { reissue: prior + 1, excludeActions: exclude, actions: livenessChallenge.actions }
+  });
+  return {
+    success: true,
+    sessionId: session.sessionUid,
+    reissue: prior + 1,
+    reissuesRemaining: REISSUE_MAX_PER_SESSION - prior - 1,
+    livenessChallenge: { actions: livenessChallenge.actions, nonce: livenessChallenge.nonce }
+  };
+}
 const RETRY_MANUAL_UPLOAD_AFTER = 3; // camera attempts before offering file upload
 
 /**
@@ -282,5 +339,6 @@ async function recordConsent(scopedDb, sessionUid, sdkToken, { copyVersion = nul
 module.exports = {
   createSession, getSession, signSdkToken, verifySdkToken, validateCreatePayload, attachDeviceInfo,
   retrySession, RETRY_MAX_ATTEMPTS, RETRY_MANUAL_UPLOAD_AFTER,
+  reissueChallenge, REISSUE_MAX_PER_SESSION,
   recordConsent
 };

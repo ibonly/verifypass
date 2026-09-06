@@ -159,7 +159,7 @@ const TRIGGER = Object.freeze({
  */
 function detectActionTrigger(action, baseline, box, { motionSpike = false } = {}) {
   if (!action) return false;
-  if (action === "blink" || action === "smile") return motionSpike;
+  if (action === "blink" || action === "smile" || action === "open_mouth") return motionSpike;
   if (!baseline || !box) return false;
   const bw = baseline.x2 - baseline.x1;
   const bh = baseline.y2 - baseline.y1;

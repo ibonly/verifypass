@@ -154,6 +154,10 @@ async function runJob(job, deps) {
       await reclaimStaleJobs(deps.db).catch(() => {});
       return { timedOut };
     }
+    case "telemetry_anomaly": {
+      const { runTelemetryAnomaly } = require("./src/worker/telemetryAnomaly");
+      return runTelemetryAnomaly(deps.db, job.payload || {});
+    }
     case "retention_cleanup": {
       const { storage } = require("@verifypass/shared");
       const { capFailedSessionRetention } = require("./src/worker/retention");
