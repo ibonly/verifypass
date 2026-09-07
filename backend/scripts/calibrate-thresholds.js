@@ -53,7 +53,7 @@ function recommend(genuine, impostor) {
   let pass = table.filter((r) => r.frr !== null && r.frr <= 0.02).map((r) => r.t).pop() ?? null;
   if (reject !== null && pass !== null && pass < reject) pass = reject;
   const eer = table.reduce((best, r) => (r.far !== null && r.frr !== null && Math.abs(r.far - r.frr) < Math.abs(best.far - best.frr) ? r : best), table[0]);
-  return { reject, pass, eer: { t: eer.t, far: +eer.far.toFixed(4), frr: +eer.frr.toFixed(4) }, table: table.filter((_, i) => i % 5 === 0) };
+  return { preliminary: true, note: "Reviewer labels are proxies; validate on an independently labeled held-out dataset before deployment. These empirical rates are not certified error bounds.", reject, pass, eer: { t: eer.t, far: +eer.far.toFixed(4), frr: +eer.frr.toFixed(4) }, table: table.filter((_, i) => i % 5 === 0) };
 }
 
 async function main() {
@@ -81,19 +81,19 @@ async function main() {
     const codes = s.decisionReason?.reasonCodes || [];
     const rd = reviewerDecision.get(s.id);
     let cls = null;
-    if (rd === "approved" || (s.status === "approved" && !rd)) cls = "genuine";
-    else if (rd === "rejected" || (s.status === "rejected" && codes.some((c) => FRAUD_CODES.has(c)))) cls = "impostor";
+    if (rd === "approved") cls = "genuine";
+    else if (rd === "rejected") cls = "impostor";
     if (!cls) continue;
     const mv = r.rawResult?.modelVersion || "unknown";
     if (!groups.has(mv)) groups.set(mv, { genuine: { liveness: [], faceMatch: [], challenge: [] }, impostor: { liveness: [], faceMatch: [], challenge: [] } });
     const g = groups.get(mv)[cls];
-    if (typeof r.livenessScore === "number") g.liveness.push(Number(r.livenessScore));
-    if (typeof r.faceMatchScore === "number") g.faceMatch.push(Number(r.faceMatchScore));
+    if (Number.isFinite(r.livenessScore)) g.liveness.push(Number(r.livenessScore));
+    if (Number.isFinite(r.faceMatchScore)) g.faceMatch.push(Number(r.faceMatchScore));
     const agg = r.rawResult?.livenessChallenge?.aggregateScore;
-    if (typeof agg === "number") g.challenge.push(agg);
+    if (Number.isFinite(agg)) g.challenge.push(agg);
   }
 
-  const out = { tenant: tenant || "(all)", days, sessionsConsidered: sessions.length, groups: {} };
+  const out = { tenant: tenant || "(all)", days, sessionsConsidered: sessions.length, labeling: "reviewer-only; independent biometric ground truth still required", groups: {} };
   for (const [mv, g] of groups) {
     out.groups[mv] = {};
     for (const key of ["liveness", "faceMatch", "challenge"]) {

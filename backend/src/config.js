@@ -46,6 +46,14 @@ module.exports = {
   authTokenSecret: requireSecret("AUTH_TOKEN_SECRET", "dev-only-auth-secret"),
   evidenceDir: process.env.EVIDENCE_DIR || "./evidence-store",
   hostedBaseUrl: process.env.HOSTED_BASE_URL || "https://verify.verifypass.com",
+  // Verification provider the worker runs (mirrors worker.js). The API needs
+  // it to issue only challenges the provider can verify: expression actions
+  // need 68-point landmarks, which only the ONNX provider supplies.
+  provider: (process.env.VP_PROVIDER || "onnx").toLowerCase(),
+  // Expression actions (blink / open_mouth) are retired from issuance by
+  // default (browser eye-band detection false-triggered on lighting). Opt in
+  // per deployment; ignored unless the provider can verify them.
+  challengeExpressions: process.env.CHALLENGE_ALLOW_EXPRESSIONS === "true" && (process.env.VP_PROVIDER || "onnx").toLowerCase() === "onnx",
   evidenceEncryptionKey: requireEvidenceKey(),
   cloudinary: (() => {
     // Ignore a placeholder CLOUDINARY_URL (contains "<...>") so it can't shadow

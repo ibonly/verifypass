@@ -1,54 +1,63 @@
 {
-  "date": "2026-09-06T05:28:59.389Z",
-  "proofs": 12,
+  "date": "2026-09-07T16:54:36.615Z",
+  "mode": "desired-behaviour regressions",
+  "proofs": 14,
   "findings": [
     {
       "id": "L01",
-      "evidence": "Blink with one frame and no expression data returns ok:true under enforcePose:true."
+      "evidence": "Blink without expression evidence is evidenceInsufficient → review; expressions are not issued unless the provider supports landmarks."
     },
     {
       "id": "L02/L03",
-      "evidence": "Same-sign turns, one frame per action: ok:true; consistency false and missing trajectory are not blocking by default."
+      "evidence": "Same-sign turns are reviewed by default and rejected when consistency is enforced; two frames per action is insufficient evidence."
     },
     {
       "id": "L04",
-      "evidence": "High liveness on frontal frame plus zero-liveness turned frame satisfies action; no one frame satisfies both."
+      "evidence": "A frontal live frame cannot vouch for a zero-liveness turned frame — pose is judged on frames that clear the spoof floor."
     },
     {
       "id": "L05/L06",
-      "evidence": "NaN passive score and missing identity score each permit approved decisions at the decision boundary."
+      "evidence": "NaN passive score rejects; unavailable identity routes to review."
     },
     {
       "id": "L07",
-      "evidence": "Excluding four head movements leaves only two expression actions."
+      "evidence": "Excluding every head movement throws instead of issuing an expression-only or empty challenge."
     },
     {
       "id": "L08",
-      "evidence": "Challenge issued one day in the future is treated as fresh."
+      "evidence": "A challenge issued in the future is not fresh."
     },
     {
       "id": "L09",
-      "evidence": "Synthetic uniform-color tile means score as valid flash response without any face evidence (scorer-level proof)."
+      "evidence": "Flash sequences are server-issued (challenge.flashSequence); the upload rejects any other sequence and the worker verifies HMAC, dimensions and per-tile identity before scoring (see pipeline scenario below)."
     },
     {
       "id": "L10",
-      "evidence": "Two-argument uploadLivenessFrame used by vanilla button labels manual capture as auto."
+      "evidence": "Two-argument uploadLivenessFrame reports captureMode 'unknown' (server treats it as manual → review), never 'auto'."
+    },
+    {
+      "id": "baseline",
+      "evidence": "A genuine burst (3 distinct frames per action, opposite-signed yaw) approves in production with the policy declared validated."
     },
     {
       "id": "L11",
-      "evidence": "Production-mode pipeline approves selfie score 0.01 with three challenge scores 0.95; persisted score remains 0.01. Stub provider, real encrypted evidence."
+      "evidence": "Selfie 0.01 with 0.95 frontal frames is contradictory evidence → manual review, never approval; the persisted score is the selfie's."
     },
     {
       "id": "L12",
-      "evidence": "Production-mode pipeline approves with enforceFlash:true and no flash evidence."
+      "evidence": "enforceFlash with no mosaic keeps enforced:true and routes to review."
     },
     {
       "id": "L06",
-      "evidence": "Production-mode pipeline approves when identity comparison throws."
+      "evidence": "Identity comparison failure routes to review, never approval."
     },
     {
       "id": "L13",
-      "evidence": "Result persistence failure leaves approved session without result; job retry skips it."
+      "evidence": "Result write failure rolls back the status CAS, audit and outbox; the session stays submitted for retry."
+    },
+    {
+      "id": "L16",
+      "evidence": "A worker holding attempt A evidence cannot finalize attempt B submitted during inference."
     }
   ]
 }

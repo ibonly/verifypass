@@ -1,0 +1,7 @@
+{
+  "fr_liveness.onnx": "afa783b7e902fdfcf323a7240cac2a1c580c25314ea4161129dc1b0d100dc32d",
+  "fr_feature.onnx": "87aacdfe57510db2af90c0251df680e8eec88f122ee94712121d09bcaaaf3581",
+  "fr_landmark.onnx": "f10b0ba1d2a8a099adefede1ebf3733e44fe370715e7303dbeb7f59c02142258",
+  "fr_detect.onnx": "6c0256ccd3164f844736a401faf936ec2930764a87ae39442180887d0c5c8854",
+  "fr_pose.onnx": "72d032ec941b7153bf8d3f2c03a4c165453cc7e63d479041ec7c6ef087e5839d"
+}

@@ -42,7 +42,8 @@ router.get("/:sessionId/result", async (req, res, next) => {
     const { AppError } = require("@verifypass/shared");
     const session = await req.scopedDb.sessions.findByUid(req.params.sessionId);
     if (!session) throw new AppError("SESSION_NOT_FOUND");
-    const r = await req.scopedDb.results.latestForSession(session.id);
+    const latest = await req.scopedDb.results.latestForSession(session.id);
+    const r = latest && (!session.attemptId || latest.attemptId === session.attemptId) ? latest : null;
 
     // ID verification and FACE verification are INDEPENDENT products:
     //   FACE_ONLY  — liveness + selfie; there is no document and nothing to
@@ -59,6 +60,9 @@ router.get("/:sessionId/result", async (req, res, next) => {
     res.json({
       success: true,
       sessionId: session.sessionUid,
+      attemptId: session.attemptId || null,
+      release: require("../lib/release").releaseIdentity(),
+      policy: r?.rawResult?.policy || null,
       customerReference: session.customerReference,
       verificationType: type,
       status: session.status,
@@ -73,7 +77,9 @@ router.get("/:sessionId/result", async (req, res, next) => {
       ...(hasFace ? {
         liveness: r ? {
           status: r.livenessStatus,
-          score: r.livenessScore != null ? Number(r.livenessScore) : null
+          score: r.livenessScore != null ? Number(r.livenessScore) : null,
+          selfieScore: r.rawResult?.liveness?.passiveAggregate?.selfieScore ?? r.rawResult?.liveness?.score ?? null,
+          activeStatus: r.rawResult?.livenessChallenge?.ok === false ? "failed" : r.rawResult?.livenessChallenge?.evidenceInsufficient || r.rawResult?.livenessChallenge?.motionUnverified || r.rawResult?.livenessChallenge?.manualCapture || r.rawResult?.livenessChallenge?.policyUnverified || r.rawResult?.livenessChallenge?.poseProviderUnavailable ? "review" : "checked"
         } : null,
         // Active-challenge detail for integrators/testers: which action
         // passed/failed and why (present/live/pose), plus observed pose

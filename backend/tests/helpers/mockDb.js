@@ -5,7 +5,10 @@
 
 function matches(row, where = {}) {
   return Object.entries(where).every(([k, v]) => {
+    if (k === "OR") return v.some(w => matches(row, w));
+    if (k === "AND") return v.every(w => matches(row, w));
     if (v && typeof v === "object" && !Array.isArray(v)) {
+      if ("isSet" in v) return (row[k] !== undefined) === v.isSet;
       if ("in" in v) return v.in.includes(row[k]);
       if ("lt" in v) return row[k] < v.lt;
       if ("lte" in v) return row[k] <= v.lte;
@@ -36,8 +39,11 @@ function makeTable(rows, name) {
       }
       return Promise.resolve(row);
     },
-    findMany({ where } = {}) {
-      return Promise.resolve(rows.filter((r) => matches(r, where || {})));
+    findMany({ where, orderBy, take } = {}) {
+      let result = rows.filter(r => matches(r, where || {}));
+      if (orderBy) { const [key, direction] = Object.entries(orderBy)[0]; result.sort((a,b) => (a[key] < b[key] ? -1 : a[key] > b[key] ? 1 : 0) * (direction === "desc" ? -1 : 1)); }
+      if (take != null) result = result.slice(0, take);
+      return Promise.resolve(result);
     },
     updateMany({ where, data }) {
       const hit = rows.filter((r) => matches(r, where || {}));
@@ -73,6 +79,9 @@ function makeTable(rows, name) {
 
 function createMockDb() {
   const db = {
+    evidenceStaging: makeTable([], "evidenceStaging"),
+    analysisReceipt: makeTable([], "analysisReceipt"),
+    outbox: makeTable([], "outbox"),
     tenant: makeTable([], "tenant"),
     apiKey: makeTable([], "apiKey"),
     verificationSession: makeTable([], "verificationSession"),
@@ -86,6 +95,19 @@ function createMockDb() {
     $disconnect: () => Promise.resolve()
   };
 
+  // Serialized, rollback-capable transactions for failure/concurrency tests.
+  let tail = Promise.resolve();
+  db.$transaction = async (fn) => {
+    const previous = tail;
+    let unlock;
+    tail = new Promise(resolve => { unlock = resolve; });
+    await previous;
+    const tables = Object.values(db).filter(x => x && Array.isArray(x.rows));
+    const snapshots = tables.map(x => x.rows.map(row => ({ ...row })));
+    try { return await fn(db); }
+    catch (e) { tables.forEach((x, i) => { x.rows.splice(0, x.rows.length, ...snapshots[i]); }); throw e; }
+    finally { unlock(); }
+  };
   // Wire apiKey → tenant include
   const origCreate = db.apiKey.create.bind(db.apiKey);
   db.apiKey.create = ({ data }) => {

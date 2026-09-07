@@ -38,6 +38,63 @@ npm start                                # OR node scripts/start-all.js (API + w
 
 `cd backend && npm test` (API + worker + shared) · `cd frontend/sdk/core && npm test`
 
+## Liveness release checklist
+
+The active-liveness policy (`backend/src/lib/release.js` → `policyVersion`) is
+enforced by default: pose magnitude, issued order and timing, ≥3 distinct
+frames per action, identity continuity on the best frontal frame. Opposite-sign
+turn consistency is recorded only (`CHALLENGE_CONSISTENCY_MODE=review|reject`
+to act on it) because the bundled pose model's yaw sign is unreliable.
+Run exactly one `worker.js` per machine in development (it refuses to start
+next to another one; `WORKER_ALLOW_MULTIPLE=true` for real multi-instance
+setups) — every worker also refuses jobs stamped with a different policy
+version. Before a deploy:
+
+1. `cd backend && npm run prisma:generate` — the API and worker refuse to start
+   on a stale generated client (`assertGeneratedSchema`).
+2. `cd backend && npm run release:check` — verifies the generated schema, that
+   MongoDB is a replica set (transactions), the outbox table, model digests
+   against `scripts/model-manifest.json`, and prints the release identity
+   (commit, source digest, policy version, model set) that `/health`,
+   `/status` and `/result` also report.
+3. `node backend/scripts/smoke-liveness-local.js` against a LOCAL replica-set
+   database — CORS preflight, consent, a synthetic upload through sanitize +
+   encrypt, and transaction rollback. Never smoke-test with a real face.
+4. Production auto-approval is gated: until `LIVENESS_VALIDATED_POLICY` equals
+   the policy version, every production face session routes to manual review
+   with `LIVENESS_POLICY_UNVERIFIED`. Set it only after evaluating the policy on
+   an independently labelled held-out dataset
+   (`node backend/scripts/evaluate-liveness-dataset.js labelled.json`).
+5. Set `BUILD_COMMIT` where `.git` is absent (Lambda) so results carry the
+   deployed commit.
+
+## SDK / API contract notes (policy v2)
+
+- **`attemptId` is required** on every session mutation (`/document`, `/face`,
+  `/liveness-frame`, `/flash`, `/verify`, `/retry`, `/challenge/reissue`,
+  `/challenge/begin`) for sessions created after policy v2. It is returned by
+  `POST /verification-sessions` and `GET /challenge`, and changes on every
+  retry/reissue. The bundled SDK client attaches it automatically after
+  `getChallenge()`; integrators calling the API directly must send it, and old
+  widget bundles will receive `VALIDATION_ERROR` until upgraded.
+- **Challenge clock.** The challenge is issued at session creation, but its
+  10-minute TTL and the 3-minute issue→first-frame window start when the SDK
+  calls `POST /challenge/begin` on reaching the liveness step (the widget does
+  this). Direct integrators must call it before uploading liveness frames or
+  slow document capture will fail with `LIVENESS_CHALLENGE_SEQUENCE_INVALID` /
+  `LIVENESS_CHALLENGE_EXPIRED`. `GET /challenge` returns `challengeIssuedAt`,
+  `challengeTtlMs`, `firstFrameWindowMs` and the session `expiresAt` so both
+  clocks can be shown together.
+- **Expressions.** `blink` / `open_mouth` are not issued unless
+  `CHALLENGE_ALLOW_EXPRESSIONS=true` and the worker runs the ONNX provider (it
+  is the only one that returns landmarks). Legacy expression steps without a
+  verified transition route to review.
+- **Screen flash** is opt-in per user at the consent screen. A tenant with
+  `settings.challenge.enforceFlash` sends every user who declines to review.
+- **Vanilla (CDN) SDK** embeds the hosted verification page
+  (`HOSTED_BASE_URL/session/<id>#t=<token>`) in an iframe; it requires the
+  hosted page to be deployed over HTTPS and has no standalone capture mode.
+
 ## Deploy
 
 - **Backend → AWS Lambda**: `.github/workflows/backend-deploy.yml` (SAM, OIDC).

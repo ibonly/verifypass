@@ -37,7 +37,7 @@ async function reclaimStaleJobs(db, { staleMs = STALE_LOCK_MS, now = new Date() 
   for (const job of stale) {
     const exhausted = (job.attempts || 0) >= (job.maxAttempts || 5);
     await db.jobQueue.updateMany({
-      where: { id: job.id, status: "running" }, // optimistic — skip if a worker just finished it
+      where: { id: job.id, status: "running", lockedAt: { lt: cutoff } }, // optimistic — skip if a worker just finished it
       data: exhausted
         ? { status: "failed", lastError: "stale lock reclaimed — worker died mid-job (attempts exhausted)" }
         : { status: "pending", lockedBy: null, lockedAt: null, runAfter: now, lastError: "stale lock reclaimed — worker died mid-job" }
@@ -66,37 +66,27 @@ async function failStuckSubmitted(db, { staleMinutes = 30, now = new Date(), enq
   const lockCutoff = new Date(now.getTime() - STALE_LOCK_MS);
   const alive = openJobs.filter((j) =>
     j.status === "pending" || (j.lockedAt && new Date(j.lockedAt) >= lockCutoff));
-  const queued = new Set(alive.map((j) => j.payload && j.payload.sessionUid).filter(Boolean));
+  const queued = new Set(alive.map(j => j.payload && `${j.payload.sessionUid}:${j.payload.attemptId || "legacy"}`).filter(Boolean));
 
   let failed = 0;
   for (const s of stuck) {
-    if (queued.has(s.sessionUid)) continue; // job still queued — backlog, let it run
+    if (queued.has(`${s.sessionUid}:${s.attemptId || "legacy"}`)) continue; // job still queued — backlog, let it run
 
-    // Optimistic status guard: never stomp a session a racing worker just finalized.
-    const updated = await db.verificationSession.updateMany({
-      where: { id: s.id, status: "submitted" },
-      data: {
-        status: "failed",
-        riskLevel: "high",
-        decisionReason: { reasonCodes: ["SESSION_TIMEOUT"] },
-        completedAt: now
-      }
+    const committed = await require("../services/atomic").transaction(db, async tx => {
+      const updated = await tx.verificationSession.updateMany({
+        where: { id: s.id, status: "submitted", ...(s.attemptId ? { attemptId: s.attemptId } : { OR: [{ attemptId: null }, { attemptId: { isSet: false } }] }) },
+        data: { status: "failed", riskLevel: "high", decisionReason: { reasonCodes: ["SESSION_TIMEOUT"] }, completedAt: now }
+      });
+      if (!updated.count) return false;
+      await tx.verificationResult.create({ data: { sessionId: s.id, attemptId: s.attemptId || null, livenessStatus: s.verificationType === "ID_ONLY" ? null : "failed", rawResult: { reasonCodes: ["SESSION_TIMEOUT"], release: require("../lib/release").releaseIdentity() } } });
+      await tx.auditLog.create({ data: { tenantId: s.tenantId, sessionId: s.id, actorType: "system", action: "session.timeout", metadata: { staleMinutes, submittedAt: s.submittedAt || s.updatedAt }, riskEvent: false } });
+      await require("../services/outbox").addOutbox(tx, "send_webhook", { tenantId: String(s.tenantId), sessionUid: s.sessionUid, attemptId: s.attemptId || null, event: "verification.failed", eventUid: `evt_${require("crypto").randomBytes(12).toString("hex")}`, snapshot: { status: "failed", riskLevel: "high", attempt: s.attemptNumber || 1, completedAt: now.toISOString() } });
+      return true;
     });
-    if (!updated || updated.count === 0) continue;
-
-    await db.auditLog.create({
-      data: {
-        tenantId: s.tenantId, sessionId: s.id, actorType: "system",
-        action: "session.timeout",
-        metadata: { staleMinutes, submittedAt: s.updatedAt },
-        riskEvent: false
-      }
-    });
-    await dispatch("send_webhook", {
-      tenantId: String(s.tenantId), sessionUid: s.sessionUid, event: "verification.failed"
-    });
+    if (!committed) continue;
     failed++;
   }
+  await require("../services/outbox").flushOutbox(db, dispatch);
   return failed;
 }
 

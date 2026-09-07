@@ -38,7 +38,7 @@ test("retry reopens a rejected session: started, fresh challenge, audit-logged",
   // capture the VALUE — the mock db returns live row references
   const nonceBefore = (await scope.sessions.findByUid(created.sessionId)).livenessChallenge.nonce;
 
-  const r = await retrySession(scope, created.sessionId, created.sdkToken, { tenantId: tenant.id });
+  const r = await retrySession(scope, created.sessionId, created.sdkToken, { tenantId: tenant.id, attemptId: (await scope.sessions.findByUid(created.sessionId)).attemptId });
   assert.equal(r.status, "started");
   assert.equal(r.attempts, 2);
   assert.equal(r.maxAttempts, RETRY_MAX_ATTEMPTS);
@@ -59,12 +59,12 @@ test("retry reopens a rejected session: started, fresh challenge, audit-logged",
 test("manual_review and failed sessions are retryable; active ones are not", async () => {
   for (const status of ["manual_review", "failed"]) {
     const { tenant, scope, created } = await setup({ status });
-    const r = await retrySession(scope, created.sessionId, created.sdkToken, { tenantId: tenant.id });
+    const r = await retrySession(scope, created.sessionId, created.sdkToken, { tenantId: tenant.id, attemptId: (await scope.sessions.findByUid(created.sessionId)).attemptId });
     assert.equal(r.status, "started", `${status} must be retryable`);
   }
   const { tenant, scope, created } = await setup({ status: "started" });
   await assert.rejects(
-    () => retrySession(scope, created.sessionId, created.sdkToken, { tenantId: tenant.id }),
+    async () => retrySession(scope, created.sessionId, created.sdkToken, { tenantId: tenant.id, attemptId: (await scope.sessions.findByUid(created.sessionId)).attemptId }),
     /cannot retry/
   );
 });
@@ -72,7 +72,7 @@ test("manual_review and failed sessions are retryable; active ones are not", asy
 test("wrong SDK token → INVALID_API_KEY (retry is holder-only)", async () => {
   const { tenant, scope, created } = await setup();
   await assert.rejects(
-    () => retrySession(scope, created.sessionId, "sdk_v1_forged", { tenantId: tenant.id }),
+    async () => retrySession(scope, created.sessionId, "sdk_v1_forged", { tenantId: tenant.id, attemptId: (await scope.sessions.findByUid(created.sessionId)).attemptId }),
     (err) => err.code === "INVALID_API_KEY"
   );
 });
@@ -82,7 +82,7 @@ test("manual upload suggested AFTER 3 camera attempts; cap at 5 total", async ()
 
   const again = async () => {
     // each retry ends rejected again → user tries once more
-    const r = await retrySession(scope, created.sessionId, created.sdkToken, { tenantId: tenant.id });
+    const r = await retrySession(scope, created.sessionId, created.sdkToken, { tenantId: tenant.id, attemptId: (await scope.sessions.findByUid(created.sessionId)).attemptId });
     await scope.sessions.update(created.sessionId, { status: "rejected" });
     return r;
   };
@@ -99,14 +99,14 @@ test("manual upload suggested AFTER 3 camera attempts; cap at 5 total", async ()
   assert.equal(r5.attemptsRemaining, 0);
 
   await assert.rejects(
-    () => retrySession(scope, created.sessionId, created.sdkToken, { tenantId: tenant.id }),
+    async () => retrySession(scope, created.sessionId, created.sdkToken, { tenantId: tenant.id, attemptId: (await scope.sessions.findByUid(created.sessionId)).attemptId }),
     (err) => err.code === "RETRY_LIMIT_REACHED"
   );
 });
 
 test("ID_ONLY retry reissues NO challenge (that flow has no liveness step)", async () => {
   const { tenant, scope, created } = await setup({ type: "ID_ONLY" });
-  const r = await retrySession(scope, created.sessionId, created.sdkToken, { tenantId: tenant.id });
+  const r = await retrySession(scope, created.sessionId, created.sdkToken, { tenantId: tenant.id, attemptId: (await scope.sessions.findByUid(created.sessionId)).attemptId });
   assert.equal(r.livenessChallenge, null);
   const after = await scope.sessions.findByUid(created.sessionId);
   assert.equal(after.livenessChallenge, null);
@@ -117,7 +117,7 @@ test("cross-tenant session is invisible to retry (404, never 403)", async () => 
   const other = await db.tenant.create({ data: { tenantUid: "tnt_other", companyName: "O", status: "active" } });
   const otherScope = scopeFor(other);
   await assert.rejects(
-    () => retrySession(otherScope, created.sessionId, created.sdkToken, { tenantId: other.id }),
+    async () => retrySession(otherScope, created.sessionId, created.sdkToken, { tenantId: other.id }),
     (err) => err.code === "SESSION_NOT_FOUND"
   );
 });
@@ -126,16 +126,17 @@ test("cross-tenant session is invisible to retry (404, never 403)", async () => 
 test("reissueChallenge: new nonce, excluded action absent, capped at REISSUE_MAX_PER_SESSION, audited", async () => {
   const { reissueChallenge, REISSUE_MAX_PER_SESSION } = require("../src/services/sessionService");
   const { db, tenant, scope, created } = await setup({ status: "started" });
+  await scope.sessions.update(created.sessionId, { livenessChallenge: { ...(await scope.sessions.findByUid(created.sessionId)).livenessChallenge, actions: ["turn_left", "turn_right", "look_up"] } });
   const beforeNonce = (await scope.sessions.findByUid(created.sessionId)).livenessChallenge.nonce; // copy: the mock row is a live reference
-  const r1 = await reissueChallenge(scope, created.sessionId, created.sdkToken, { excludeActions: ["look_up"], tenantId: tenant.id });
+  const r1 = await reissueChallenge(scope, created.sessionId, created.sdkToken, { excludeActions: ["look_up"], tenantId: tenant.id, attemptId: (await scope.sessions.findByUid(created.sessionId)).attemptId });
   assert.equal(r1.reissue, 1);
   assert.ok(!r1.livenessChallenge.actions.includes("look_up"));
   assert.ok(r1.livenessChallenge.actions.includes("turn_left") && r1.livenessChallenge.actions.includes("turn_right"));
   const after = await scope.sessions.findByUid(created.sessionId);
   assert.notEqual(after.livenessChallenge.nonce, beforeNonce);
-  await reissueChallenge(scope, created.sessionId, created.sdkToken, { excludeActions: [], tenantId: tenant.id });
-  await assert.rejects(() => reissueChallenge(scope, created.sessionId, created.sdkToken, { tenantId: tenant.id }), (e) => /at most/.test(e.message));
+  await reissueChallenge(scope, created.sessionId, created.sdkToken, { excludeActions: [(await scope.sessions.findByUid(created.sessionId)).livenessChallenge.actions[0]], tenantId: tenant.id, attemptId: (await scope.sessions.findByUid(created.sessionId)).attemptId });
+  await assert.rejects(async () => reissueChallenge(scope, created.sessionId, created.sdkToken, { tenantId: tenant.id, attemptId: (await scope.sessions.findByUid(created.sessionId)).attemptId }), (e) => /limit reached/.test(e.message));
   const audits = await db.auditLog.findMany({ where: { action: "challenge.reissued" } });
   assert.equal(audits.length, REISSUE_MAX_PER_SESSION);
-  await assert.rejects(() => reissueChallenge(scope, created.sessionId, "bad-token", { tenantId: tenant.id }));
+  await assert.rejects(async () => reissueChallenge(scope, created.sessionId, "bad-token", { tenantId: tenant.id, attemptId: (await scope.sessions.findByUid(created.sessionId)).attemptId }));
 });

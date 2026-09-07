@@ -10,7 +10,7 @@
     "test": "npm test --prefix backend && npm test --prefix frontend/sdk/core && npm test --prefix frontend/dashboard",
     "test:backend": "npm test --prefix backend",
     "test:sdk": "npm test --prefix frontend/sdk/core",
-    "build": "(cd frontend/sdk/js && npm run build) && (cd frontend/dashboard && npm run build) && (cd frontend/verify-page && npm run build) && (cd sample-app && npm run build)",
+    "build": "npm run prisma:validate --prefix backend && npm run prisma:generate --prefix backend && (cd frontend/sdk/js && npm run build) && (cd frontend/dashboard && npm run build) && (cd frontend/verify-page && npm run build) && (cd sample-app && npm run build)",
     "models:fetch": "node backend/scripts/fetch-models.js",
     "mongo:start": "bash scripts/start-mongo.sh",
     "prisma:push": "npm run prisma:push --prefix backend"

@@ -20,6 +20,7 @@ exports.meanBrightness = quality.meanBrightness;
 exports.frameMotion = quality.frameMotion;
 exports.assessFrame = quality.assessFrame;
 exports.DEFAULT_RULES = quality.DEFAULT_RULES;
+exports.nextVideoFrame = camera.nextVideoFrame;
 exports.startCamera = camera.startCamera;
 exports.stopCamera = camera.stopCamera;
 exports.captureFrame = camera.captureFrame;
@@ -76,3 +77,5 @@ const modelCache = require("./modelCache");
 exports.fetchWithCache = modelCache.fetchWithCache;
 exports.clearModelCache = modelCache.clearModelCache;
 exports.DEFAULT_CACHE_NAME = modelCache.DEFAULT_CACHE_NAME;
+
+exports.evictModel = require("./modelCache").evictModel;

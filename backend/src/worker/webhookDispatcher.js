@@ -89,6 +89,7 @@ async function sendWebhook(payload, deps = {}) {
     if (!delivery) return { skipped: true, reason: "tenant has no webhook configured" };
   }
 
+  if (delivery.status === "delivered") return { skipped: true };
   const tenant = await db.tenant.findFirst({ where: { id: delivery.tenantId } });
   if (!tenant?.webhookUrl || !tenant?.webhookSecret) {
     await db.webhookDelivery.updateMany({ where: { id: delivery.id }, data: { status: "failed", lastError: "webhook not configured" } });
@@ -152,14 +153,16 @@ async function sendWebhook(payload, deps = {}) {
   return { delivered: false, attempts, exhausted };
 }
 
-async function createDelivery({ tenantId, sessionUid, event }, { db, now }) {
+async function createDelivery({ tenantId, sessionUid, event, eventUid: suppliedEventUid, snapshot }, { db, now }) {
   // tenantId travels through job payloads as a string — MongoDB ObjectId ids
   // are strings end to end, no coercion needed.
   const tenant = await db.tenant.findFirst({ where: { id: String(tenantId) } });
   if (!tenant?.webhookUrl || !tenant?.webhookSecret) return null;
 
   const session = await db.verificationSession.findFirst({ where: { sessionUid } });
-  const eventUid = `evt_${crypto.randomBytes(12).toString("hex")}`;
+  const eventUid = suppliedEventUid || `evt_${crypto.randomBytes(12).toString("hex")}`;
+  const existing = await db.webhookDelivery.findFirst({ where: { eventUid } });
+  if (existing) return existing;
 
   // Attempt number: the end-user retry flow re-verifies the SAME session, so
   // consumers can receive several terminal events for one sessionId (e.g.
@@ -183,7 +186,8 @@ async function createDelivery({ tenantId, sessionUid, event }, { db, now }) {
     riskLevel: session?.riskLevel || null,
     attempt,
     createdAt: session?.createdAt ? new Date(session.createdAt).toISOString() : null,
-    completedAt: session?.completedAt ? new Date(session.completedAt).toISOString() : null
+    completedAt: session?.completedAt ? new Date(session.completedAt).toISOString() : null,
+    ...(snapshot || {})
   };
 
   return db.webhookDelivery.create({
@@ -198,6 +202,9 @@ async function createDelivery({ tenantId, sessionUid, event }, { db, now }) {
       attempts: 0,
       nextAttemptAt: now()
     }
+  }).catch(async err => {
+    if (err.code === "P2002") return db.webhookDelivery.findFirst({ where: { eventUid } });
+    throw err;
   });
 }
 

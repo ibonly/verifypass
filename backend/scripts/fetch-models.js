@@ -12,6 +12,9 @@ const path = require("path");
 const https = require("https");
 
 const BASE = "https://raw.githubusercontent.com/Faceplugin-ltd/FaceRecognition-LivenessDetection-Javascript/main/model";
+const crypto = require("crypto");
+const MANIFEST = require("./model-manifest.json");
+const checksum = p => crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex");
 const OUT_DIR = path.resolve(__dirname, "../models");
 
 // Required by the ONNX provider; eye/expression/age/gender are optional extras.
@@ -45,12 +48,17 @@ async function main() {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   for (const name of MODELS) {
     const dest = path.join(OUT_DIR, name);
-    if (fs.existsSync(dest) && fs.statSync(dest).size > 0) {
+    if (fs.existsSync(dest) && checksum(dest) === MANIFEST[name]) {
       console.log(`✓ ${name} (already present)`);
       continue;
     }
     process.stdout.write(`↓ ${name} … `);
-    await download(`${BASE}/${name}`, dest);
+    const partial = `${dest}.${process.pid}.partial`;
+    try {
+      await download(`${BASE}/${name}`, partial);
+      if (!MANIFEST[name] || checksum(partial) !== MANIFEST[name]) throw new Error(`Unrecognized model checksum: ${name}`);
+      fs.renameSync(partial, dest);
+    } finally { if (fs.existsSync(partial)) fs.unlinkSync(partial); }
     console.log(`${(fs.statSync(dest).size / 1024).toFixed(0)} KB`);
   }
   console.log(`\nModels ready in ${OUT_DIR}`);

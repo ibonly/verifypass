@@ -86,6 +86,7 @@ function buildDeps() {
 // ---------------------------------------------------------------------------
 async function drainDbQueue(deps, { maxJobs = 25, budgetMs = 90_000, now = Date.now } = {}) {
   const db = deps.db;
+  const owner = require("crypto").randomUUID();
   const { reclaimStaleJobs } = require("./src/worker/watchdog");
 
   // Same optimistic claim the polling worker uses (inlined — requiring
@@ -98,7 +99,7 @@ async function drainDbQueue(deps, { maxJobs = 25, budgetMs = 90_000, now = Date.
     if (!candidate) return null;
     const claimed = await db.jobQueue.updateMany({
       where: { id: candidate.id, status: "pending" },
-      data: { status: "running", lockedBy: "lambda-drain", lockedAt: new Date(now()), attempts: { increment: 1 } }
+      data: { status: "running", lockedBy: owner, lockedAt: new Date(now()), attempts: { increment: 1 } }
     });
     return claimed.count === 1 ? candidate : null;
   }
@@ -112,14 +113,15 @@ async function drainDbQueue(deps, { maxJobs = 25, budgetMs = 90_000, now = Date.
   while (processed + failed < maxJobs && now() - started < budgetMs) {
     const job = await claim();
     if (!job) break; // queue drained
+    const heartbeat = setInterval(() => db.jobQueue.updateMany({ where: { id: job.id, status: "running", lockedBy: owner }, data: { lockedAt: new Date() } }).catch(() => {}), 15000);
     try {
       await runJob({ type: job.type, payload: job.payload }, deps);
-      await db.jobQueue.update({ where: { id: job.id }, data: { status: "done" } });
+      await db.jobQueue.updateMany({ where: { id: job.id, status: "running", lockedBy: owner }, data: { status: "done" } });
       processed++;
     } catch (err) {
       const exhausted = job.attempts + 1 >= job.maxAttempts;
-      await db.jobQueue.update({
-        where: { id: job.id },
+      await db.jobQueue.updateMany({
+        where: { id: job.id, status: "running", lockedBy: owner },
         data: {
           status: exhausted ? "failed" : "pending",
           lastError: String(err.message).slice(0, 2000),
@@ -127,7 +129,7 @@ async function drainDbQueue(deps, { maxJobs = 25, budgetMs = 90_000, now = Date.
         }
       });
       failed++;
-    }
+    } finally { clearInterval(heartbeat); }
   }
   return { processed, failed };
 }
@@ -136,7 +138,9 @@ async function drainDbQueue(deps, { maxJobs = 25, budgetMs = 90_000, now = Date.
 // Job execution (shared by drain, SQS and direct invokes)
 // ---------------------------------------------------------------------------
 async function runJob(job, deps) {
+  await require("./src/services/outbox").flushOutbox(deps.db, deps.enqueueJob || ((type, payload) => deps.db.jobQueue.create({ data: { type, payload, status: "pending", runAfter: new Date(), maxAttempts: 5 } })));
   switch (job.type) {
+    case "cleanup_evidence": return require("./src/services/cleanupEvidence").cleanupEvidence(job.payload);
     case "drain":
       return drainDbQueue(deps, job.payload || {});
     case "run_verification":
@@ -144,6 +148,7 @@ async function runJob(job, deps) {
     case "send_webhook":
       return sendWebhook(job.payload, { db: deps.db, enqueueJob: deps.enqueueJob });
     case "expire_sessions": {
+      await require("./src/services/reconcileEvidence").reconcileEvidence(deps.db);
       await deps.db.verificationSession.updateMany({
         where: { status: { in: ["created", "started"] }, expiresAt: { lt: new Date() } },
         data: { status: "expired" }

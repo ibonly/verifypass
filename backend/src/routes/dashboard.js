@@ -74,7 +74,8 @@ router.get("/sessions/:sessionId", anyUser, requireTenant, tenantScope, async (r
   try {
     const session = await req.scopedDb.sessions.findByUid(req.params.sessionId);
     if (!session) throw new AppError("SESSION_NOT_FOUND", "Verification session not found");
-    const r = await req.scopedDb.results.latestForSession(session.id);
+    const latest = await req.scopedDb.results.latestForSession(session.id);
+    const r = latest && (!session.attemptId || latest.attemptId === session.attemptId) ? latest : null;
     // Independent products: FACE_ONLY has no document to show, ID_ONLY runs
     // no liveness/face checks. Omit non-applicable sections entirely so the
     // dashboard never renders "—" rows for checks that don't exist.
@@ -131,6 +132,8 @@ router.get("/sessions/:sessionId", anyUser, requireTenant, tenantScope, async (r
         texture: r.rawResult?.liveness?.texture || null,
         telemetryAnomaly: r.rawResult?.riskSignals?.telemetryAnomaly || null
       } : null,
+      policy: r?.rawResult?.policy || null,
+      release: r?.rawResult?.release || null,
       diagnostics: r ? {
         pipelineVersion: r.rawResult?.pipelineVersion || null,
         missing: r.rawResult?.missing || null,

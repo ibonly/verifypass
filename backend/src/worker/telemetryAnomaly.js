@@ -47,7 +47,7 @@ function sessionTimings(session) {
   const tel = session && session.deviceMeta && session.deviceMeta.telemetry;
   if (!tel || !Array.isArray(tel.actions)) return [];
   return tel.actions
-    .filter((a) => a && typeof a.msToTrigger === "number" && a.msToTrigger >= 0 && (a.mode === "auto" || a.mode == null))
+    .filter((a) => a && Number.isFinite(a.msToTrigger) && a.msToTrigger >= 0 && (a.mode === "auto" || a.mode == null))
     .map((a) => ({ action: a.action, ms: a.msToTrigger, hints: Array.isArray(a.hints) ? a.hints.length : 0 }));
 }
 
@@ -79,6 +79,7 @@ function analyzeTelemetry(sessions, opts = {}) {
   const vectors = new Map(); // timing vector → session ids
   const byDevice = new Map();
   const per = [];
+  const bySession = new Map();
 
   for (const s of sessions) {
     const t = sessionTimings(s);
@@ -116,7 +117,8 @@ function analyzeTelemetry(sessions, opts = {}) {
       if (!byDevice.has(dk)) byDevice.set(dk, []);
       byDevice.get(dk).push({ s, mean: t.reduce((a, x) => a + x.ms, 0) / t.length });
     }
-    per.push({ session: s, flags, detail, key });
+    const entry = { session: s, flags, detail, key };
+    per.push(entry); bySession.set(s, entry);
   }
 
   // duplicate timing vectors across sessions: same tenant + action sequence,
@@ -127,14 +129,14 @@ function analyzeTelemetry(sessions, opts = {}) {
     if (rows.length < 2) continue;
     rows.sort((a, b) => a.ms[0] - b.ms[0]);
     for (let i = 0; i < rows.length; i++) {
-      for (let j = i + 1; j < rows.length && rows[j].ms[0] - rows[i].ms[0] <= o.duplicateMs; j++) {
+      for (let j = i + 1; j < Math.min(rows.length, i + 65) && rows[j].ms[0] - rows[i].ms[0] <= o.duplicateMs; j++) {
         const a = rows[i].ms, b = rows[j].ms;
         let close = true;
         for (let k = 0; k < a.length; k++) if (Math.abs(a[k] - b[k]) > o.duplicateMs) { close = false; break; }
         if (!close) continue;
         for (const [x, y] of [[rows[i].s, rows[j].s], [rows[j].s, rows[i].s]]) {
           if (!dups.has(x)) dups.set(x, []);
-          dups.get(x).push(y.sessionUid || y.id);
+          if (dups.get(x).length < 10) dups.get(x).push(y.sessionUid || y.id);
         }
       }
     }
@@ -153,7 +155,7 @@ function analyzeTelemetry(sessions, opts = {}) {
     const cv = sd / mu;
     if (cv < o.deviceCv) {
       for (const r of rows) {
-        const p = per.find((x) => x.session === r.s);
+        const p = bySession.get(r.s);
         if (p) { p.flags.push("device_uniform"); p.detail.deviceSessions = rows.length; p.detail.deviceCv = Number(cv.toFixed(3)); }
       }
     }
@@ -176,30 +178,35 @@ function analyzeTelemetry(sessions, opts = {}) {
 async function runTelemetryAnomaly(db, opts = {}) {
   const o = { ...DEFAULTS, ...opts };
   const since = new Date(Date.now() - o.windowDays * 24 * 3600 * 1000);
-  const sessions = await db.verificationSession.findMany({ where: { createdAt: { gte: since } } });
-  const withTel = sessions.filter((s) => sessionTimings(s).length);
+  const sessions = await db.verificationSession.findMany({ where: { createdAt: { gte: since }, ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) }, orderBy: { createdAt: "desc" }, take: 5000 });
+  const tenantCounts = new Map();
+  const withTel = sessions.filter(s => {
+    const count = tenantCounts.get(s.tenantId) || 0;
+    if (count >= 1000 || !sessionTimings(s).length) return false;
+    tenantCounts.set(s.tenantId, count + 1); return true;
+  });
+  const sources = new Map(withTel.map(s => [s.id, s]));
   const { findings, stats } = analyzeTelemetry(withTel, o);
   let written = 0;
   for (const f of findings) {
-    const result = await db.verificationResult.findFirst({ where: { sessionId: f.sessionId } });
-    const prev = result && result.rawResult && result.rawResult.riskSignals && result.rawResult.riskSignals.telemetryAnomaly;
-    const same = prev && Array.isArray(prev.flags) && prev.flags.join(",") === f.flags.join(",");
-    if (same) continue;
-    const signal = { flags: f.flags, detail: f.detail, at: new Date().toISOString() };
-    if (result) {
-      const raw = { ...(result.rawResult || {}) };
-      raw.riskSignals = { ...(raw.riskSignals || {}), telemetryAnomaly: signal };
-      await db.verificationResult.update({ where: { id: result.id }, data: { rawResult: raw } });
-    }
-    await db.auditLog.create({
-      data: {
-        tenantId: f.tenantId, sessionId: f.sessionId, actorType: "system", actorId: "telemetry_anomaly",
-        action: "telemetry.anomaly", metadata: signal, riskEvent: true
+    const source = sources.get(f.sessionId);
+    const key = require("crypto").createHash("sha256").update(JSON.stringify([f.sessionId, source?.attemptId || "legacy", f.flags])).digest("hex");
+    const changed = await require("../services/atomic").transaction(db, async tx => {
+      if (await tx.analysisReceipt.findFirst({ where: { key } })) return false;
+      await tx.analysisReceipt.create({ data: { key } });
+      const result = await tx.verificationResult.findFirst({ where: { sessionId: f.sessionId, ...(source?.attemptId ? { attemptId: source.attemptId } : {}) }, orderBy: { createdAt: "desc" } });
+      const signal = { flags: f.flags, detail: f.detail, at: new Date().toISOString() };
+      if (result) {
+        const raw = { ...(result.rawResult || {}) };
+        raw.riskSignals = { ...(raw.riskSignals || {}), telemetryAnomaly: signal };
+        await tx.verificationResult.update({ where: { id: result.id }, data: { rawResult: raw } });
       }
-    });
-    written++;
+      await tx.auditLog.create({ data: { tenantId: f.tenantId, sessionId: f.sessionId, actorType: "system", actorId: "telemetry_anomaly", action: "telemetry.anomaly", metadata: signal, riskEvent: true } });
+      return true;
+    }).catch(err => { if (err.code === "P2002") return false; throw err; });
+    if (changed) written++;
   }
-  return { analysed: withTel.length, flagged: findings.length, written, actionsFitted: Object.keys(stats).length };
+  return { sampled: true, maxSessions: 5000, maxPerTenant: 1000, duplicateNeighbourWindow: 64, duplicateLinkCap: 10, analysed: withTel.length, flagged: findings.length, written, actionsFitted: Object.keys(stats).length };
 }
 
 module.exports = { analyzeTelemetry, runTelemetryAnomaly, sessionTimings, fitStats, TELEMETRY_ANOMALY_DEFAULTS: DEFAULTS };

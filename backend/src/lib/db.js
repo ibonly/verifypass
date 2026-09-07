@@ -10,6 +10,7 @@ let override = null;
 function getDb() {
   if (override) return override;
   if (!client) {
+    require("./release").assertGeneratedSchema();
     const { PrismaClient } = require("@prisma/client");
     client = new PrismaClient();
   }

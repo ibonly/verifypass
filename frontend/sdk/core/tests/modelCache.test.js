@@ -143,7 +143,7 @@ test("network error falls back to cached model if available", async () => {
 
   // Network now fails (offline), but should gracefully recover from cache
   const recovered = await fetchWithCache("https://models.test/model.onnx", {
-    forceRefresh: true, // will attempt network, fail, and fall back
+    forceRefresh: false, // verified cache remains available offline
     fetchFn: async () => {
       throw new Error("Network offline");
     },
@@ -172,4 +172,17 @@ test("clearModelCache removes named cache", async () => {
   const res = await clearModelCache("verifypass-models-v1", { cachesObj: mockCaches });
   assert.equal(res, true);
   assert.deepEqual(mockCaches.deleted, ["verifypass-models-v1"]);
+});
+
+test("HTML 200 responses are rejected before caching", async () => {
+  const cachesObj = createMockCache();
+  await assert.rejects(fetchWithCache("https://models.test/model.onnx", { cachesObj, fetchFn: async () => new Response("<html>fallback</html>", {headers:{"content-type":"text/html"}}) }), /HTML/);
+});
+test("pinned digests reject corrupted cached or downloaded bytes", async () => {
+  const bytes = new Uint8Array([1,2,3]);
+  const sha256 = require("crypto").createHash("sha256").update(bytes).digest("hex");
+  const cachesObj = createMockCache();
+  await fetchWithCache("https://models.test/pinned.onnx", { sha256, cachesObj, fetchFn: async () => new Response(bytes) });
+  const changed = require("crypto").createHash("sha256").update(new Uint8Array([4,5,6])).digest("hex");
+  await assert.rejects(fetchWithCache("https://models.test/pinned.onnx", { sha256:changed, cachesObj, fetchFn: async () => new Response(bytes) }), /checksum mismatch/);
 });

@@ -9,7 +9,10 @@
     "prisma:generate": "prisma generate",
     "prisma:validate": "DATABASE_URL=${DATABASE_URL:-mongodb://localhost:27017/verifypass} prisma validate --schema prisma/schema.prisma",
     "worker": "node worker.js",
-    "prisma:push": "prisma db push"
+    "prisma:push": "prisma db push",
+    "predev": "npm run prisma:generate",
+    "preworker": "npm run prisma:generate",
+    "release:check": "node scripts/check-liveness-release.js"
   },
   "dependencies": {
     "@prisma/client": "^5.16.0",

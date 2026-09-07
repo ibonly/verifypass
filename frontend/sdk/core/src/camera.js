@@ -29,10 +29,10 @@ async function startCamera(videoEl, { facingMode = "user", width = 1280, height 
     }
   }
   videoEl.srcObject = stream;
-  await videoEl.play();
   // Wait until the stream has real dimensions — videoWidth/Height are 0 until
   // metadata loads, and capturing before then throws "source width is 0".
   try {
+    await videoEl.play();
     await waitForVideoReady(videoEl);
   } catch (err) {
     // Ready wait failed: release the stream so we don't leak the camera.
@@ -78,6 +78,29 @@ function waitForVideoReady(videoEl, timeoutMs = 8000) {
       requestAnimationFrame(poll);
     };
     requestAnimationFrame(poll);
+  });
+}
+
+/** Wait for a new camera frame, not merely another display animation tick. */
+function nextVideoFrame(video, { signal, timeoutMs = 2000 } = {}) {
+  return new Promise((resolve, reject) => {
+    let handle, poll, timer;
+    const initial = video.currentTime;
+    const cleanup = () => {
+      clearTimeout(timer); clearTimeout(poll);
+      if (handle !== undefined) video.cancelVideoFrameCallback?.(handle);
+      signal?.removeEventListener("abort", abort);
+    };
+    const finish = error => { cleanup(); error ? reject(error) : resolve(); };
+    const abort = () => finish(new Error("Capture cancelled"));
+    timer = setTimeout(() => finish(new Error("Camera stopped producing frames")), timeoutMs);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) return abort();
+    if (video.requestVideoFrameCallback) handle = video.requestVideoFrameCallback(() => finish());
+    else {
+      const check = () => { if (video.currentTime !== initial) finish(); else poll = setTimeout(check, 30); };
+      poll = setTimeout(check, 30);
+    }
   });
 }
 
@@ -205,4 +228,4 @@ function captureGuideFrame(videoEl, { displayAspect = 1.6, widthFrac = 0.88, reg
   return { imageData, base64 };
 }
 
-module.exports = { startCamera, stopCamera, captureFrame, captureGuideFrame, grabAnalysisFrame, grabFixedFrame, grabSquareFrame };
+module.exports = { nextVideoFrame, startCamera, stopCamera, captureFrame, captureGuideFrame, grabAnalysisFrame, grabFixedFrame, grabSquareFrame };

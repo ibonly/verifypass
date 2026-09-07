@@ -77,3 +77,20 @@ test("runTelemetryAnomaly writes an audited risk event + result signal once per 
   assert.equal(r2.written, 0);
   assert.equal((await db.auditLog.findMany({ where: { action: "telemetry.anomaly" } })).length, 1);
 });
+
+test("telemetry receipts deduplicate audit-only findings before a result exists", async () => {
+  const db = createMockDb();
+  const bad = sess(1, [["turn_left", 100], ["turn_right", 2000]]);
+  await db.verificationSession.create({data:bad});
+  assert.equal((await runTelemetryAnomaly(db)).written,1);
+  assert.equal((await runTelemetryAnomaly(db)).written,0);
+  assert.equal(db.auditLog.rows.length,1);
+});
+test("identical telemetry vectors have bounded peer lists", () => {
+  const rows=Array.from({length:5000},()=>sess(1,[["turn_left",1500],["turn_right",2000],["look_up",2500]]));
+  const started=performance.now();
+  const {findings}=analyzeTelemetry(rows);
+  assert.equal(findings.length,5000);
+  assert.ok(findings.every(f=>f.detail.duplicates.length<=10));
+  assert.ok(performance.now()-started<5000,"bounded comparison budget regressed");
+});

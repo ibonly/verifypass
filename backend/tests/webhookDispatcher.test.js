@@ -167,3 +167,18 @@ test("tenant without webhook config: skipped, no delivery row", async () => {
   assert.equal(out.skipped, true);
   assert.equal((await db.webhookDelivery.findMany({})).length, 0);
 });
+
+test("outbox webhook snapshots survive retries and redelivery reuses the event ID", async () => {
+  const db=createMockDb();
+  const {tenant,session}=await seed(db);
+  session.status="submitted";
+  const fetch=mockFetch(()=>({status:200}));
+  const payload={tenantId:tenant.id,sessionUid:session.sessionUid,event:"verification.rejected",eventUid:"evt_fixed",snapshot:{status:"rejected",riskLevel:"high",attempt:1,attemptId:"old"}};
+  await sendWebhook(payload,{db,fetchImpl:fetch,validateTarget:async()=>{}});
+  await sendWebhook(payload,{db,fetchImpl:fetch,validateTarget:async()=>{}});
+  assert.equal(fetch.calls.length,1);
+  assert.equal(db.webhookDelivery.rows.length,1);
+  const body=JSON.parse(fetch.calls[0].opts.body);
+  assert.equal(body.status,"rejected");assert.equal(body.attemptId,"old");
+  assert.equal(db.webhookDelivery.rows[0].eventUid,"evt_fixed");
+});

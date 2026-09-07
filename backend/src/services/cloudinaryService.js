@@ -53,7 +53,7 @@ function safeSegment(value) {
  * liveness → "liveness_<action>_<ts>"; others → "<fileType>_<ts>".
  */
 function buildPublicId({ fileType, label }) {
-  const ts = Date.now();
+  const ts = `${Date.now()}_${require("crypto").randomBytes(8).toString("hex")}`;
   const name = label ? `liveness_${safeSegment(label)}_${ts}` : `${safeSegment(fileType)}_${ts}`;
   return name;
 }
@@ -64,7 +64,7 @@ function buildPublicId({ fileType, label }) {
  * null on any failure or when Cloudinary is not configured.
  * @returns {Promise<{url:string, publicId:string, bytes:number}|null>}
  */
-async function uploadEvidenceImage({ tenantUid, sessionUid, fileType, label, buffer }) {
+async function uploadEvidenceImage({ tenantUid, sessionUid, fileType, label, buffer, onPrepared }) {
   const client = getClient();
   if (!client) return null;
 
@@ -72,9 +72,11 @@ async function uploadEvidenceImage({ tenantUid, sessionUid, fileType, label, buf
   const publicId = buildPublicId({ fileType, label });
 
   try {
+    if (onPrepared) await onPrepared(`${folder}/${publicId}`);
     const result = await new Promise((resolve, reject) => {
       const stream = client.uploader.upload_stream(
         {
+          timeout: 15000,
           resource_type: "image",
           // Biometric evidence must not be publicly reachable. "authenticated"
           // assets can only be delivered through a signed URL.

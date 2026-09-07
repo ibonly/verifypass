@@ -52,7 +52,7 @@ test("FV-3: per-action liveness frame cap is enforced before decode", async (t) 
   await assert.rejects(
     () => handleUpload({
       scopedDb: scope, tenantUid: tenant.tenantUid, sessionUid: created.sessionId,
-      sdkToken: created.sdkToken, kind: "liveness", action: "smile",
+      sdkToken: created.sdkToken, attemptId: created.attemptId, kind: "liveness", action: "smile",
       imageBase64: "data:image/jpeg;base64,AAAA"
     }),
     (err) => err.code === "VALIDATION_ERROR" && /too many liveness frames/.test(err.message)
@@ -70,7 +70,7 @@ test("FV-3: selfie cap is enforced", async (t) => {
   await assert.rejects(
     () => handleUpload({
       scopedDb: scope, tenantUid: tenant.tenantUid, sessionUid: created.sessionId,
-      sdkToken: created.sdkToken, kind: "face", side: "selfie",
+      sdkToken: created.sdkToken, attemptId: created.attemptId, kind: "face", side: "selfie",
       imageBase64: "data:image/jpeg;base64,AAAA"
     }),
     (err) => err.code === "VALIDATION_ERROR" && /too many selfie captures/.test(err.message)
@@ -96,7 +96,7 @@ test("FV-3: frames from a superseded challenge don't eat the new attempt's budge
   await assert.rejects(
     () => handleUpload({
       scopedDb: scope, tenantUid: tenant.tenantUid, sessionUid: created.sessionId,
-      sdkToken: created.sdkToken, kind: "liveness", action: "smile",
+      sdkToken: created.sdkToken, attemptId: created.attemptId, kind: "liveness", action: "smile",
       imageBase64: "data:image/jpeg;base64,AAAA"
     }),
     // must get PAST the cap (fails later on the bogus image instead)
@@ -125,7 +125,7 @@ test("FV-3: current-attempt frames still enforce the cap after a retry fence", a
   await assert.rejects(
     () => handleUpload({
       scopedDb: scope, tenantUid: tenant.tenantUid, sessionUid: created.sessionId,
-      sdkToken: created.sdkToken, kind: "liveness", action: "smile",
+      sdkToken: created.sdkToken, attemptId: created.attemptId, kind: "liveness", action: "smile",
       imageBase64: "data:image/jpeg;base64,AAAA"
     }),
     (err) => err.code === "VALIDATION_ERROR" && /too many liveness frames/.test(err.message)
@@ -147,7 +147,7 @@ test("P0 binding: frames stamped with an OLD challenge nonce don't eat the budge
   await assert.rejects(
     () => handleUpload({
       scopedDb: scope, tenantUid: tenant.tenantUid, sessionUid: created.sessionId,
-      sdkToken: created.sdkToken, kind: "liveness", action: "smile",
+      sdkToken: created.sdkToken, attemptId: created.attemptId, kind: "liveness", action: "smile",
       imageBase64: "data:image/jpeg;base64,AAAA"
     }),
     (err) => !/too many liveness frames/.test(err.message) // gets past the cap
@@ -161,7 +161,7 @@ test("P0 binding: frames for an action outside the current challenge are rejecte
   await assert.rejects(
     () => handleUpload({
       scopedDb: scope, tenantUid: tenant.tenantUid, sessionUid: created.sessionId,
-      sdkToken: created.sdkToken, kind: "liveness", action: "look_up", // not in pinned challenge
+      sdkToken: created.sdkToken, attemptId: created.attemptId, kind: "liveness", action: "look_up", // not in pinned challenge
       imageBase64: "data:image/jpeg;base64,AAAA"
     }),
     (err) => err.code === "VALIDATION_ERROR" && /not part of this session's current challenge/.test(err.message)

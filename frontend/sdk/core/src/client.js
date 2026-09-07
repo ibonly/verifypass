@@ -61,6 +61,7 @@ class VerifyPassClient {
       throw new Error("VerifyPassClient: token does not embed an API origin — pass baseUrl explicitly");
     }
     this.baseUrl = resolved.replace(/\/$/, "");
+    this.controller = new AbortController();
     this.publicKey = publicKey;
     this.sessionId = sessionId;
     this.sdkToken = sdkToken;
@@ -76,37 +77,32 @@ class VerifyPassClient {
     return h;
   }
 
-  async _post(path, body) {
-    const res = await this.fetch(`${this.baseUrl}${path}`, {
-      method: "POST",
-      headers: this._headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify(body || {})
-    });
-    const json = await res.json().catch(() => ({}));
-    if (!res.ok || json.success === false) {
-      const err = json.error || {};
-      throw new VerifyPassApiError(err.code || "INTERNAL_ERROR", err.message || `HTTP ${res.status}`, res.status);
-    }
-    return json;
+  dispose() { this.controller.abort(); }
+  async _request(path, body) {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const parent = this.controller.signal;
+    if (parent.aborted) abort();
+    parent.addEventListener("abort", abort, { once: true });
+    const timer = setTimeout(abort, body ? 30000 : 15000);
+    try {
+      const res = await this.fetch(`${this.baseUrl}${path}`, {
+        signal: controller.signal,
+        headers: this._headers(body ? { "Content-Type": "application/json" } : {}),
+        ...(body ? { method: "POST", body: JSON.stringify({ ...body, ...(this.attemptId ? { attemptId: this.attemptId } : {}) }) } : {})
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || json.success === false) {
+        const err = json.error || {};
+        const error = new VerifyPassApiError(err.code || "INTERNAL_ERROR", err.message || `HTTP ${res.status}`, res.status);
+        error.correlationId = json.correlationId || null;
+        throw error;
+      }
+      return json;
+    } finally { clearTimeout(timer); parent.removeEventListener("abort", abort); }
   }
-
-  async _get(path) {
-    // Per-request timeout so a hung poll (dead socket after a network change)
-    // fails fast and the caller's retry logic can take over.
-    const signal = typeof AbortSignal !== "undefined" && AbortSignal.timeout
-      ? AbortSignal.timeout(15000)
-      : undefined;
-    const res = await this.fetch(`${this.baseUrl}${path}`, {
-      headers: this._headers(),
-      ...(signal ? { signal } : {})
-    });
-    const json = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      const err = json.error || {};
-      throw new VerifyPassApiError(err.code || "INTERNAL_ERROR", err.message || `HTTP ${res.status}`, res.status);
-    }
-    return json;
-  }
+  _post(path, body) { return this._request(path, body); }
+  _get(path) { return this._request(path); }
 
   uploadDocument(imageBase64, side = "front") {
     return this._post(`/v1/verification-sessions/${this.sessionId}/document`, {
@@ -127,7 +123,7 @@ class VerifyPassClient {
    *   fallback — timer burst with no detector verdict
    *   manual   — the user tapped Capture (never auto-approved server-side)
    */
-  uploadLivenessFrame(action, imageBase64, captureMode = "auto") {
+  uploadLivenessFrame(action, imageBase64, captureMode = "unknown") {
     return this._post(`/v1/verification-sessions/${this.sessionId}/liveness-frame`, {
       sdkToken: this.sdkToken, action, imageBase64, captureMode
     });
@@ -145,8 +141,22 @@ class VerifyPassClient {
   }
 
   /** Fetch the server-issued active-liveness actions + verification type. */
-  getChallenge() {
-    return this._get(`/v1/verification-sessions/${this.sessionId}/challenge`);
+  async getChallenge() {
+    const data = await this._get(`/v1/verification-sessions/${this.sessionId}/challenge`);
+    this.attemptId = data.attemptId; this.flashSequence = data.flashSequence;
+    return data;
+  }
+
+  /**
+   * Start the liveness clock: call when the liveness step is reached. The
+   * challenge TTL and the first-frame window run from this moment rather than
+   * from session creation. Idempotent once a frame has been uploaded. Returns
+   * the deadlines (challengeExpiresAt, firstFrameDeadline, sessionExpiresAt).
+   */
+  async beginChallenge() {
+    const data = await this._post(`/v1/verification-sessions/${this.sessionId}/challenge/begin`, { sdkToken: this.sdkToken });
+    this.challengeDeadlines = { challengeExpiresAt: data.challengeExpiresAt, firstFrameDeadline: data.firstFrameDeadline, sessionExpiresAt: data.sessionExpiresAt };
+    return data;
   }
 
   /**
@@ -165,10 +175,12 @@ class VerifyPassClient {
    * @returns {{attempts:number, maxAttempts:number, manualUploadSuggested:boolean,
    *            livenessChallenge:{actions:string[]}|null}}
    */
-  retrySession() {
-    return this._post(`/v1/verification-sessions/${this.sessionId}/retry`, {
+  async retrySession() {
+    const data = await this._post(`/v1/verification-sessions/${this.sessionId}/retry`, {
       sdkToken: this.sdkToken
     });
+    this.attemptId = data.attemptId; this.flashSequence = data.livenessChallenge?.flashSequence;
+    return data;
   }
 
   /**
@@ -188,10 +200,12 @@ class VerifyPassClient {
    * Ask for a different liveness challenge because the user cannot perform an
    * action (capped + audited server-side). Returns the new action list.
    */
-  reissueChallenge(excludeActions = []) {
-    return this._post(`/v1/verification-sessions/${this.sessionId}/challenge/reissue`, {
+  async reissueChallenge(excludeActions = []) {
+    const data = await this._post(`/v1/verification-sessions/${this.sessionId}/challenge/reissue`, {
       sdkToken: this.sdkToken, excludeActions
     });
+    this.attemptId = data.attemptId; this.flashSequence = data.livenessChallenge?.flashSequence;
+    return data;
   }
 
   submit() {
@@ -222,6 +236,7 @@ class VerifyPassClient {
     const deadline = Date.now() + timeoutMs;
     let lastError = null;
     for (;;) {
+      if (this.controller.signal.aborted) throw new Error("Verification cancelled");
       try {
         const status = await this.getStatus();
         lastError = null;
@@ -238,7 +253,13 @@ class VerifyPassClient {
       if (Date.now() > deadline) {
         throw lastError || new VerifyPassApiError("SESSION_EXPIRED", "Timed out waiting for result", 408);
       }
-      await new Promise((r) => setTimeout(r, intervalMs));
+      await new Promise((resolve, reject) => {
+        const signal = this.controller.signal;
+        const abort = () => { clearTimeout(timer); reject(new Error("Verification cancelled")); };
+        const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, Math.min(intervalMs, Math.max(0, deadline - Date.now())));
+        signal.addEventListener("abort", abort, { once: true });
+        if (signal.aborted) abort();
+      });
     }
   }
 }

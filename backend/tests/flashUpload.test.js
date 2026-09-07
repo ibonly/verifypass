@@ -31,7 +31,7 @@ const JPEG_HEADER = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0]).toString("
 test("flash upload: sequence must be well-formed (4 distinct palette colours)", async (t) => {
   const { tenant, scope, created, evidenceDir } = await setup();
   t.after(() => setDb(null));
-  const base = { scopedDb: scope, tenantUid: tenant.tenantUid, sessionUid: created.sessionId, sdkToken: created.sdkToken, kind: "flash", imageBase64: JPEG_HEADER, evidenceDir, retentionDays: 30 };
+  const base = { scopedDb: scope, tenantUid: tenant.tenantUid, sessionUid: created.sessionId, sdkToken: created.sdkToken, attemptId: created.attemptId, kind: "flash", imageBase64: JPEG_HEADER, evidenceDir, retentionDays: 30 };
   for (const meta of [undefined, {}, { sequence: [[255, 0, 0]] }, { sequence: [[255, 0, 0], [255, 0, 0], [0, 255, 0], [0, 0, 255]] }, { sequence: [[1, 2, 3], [255, 0, 0], [0, 255, 0], [0, 0, 255]] }]) {
     await assert.rejects(handleUpload({ ...base, meta }), (e) => e.code === "VALIDATION_ERROR" && /colour sequence/.test(e.message));
   }
@@ -40,11 +40,11 @@ test("flash upload: sequence must be well-formed (4 distinct palette colours)", 
 test("flash upload: no action/challenge membership needed; label is 'flash'", async (t) => {
   const { tenant, scope, created, evidenceDir } = await setup();
   t.after(() => setDb(null));
-  const meta = { sequence: [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255]], tile: 96 };
+  const meta = { sequence: (await scope.sessions.findByUid(created.sessionId)).livenessChallenge.flashSequence, tile: 96 };
   // a garbage body reaches the decoder (past validation) — proves the flash
   // branch does not demand `action` or membership in the challenge set
   await assert.rejects(
-    handleUpload({ scopedDb: scope, tenantUid: tenant.tenantUid, sessionUid: created.sessionId, sdkToken: created.sdkToken, kind: "flash", meta, imageBase64: "not-base64!!", evidenceDir, retentionDays: 30 }),
+    handleUpload({ scopedDb: scope, tenantUid: tenant.tenantUid, sessionUid: created.sessionId, sdkToken: created.sdkToken, attemptId: created.attemptId, kind: "flash", meta, imageBase64: "not-base64!!", evidenceDir, retentionDays: 30 }),
     (e) => e.code === "VALIDATION_ERROR" && !/colour sequence|action/.test(e.message)
   );
 });

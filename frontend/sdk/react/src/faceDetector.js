@@ -11,7 +11,7 @@
 // falls back to box geometry only.
 
 import {
-  bestFaceBox, assessFraming, DETECT_CONFIG, fetchWithCache,
+  bestFaceBox, assessFraming, DETECT_CONFIG, fetchWithCache, evictModel,
   poseFromLandmarks, exprFromLandmarks, landmarkInputFromImageData, LANDMARK_INPUT
 } from "@verifypass/sdk-core";
 import ortWasmUrl from "onnxruntime-web/ort-wasm-simd-threaded.wasm?url";
@@ -30,7 +30,7 @@ function loadOrt() {
       // for SharedArrayBuffer; ORT falls back to 1 thread silently otherwise)
       try { ort.env.wasm.numThreads = (typeof navigator !== "undefined" && navigator.hardwareConcurrency > 2) ? 2 : 1; } catch (_) { /* noop */ }
       return ort;
-    });
+    }).catch(err => { ortPromise = null; throw err; });
   }
   return ortPromise;
 }
@@ -57,12 +57,14 @@ export async function createFaceDetector(modelUrl, opts = {}) {
     typeof modelUrl === "string" ? fetchWithCache(modelUrl) : modelUrl,
     landmarkUrl ? (typeof landmarkUrl === "string" ? fetchWithCache(landmarkUrl).catch(() => null) : landmarkUrl) : null
   ]);
-  const session = await ort.InferenceSession.create(modelBuffer, { executionProviders: ["wasm"] });
+  let session;
+  try { session = await ort.InferenceSession.create(modelBuffer, { executionProviders: ["wasm"] }); }
+  catch (error) { if (typeof modelUrl === "string") await evictModel(modelUrl); throw error; }
   // Landmark session is best-effort: a missing/corrupt model must not take
   // the detector down with it.
   let lmSession = null;
   if (lmBuffer) {
-    try { lmSession = await ort.InferenceSession.create(lmBuffer, { executionProviders: ["wasm"] }); } catch (_) { lmSession = null; }
+    try { lmSession = await ort.InferenceSession.create(lmBuffer, { executionProviders: ["wasm"] }); } catch (_) { if (typeof landmarkUrl === "string") await evictModel(landmarkUrl); lmSession = null; }
   }
   const [W, H] = DETECT_CONFIG.inputSize;
 
@@ -121,8 +123,8 @@ export async function createFaceDetector(modelUrl, opts = {}) {
       return { ...assessFraming(box, framing), box, pose, expr };
     },
     dispose() {
-      try { session.release && session.release(); } catch (_) { /* noop */ }
-      try { lmSession && lmSession.release && lmSession.release(); } catch (_) { /* noop */ }
+      try { Promise.resolve(session.release?.()).catch(() => {}); } catch (_) { /* noop */ }
+      try { Promise.resolve(lmSession?.release?.()).catch(() => {}); } catch (_) { /* noop */ }
     }
   };
 }

@@ -26,7 +26,7 @@ function resolveKey(explicitKey) {
  * Encrypt and persist an evidence file.
  * @returns {{storagePath: string, checksum: string, retentionExpiresAt: Date}}
  */
-async function saveEvidence({ tenantUid, sessionUid, fileType, buffer, retentionDays = 30, baseDir, key }) {
+async function saveEvidence({ tenantUid, sessionUid, fileType, buffer, retentionDays = 30, baseDir, key, onPrepared }) {
   const checksum = crypto.createHash("sha256").update(buffer).digest("hex");
   const fileName = `${fileType}_${Date.now()}_${crypto.randomBytes(4).toString("hex")}.enc`;
   const encrypted = encryptBuffer(buffer, resolveKey(key));
@@ -40,7 +40,10 @@ async function saveEvidence({ tenantUid, sessionUid, fileType, buffer, retention
     await fs.mkdir(dir, { recursive: true, mode: 0o700 });
     localPath = path.join(dir, fileName);
   }
-  const storagePath = await storage.writeStored(`${tenantUid}/${sessionUid}/${fileName}`, encrypted, { localPath });
+  const objectKey = `${tenantUid}/${sessionUid}/${fileName}`;
+  const intendedPath = localPath || `s3://${process.env.S3_BUCKET}/${objectKey}`;
+  if (onPrepared) await onPrepared(intendedPath);
+  const storagePath = await storage.writeStored(objectKey, encrypted, { localPath });
 
   const retentionExpiresAt = new Date(Date.now() + retentionDays * 24 * 60 * 60 * 1000);
   return { storagePath, checksum, retentionExpiresAt };

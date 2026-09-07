@@ -58,7 +58,7 @@ test("happy path: upload stores encrypted evidence and advances status", async (
   const plaintext = await realPng();
   const result = await handleUpload({
     scopedDb: scope, tenantUid: tenant.tenantUid, sessionUid: created.sessionId,
-    sdkToken: created.sdkToken, kind: "document", side: "front",
+    sdkToken: created.sdkToken, attemptId: created.attemptId, kind: "document", side: "front",
     imageBase64: plaintext.toString("base64"), evidenceDir
   });
 
@@ -89,7 +89,7 @@ test("data-url prefix is accepted", async (t) => {
   t.after(() => setDb(null));
   const result = await handleUpload({
     scopedDb: scope, tenantUid: tenant.tenantUid, sessionUid: created.sessionId,
-    sdkToken: created.sdkToken, kind: "face",
+    sdkToken: created.sdkToken, attemptId: created.attemptId, kind: "face",
     imageBase64: `data:image/png;base64,${(await realPng()).toString("base64")}`, evidenceDir
   });
   assert.equal(result.fileType, "selfie");
@@ -118,7 +118,7 @@ test("expired session rejected and marked expired", async (t) => {
   await assert.rejects(
     () => handleUpload({
       scopedDb: scope, tenantUid: tenant.tenantUid, sessionUid: created.sessionId,
-      sdkToken: created.sdkToken, kind: "document",
+      sdkToken: created.sdkToken, attemptId: created.attemptId, kind: "document",
       imageBase64, evidenceDir
     }),
     (e) => e.code === "SESSION_EXPIRED"
@@ -132,7 +132,7 @@ test("validation: bad format, too small, too large, bad side", async (t) => {
   t.after(() => setDb(null));
   const base = {
     scopedDb: scope, tenantUid: tenant.tenantUid, sessionUid: created.sessionId,
-    sdkToken: created.sdkToken, kind: "document", evidenceDir
+    sdkToken: created.sdkToken, attemptId: created.attemptId, kind: "document", evidenceDir
   };
 
   const cases = [
@@ -155,7 +155,7 @@ test("cannot upload to another tenant's session", async (t) => {
   await assert.rejects(
     () => handleUpload({
       scopedDb: scopeFor(intruder), tenantUid: intruder.tenantUid, sessionUid: created.sessionId,
-      sdkToken: created.sdkToken, kind: "document",
+      sdkToken: created.sdkToken, attemptId: created.attemptId, kind: "document",
       imageBase64, evidenceDir
     }),
     (e) => e.code === "SESSION_NOT_FOUND"

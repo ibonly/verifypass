@@ -1,0 +1,35 @@
+{
+  "date": "2026-09-07T15:53:06.043Z",
+  "mode": "desired-behaviour regressions",
+  "proofs": 7,
+  "findings": [
+    {
+      "id": "L15",
+      "evidence": "Audit failure rolls back the retry; exactly 4 retries succeed under the 5-attempt cap."
+    },
+    {
+      "id": "L15",
+      "evidence": "Three synchronized reissues: exactly one succeeds; the others are fenced by the attempt change."
+    },
+    {
+      "id": "L19",
+      "evidence": "Three simultaneous uploads with a per-action cap of 2: two persist, the loser's file is deleted and its staging row removed."
+    },
+    {
+      "id": "L19",
+      "evidence": "Evidence row failure after storage acceptance triggers compensation: the stored object is deleted."
+    },
+    {
+      "id": "L14",
+      "evidence": "Queue outage: submit returns 202 with a pending outbox record; a duplicate submit is idempotent (202, still one record)."
+    },
+    {
+      "id": "L17",
+      "evidence": "Submit on an expired session returns 410 SESSION_EXPIRED and leaves the session untouched."
+    },
+    {
+      "id": "G1",
+      "evidence": "A challenge issued 20 minutes ago is refused at submit until /challenge/begin restarts the clock; submit then succeeds."
+    }
+  ]
+}

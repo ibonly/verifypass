@@ -339,7 +339,55 @@ const DETECT_CONFIG = Object.freeze({
   nmsThreshold: 0.4
 });
 
+/** Intersection-over-union of two {x1,y1,x2,y2} boxes. */
+function boxIoU(a, b) {
+  if (!a || !b) return 0;
+  const ix1 = Math.max(a.x1, b.x1), iy1 = Math.max(a.y1, b.y1), ix2 = Math.min(a.x2, b.x2), iy2 = Math.min(a.y2, b.y2);
+  const inter = Math.max(0, ix2 - ix1) * Math.max(0, iy2 - iy1);
+  const areaA = (a.x2 - a.x1) * (a.y2 - a.y1), areaB = (b.x2 - b.x1) * (b.y2 - b.y1);
+  const uni = areaA + areaB - inter;
+  return uni > 0 ? inter / uni : 0;
+}
+
+/** Horizontally mirror an interleaved RGB buffer of W×H pixels (test-time augmentation for the pose model). */
+function mirrorRGB(rgb, W, H) {
+  const out = new Uint8Array(rgb.length);
+  for (let y = 0; y < H; y++) {
+    const row = y * W * 3;
+    for (let x = 0; x < W; x++) {
+      const src = row + x * 3, dst = row + (W - 1 - x) * 3;
+      out[dst] = rgb[src]; out[dst + 1] = rgb[src + 1]; out[dst + 2] = rgb[src + 2];
+    }
+  }
+  return out;
+}
+
+/**
+ * Combine the pose model's estimate on the original crop with the estimate on
+ * its mirror image. The bin-classification pose model is reliable for a face
+ * turned toward image-left but often reports a near-frontal yaw (or a flipped
+ * sign) for a face turned toward image-right (2026-09-07 sessions: genuine
+ * 40° left turns scored 5° while mirrored they scored −27…−51°). The mirror
+ * puts every turn on the reliable side; the larger-magnitude candidate wins
+ * and both raw values are recorded for calibration. Pitch is symmetric and
+ * averaged.
+ */
+function combineMirroredPose(original, mirrored) {
+  const a = original.yaw, b = -mirrored.yaw;
+  const yaw = Math.abs(a) >= Math.abs(b) ? a : b;
+  return {
+    yaw, pitch: (original.pitch + mirrored.pitch) / 2, roll: original.roll,
+    // conservative magnitude both views agree on — used for "is this frame
+    // near frontal" questions, where the larger candidate would inflate noise
+    yawNear: Math.min(Math.abs(a), Math.abs(b)),
+    yawOriginal: a, yawMirrored: b, yawAgree: Math.sign(a) === Math.sign(b) || Math.abs(a) < 15 || Math.abs(b) < 15
+  };
+}
+
 module.exports = {
+  boxIoU,
+  mirrorRGB,
+  combineMirroredPose,
   normalizedBoxes,
   plausibleBox,
   softmax,

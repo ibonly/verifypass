@@ -14,7 +14,7 @@ const FLASH = Object.freeze({
   holdMs: 280,
   sampleDelayMs: 190,
   baseline: [24, 24, 24],
-  tile: 96
+  tile: 160
 });
 
 /** n distinct palette colours; rng() in [0,1). */

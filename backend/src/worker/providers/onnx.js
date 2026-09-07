@@ -48,7 +48,10 @@ function createOnnxProvider({ modelsDir, matchThreshold = 0.6, livenessThreshold
     if (!fs.existsSync(p)) {
       throw new ProviderError(`ONNX model missing: ${p}. Fetch models first: node scripts/fetch-onnx-models.js`);
     }
-    sessions[name] = await ort.InferenceSession.create(p);
+    const expected = require("../../../scripts/model-manifest.json")[require("path").basename(p)];
+    const actual = require("crypto").createHash("sha256").update(require("fs").readFileSync(p)).digest("hex");
+    if (!expected || expected !== actual) throw new Error(`Model checksum mismatch: ${name}`);
+    sessions[name] = ort.InferenceSession.create(p).catch(error => { delete sessions[name]; throw error; });
     return sessions[name];
   }
 
@@ -113,7 +116,16 @@ function createOnnxProvider({ modelsDir, matchThreshold = 0.6, livenessThreshold
   }
 
   // ---- stages ----
+  const detectionCache = new Map();
   async function detect(buf) {
+    const key = require("crypto").createHash("sha256").update(buf).digest("hex");
+    if (detectionCache.has(key)) return detectionCache.get(key);
+    const pending = detectUncached(buf).catch(err => { detectionCache.delete(key); throw err; });
+    detectionCache.set(key, pending);
+    if (detectionCache.size > 32) detectionCache.delete(detectionCache.keys().next().value);
+    return pending;
+  }
+  async function detectUncached(buf) {
     const { width, height } = await meta(buf);
     const rgb = await regionRGB(buf, null, 320, 240);
     const input = packCHW(rgb, 320, 240, { sub: 127, div: 128, bgr: false });
@@ -125,7 +137,22 @@ function createOnnxProvider({ modelsDir, matchThreshold = 0.6, livenessThreshold
     const { best, count } = M.bestFaceBox({
       loc: boxesT.data, scores: scoresT.data, imgWidth: width, imgHeight: height, config: M.DETECT_CONFIG
     });
-    return { best, count, width, height };
+    // keep the raw outputs so a challenge frame can fall back to a
+    // lower-confidence candidate anchored to the previous frame's face box
+    return { best, count, width, height, raw: { loc: boxesT.data, scores: scoresT.data } };
+  }
+
+  // Tracked fallback for challenge bursts: the detector misses ~1 in 5
+  // chin-up faces at its 0.65 threshold although it proposes the right box at
+  // 0.4–0.6 (2026-09-07 look_up frames). Accept a candidate ≥ 0.3 only when
+  // it overlaps the previous frame's face box (IoU ≥ 0.3); background
+  // candidates at that confidence level do not.
+  const TRACK_MIN_CONF = 0.3, TRACK_MIN_IOU = 0.3;
+  function trackedDetection(det, priorBox) {
+    if (det.best || !priorBox || !det.raw) return det;
+    const low = M.bestFaceBox({ loc: det.raw.loc, scores: det.raw.scores, imgWidth: det.width, imgHeight: det.height, config: { ...M.DETECT_CONFIG, confidenceThreshold: TRACK_MIN_CONF } });
+    if (!low.best || M.boxIoU(low.best, priorBox) < TRACK_MIN_IOU) return det;
+    return { ...det, best: low.best, count: 1, tracked: true };
   }
 
   async function liveness(buf, box, imgW, imgH) {
@@ -141,15 +168,21 @@ function createOnnxProvider({ modelsDir, matchThreshold = 0.6, livenessThreshold
   async function pose(buf, box, imgW, imgH) {
     const rect = M.poseCrop(box, imgW, imgH);
     const rgb = await regionRGB(buf, rect, 224, 224);
-    const input = packPoseCHW(rgb, 224, 224);
     const sess = await session("pose");
-    const out = await run(sess, input, [1, 3, 224, 224]);
-    // outputs in graph order: [yaw, pitch, roll]
     const names = sess.outputNames;
-    const yaw = M.poseAngleFromBins(out[names[0]].data);
-    const pitch = M.poseAngleFromBins(out[names[1]].data);
-    const roll = names[2] ? M.poseAngleFromBins(out[names[2]].data) : 0;
-    return { yaw, pitch, roll };
+    const infer = async (pixels) => {
+      const out = await run(sess, packPoseCHW(pixels, 224, 224), [1, 3, 224, 224]);
+      // outputs in graph order: [yaw, pitch, roll]
+      return {
+        yaw: M.poseAngleFromBins(out[names[0]].data),
+        pitch: M.poseAngleFromBins(out[names[1]].data),
+        roll: names[2] ? M.poseAngleFromBins(out[names[2]].data) : 0
+      };
+    };
+    // Test-time mirror augmentation: the model under-reports / sign-flips
+    // faces turned toward image-right; see combineMirroredPose.
+    const [original, mirrored] = await Promise.all([infer(rgb), infer(M.mirrorRGB(rgb, 224, 224))]);
+    return M.combineMirroredPose(original, mirrored);
   }
 
   async function landmark68(buf, box, imgW, imgH) {
@@ -237,8 +270,8 @@ function createOnnxProvider({ modelsDir, matchThreshold = 0.6, livenessThreshold
       return M.matchFeature(a, b);
     },
 
-    async checkLiveness(selfieBuffer) {
-      const det = await detect(selfieBuffer);
+    async checkLiveness(selfieBuffer, { priorBox } = {}) {
+      const det = trackedDetection(await detect(selfieBuffer), priorBox);
       if (!det.best) return { score: null, verdict: "No face", faceCount: 0, occluded: false, quality: null, pose: null, raw: { faces: 0 } };
       const [score, ps] = await Promise.all([
         liveness(selfieBuffer, det.best, det.width, det.height),
@@ -257,8 +290,8 @@ function createOnnxProvider({ modelsDir, matchThreshold = 0.6, livenessThreshold
         faceCount: det.count,
         occluded: false,
         quality: null,
-        pose: { yaw: ps.yaw, pitch: ps.pitch, roll: ps.roll },
-        raw: { faces: det.count, box: det.best, liveness: score, pose: ps }
+        pose: { yaw: ps.yaw, pitch: ps.pitch, roll: ps.roll, yawNear: ps.yawNear, yawOriginal: ps.yawOriginal, yawMirrored: ps.yawMirrored, yawAgree: ps.yawAgree },
+        raw: { faces: det.count, box: det.best, liveness: score, pose: ps, detection: det.tracked ? "tracked-low-confidence" : "standard", faceConfidence: det.best.score }
       };
     },
 

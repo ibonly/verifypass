@@ -4,10 +4,39 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  boxIoU, mirrorRGB, combineMirroredPose,
   softmax, poseAngleFromBins, definePriorBox, decodeBoxes, nms, bestFaceBox,
   livenessCrop, poseCrop, convert68to5, affineFrom3, invertAffine, matchFeature,
   REFERENCE_5PTS, DETECT_CONFIG
 } = require("../src/worker/providers/onnxMath");
+
+test("boxIoU: identical → 1, disjoint → 0, half overlap → 1/3", () => {
+  const a = { x1: 0, y1: 0, x2: 10, y2: 10 };
+  assert.equal(boxIoU(a, a), 1);
+  assert.equal(boxIoU(a, { x1: 20, y1: 20, x2: 30, y2: 30 }), 0);
+  assert.ok(Math.abs(boxIoU(a, { x1: 5, y1: 0, x2: 15, y2: 10 }) - 1 / 3) < 1e-9);
+  assert.equal(boxIoU(a, null), 0);
+});
+
+test("mirrorRGB flips each row horizontally and is an involution", () => {
+  const W = 3, H = 2;
+  const rgb = Uint8Array.from([1,1,1, 2,2,2, 3,3,3,  4,4,4, 5,5,5, 6,6,6]);
+  assert.deepEqual(Array.from(mirrorRGB(rgb, W, H)), [3,3,3, 2,2,2, 1,1,1,  6,6,6, 5,5,5, 4,4,4]);
+  assert.deepEqual(Array.from(mirrorRGB(mirrorRGB(rgb, W, H), W, H)), Array.from(rgb));
+});
+
+test("combineMirroredPose takes the larger-magnitude yaw, negating the mirror, and averages pitch", () => {
+  // model under-reports a right-pointing face (5°) but sees it clearly mirrored (−40°)
+  const r = combineMirroredPose({ yaw: 5, pitch: 8, roll: 1 }, { yaw: -40, pitch: 6, roll: -1 });
+  assert.equal(r.yaw, 40); assert.equal(r.pitch, 7); assert.equal(r.yawOriginal, 5); assert.equal(r.yawMirrored, 40); assert.equal(r.yawAgree, true);
+  assert.equal(r.yawNear, 5, "conservative magnitude is the smaller candidate");
+  // a reliable left-pointing face keeps its own estimate
+  assert.equal(combineMirroredPose({ yaw: -60, pitch: 0, roll: 0 }, { yaw: 55, pitch: 0, roll: 0 }).yaw, -60);
+  // frontal stays frontal
+  assert.equal(Math.abs(combineMirroredPose({ yaw: 3, pitch: 0, roll: 0 }, { yaw: -4, pitch: 0, roll: 0 }).yaw), 4);
+  // strong disagreement in sign is recorded, not hidden
+  assert.equal(combineMirroredPose({ yaw: 41, pitch: 0, roll: 0 }, { yaw: 22, pitch: 0, roll: 0 }).yawAgree, false);
+});
 
 test("softmax sums to 1 and is monotonic", () => {
   const p = softmax([1, 2, 3]);

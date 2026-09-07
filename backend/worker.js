@@ -15,6 +15,32 @@ const { runVerification, defaultEvidenceKey, PIPELINE_VERSION } = require("./src
 const POLL_MS = config.pollMs;
 const WORKER_ID = `worker-${process.pid}`;
 
+// Single-worker guard for developer machines: a forgotten worker from an
+// earlier code revision keeps polling the same queue and judges sessions with
+// stale logic (2026-09-07). Multi-instance deployments set
+// WORKER_ALLOW_MULTIPLE=true (each instance still refuses jobs stamped with a
+// different policy version, see pipeline.js).
+function acquireSingletonLock() {
+  if (process.env.WORKER_ALLOW_MULTIPLE === "true") return;
+  const fs = require("fs"), path = require("path");
+  const file = process.env.WORKER_PIDFILE || path.join(__dirname, ".worker.pid");
+  try {
+    const other = Number(fs.readFileSync(file, "utf8").trim());
+    if (other && other !== process.pid) {
+      let alive = false;
+      try { process.kill(other, 0); alive = true; } catch (_) { alive = false; }
+      if (alive) {
+        console.error(`WORKER_ALREADY_RUNNING pid=${other} (${file}). Stop it first, or set WORKER_ALLOW_MULTIPLE=true for a deliberate multi-worker setup.`);
+        process.exit(3);
+      }
+    }
+  } catch (_) { /* no pidfile */ }
+  fs.writeFileSync(file, String(process.pid));
+  const release = () => { try { if (Number(fs.readFileSync(file, "utf8").trim()) === process.pid) fs.unlinkSync(file); } catch (_) { /* noop */ } };
+  process.on("exit", release);
+  for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { release(); process.exit(0); });
+}
+
 // ID OCR resolution chain — independent of which biometric engine is in use:
 //   1. FACEPLUGIN_IDOCR_URL  — dedicated ID OCR HTTP service (best quality)
 //   2. tesseract.js          — local extraction-only OCR (optional npm dep);
@@ -77,6 +103,7 @@ function getDeps() {
 const { sendWebhook } = require("./src/worker/webhookDispatcher");
 
 const HANDLERS = {
+  cleanup_evidence: payload => require("./src/services/cleanupEvidence").cleanupEvidence(payload),
   run_verification: (payload) => runVerification(payload, getDeps()),
   send_webhook: (payload) => sendWebhook(payload, { db: getDeps().db }),
   expire_sessions: async () => {
@@ -134,6 +161,7 @@ const HANDLERS = {
 let prisma = null;
 function getDb() {
   if (!prisma) {
+    require("./src/lib/release").assertGeneratedSchema();
     const { PrismaClient } = require("@prisma/client");
     prisma = new PrismaClient();
   }
@@ -160,10 +188,12 @@ const RECLAIM_EVERY_MS = 60_000;
 
 async function tick() {
   const db = getDb();
+  await require("./src/services/outbox").flushOutbox(db, require("./src/services/jobService").enqueue);
   // Requeue jobs orphaned by a worker that died mid-run (dev restarts do
   // this constantly) — otherwise their sessions sit in "submitted" forever.
   if (Date.now() - lastReclaim > RECLAIM_EVERY_MS) {
     lastReclaim = Date.now();
+    await require("./src/services/reconcileEvidence").reconcileEvidence(db);
     try {
       const { reclaimStaleJobs } = require("./src/worker/watchdog");
       const r = await reclaimStaleJobs(db);
@@ -177,24 +207,37 @@ async function tick() {
   const job = await claimJob(db);
   if (!job) return;
   const handler = HANDLERS[job.type];
+  const heartbeat = setInterval(() => db.jobQueue.updateMany({ where: { id: job.id, status: "running", lockedBy: WORKER_ID }, data: { lockedAt: new Date() } }).catch(err => console.error("LEASE_RENEW_FAILED", err.message)), 15000);
   try {
     if (!handler) throw new Error(`Unknown job type: ${job.type}`);
     await handler(job.payload);
-    await db.jobQueue.update({ where: { id: job.id }, data: { status: "done" } });
+    await db.jobQueue.updateMany({ where: { id: job.id, status: "running", lockedBy: WORKER_ID }, data: { status: "done" } });
   } catch (err) {
+    if (/^POLICY_VERSION_MISMATCH/.test(err.message)) {
+      // Not this worker's job: hand it back without consuming an attempt so a
+      // worker on the right release can take it.
+      console.error("POLICY_VERSION_MISMATCH", { jobId: job.id, message: err.message });
+      await db.jobQueue.updateMany({
+        where: { id: job.id, status: "running", lockedBy: WORKER_ID },
+        data: { status: "pending", lockedBy: null, lockedAt: null, attempts: { increment: -1 }, lastError: String(err.message).slice(0, 2000), runAfter: new Date(Date.now() + 5000) }
+      });
+      clearInterval(heartbeat);
+      return;
+    }
     const exhausted = job.attempts + 1 >= job.maxAttempts;
-    await db.jobQueue.update({
-      where: { id: job.id },
+    await db.jobQueue.updateMany({
+      where: { id: job.id, status: "running", lockedBy: WORKER_ID },
       data: {
         status: exhausted ? "failed" : "pending",
         lastError: String(err.message).slice(0, 2000),
         runAfter: new Date(Date.now() + Math.min(60000 * 2 ** job.attempts, 3600000))
       }
     });
-  }
+  } finally { clearInterval(heartbeat); }
 }
 
 async function main() {
+  acquireSingletonLock();
   console.log(`VerifyPass worker ${WORKER_ID} polling every ${POLL_MS}ms (pipeline ${PIPELINE_VERSION})`);
   while (true) {
     try {

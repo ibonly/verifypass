@@ -73,7 +73,7 @@ test("uploads are refused without consent when REQUIRE_CONSENT is on", async () 
     await assert.rejects(
       () => handleUpload({
         scopedDb: scope, tenantUid: tenant.tenantUid, sessionUid: created.sessionId,
-        sdkToken: created.sdkToken, kind: "document", side: "front",
+        sdkToken: created.sdkToken, attemptId: created.attemptId, kind: "document", side: "front",
         imageBase64: `data:image/png;base64,${Buffer.alloc(2048, 1).toString("base64")}`
       }),
       /consent has not been recorded/

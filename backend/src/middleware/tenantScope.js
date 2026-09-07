@@ -13,11 +13,14 @@ const { getDb } = require("../lib/db");
  */
 function tenantScope(req, res, next) {
   if (!req.tenant) return next(new AppError("INTERNAL_ERROR", "tenantScope before auth"));
-  const tenantId = req.tenant.id;
-  const db = getDb();
-
-  req.scopedDb = {
+  req.scopedDb = createScope(getDb(), req.tenant.id);
+  next();
+}
+function createScope(db, tenantId) {
+  return {
     tenantId,
+    db,
+    transaction(fn) { return require("../services/atomic").transaction(db, tx => fn(createScope(tx, tenantId))); },
 
     sessions: {
       create(data) {
@@ -78,7 +81,6 @@ function tenantScope(req, res, next) {
     }
   };
 
-  next();
 }
 
-module.exports = { tenantScope };
+module.exports = { tenantScope, createScope };

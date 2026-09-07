@@ -4,7 +4,7 @@ import {
   startCamera, stopCamera, captureFrame, captureGuideFrame,
   grabAnalysisFrame, grabSquareFrame, grabFixedFrame, frameMotion, toGrayscale, meanBrightness, laplacianVariance,
   createFramingStabilizer, createActionDetector, bandMotion, createDocumentGate, isDominantFace, isFrontalPose,
-  isReferencePose, frontalRefFromSamples, FLASH, randomFlashSequence, flashCropRect
+  nextVideoFrame, isReferencePose, frontalRefFromSamples, FLASH, flashCropRect
 } from "@verifypass/sdk-core";
 import { useVerifyPass } from "./VerifyPassProvider";
 import { createFaceDetector } from "./faceDetector";
@@ -164,6 +164,7 @@ const RESULT_REASON_LABELS = {
   LIVENESS_CHALLENGE_FAILED: "Liveness challenge actions not detected",
   LIVENESS_CHALLENGE_INCOMPLETE: "Liveness challenge was not completed",
   LIVENESS_CHALLENGE_EXPIRED: "The liveness challenge timed out — try again",
+  LIVENESS_CHALLENGE_SEQUENCE_INVALID: "The movements took too long or were out of order — try again without pausing",
   LIVENESS_POSE_UNAVAILABLE: "We couldn't measure your head movements — try again with your face well lit and fully in the circle",
   DOCUMENT_IMAGE_LOW_QUALITY: "Your ID photo was blurry or poorly lit",
   DOCUMENT_IS_LIVE_FACE: "We saw a face instead of your ID card",
@@ -221,9 +222,9 @@ function cropImageData(imageData, box, padRatio = 0.12) {
  * mosaic: [baseline | c1 | c2 | c3 | c4]. Resolves {base64, sequence, tile}
  * or null when the camera is not ready.
  */
-async function runScreenFlash(video, box, setColor) {
+async function runScreenFlash(video, box, setColor, sequence, signal) {
   if (!video || !video.videoWidth) return null;
-  const sequence = randomFlashSequence();
+  if (!Array.isArray(sequence) || sequence.length !== FLASH.count) return null;
   const tile = FLASH.tile;
   const steps = [FLASH.baseline, ...sequence];
   const mosaic = document.createElement("canvas");
@@ -235,8 +236,10 @@ async function runScreenFlash(video, box, setColor) {
   const sctx = src.getContext("2d");
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   for (let i = 0; i < steps.length; i++) {
+    if (signal?.aborted || document.hidden) throw new Error("Capture interrupted");
     setColor(steps[i]);
     await wait(FLASH.sampleDelayMs);
+    await nextVideoFrame(video, { signal });
     const frame = grabSquareFrame(video, 320, 320);
     if (!frame) return null;
     sctx.putImageData(frame, 0, 0);
@@ -250,7 +253,10 @@ async function runScreenFlash(video, box, setColor) {
   return { base64: dataUrl, sequence, tile };
 }
 
-export function VerificationWidget({
+export function VerificationWidget(props) {
+  return <div data-vp-widget><style>{"@media (prefers-reduced-motion: reduce) { [data-vp-widget] * { animation: none !important; transition: none !important; } }"}</style><VerificationWidgetSession key={`${props.sessionId}:${props.sdkToken}`} {...props} /></div>;
+}
+function VerificationWidgetSession({
   sessionId,
   sdkToken,
   theme = {},
@@ -295,6 +301,9 @@ export function VerificationWidget({
   const [actionIdx, setActionIdx] = useState(0);
   const [consentChecked, setConsentChecked] = useState(false);
   const [consented, setConsented] = useState(false);
+  const [initError, setInitError] = useState(null);
+  const [initEpoch, setInitEpoch] = useState(0);
+  const [challengeEpoch, setChallengeEpoch] = useState(0);
   // Liveness capture phases: "align" (frontal lock) → "perform" (burst capture
   // while the user does the action). Set once per transition — never per frame.
   const [livePhase, setLivePhase] = useState({ phase: "align", startedAt: 0, total: 0 });
@@ -303,8 +312,9 @@ export function VerificationWidget({
   const [debugInfo, setDebugInfo] = useState(null);
   // Screen-flash overlay colour ([r,g,b]) while the flash sequence runs; null otherwise.
   const [flashColor, setFlashColor] = useState(null);
-  const screenFlashRef = useRef(screenFlash);
-  screenFlashRef.current = screenFlash;
+  const [allowFlash, setAllowFlash] = useState(false);
+  const screenFlashRef = useRef(false);
+  screenFlashRef.current = screenFlash && allowFlash;
   // Framing stabilizer persists ACROSS liveness actions so the next action
   // doesn't pay a fresh lock-in ("Center your face" between every action).
   const livenessStabRef = useRef(null);
@@ -354,7 +364,9 @@ export function VerificationWidget({
           });
         }
       } catch (err) {
-        if (onErrorRef.current) onErrorRef.current(err);
+        if (!cancelled) setInitError(err.message);
+        if (!cancelled && onErrorRef.current) onErrorRef.current(err);
+        return;
       }
       if (cancelled) return;
       actionsRef.current = challengeActions;
@@ -368,8 +380,8 @@ export function VerificationWidget({
         if (onStepChangeRef.current) onStepChangeRef.current(s.step);
       });
     })();
-    return () => { cancelled = true; off(); };
-  }, [baseUrl, publicKey, sessionId, sdkToken]);
+    return () => { cancelled = true; client.dispose(); off(); };
+  }, [baseUrl, publicKey, sessionId, sdkToken, initEpoch]);
 
   // camera lifecycle keyed on facingMode (not step) so same-camera transitions
   // like liveness → face keep the existing stream instead of restarting it.
@@ -410,9 +422,17 @@ export function VerificationWidget({
         flowRef.current.fail({ code: "CAMERA_ERROR", message: err.message });
         if (onErrorRef.current) onErrorRef.current(err);
       });
-    const onVis = () => { if (document.visibilityState === "visible" && video && video.srcObject) { const t = video.srcObject.getVideoTracks && video.srcObject.getVideoTracks()[0]; if (t && t.readyState === "ended") { setCameraReady(false); setCameraPaused(true); } } };
+    const pauseCamera = () => {
+      if (cancelled) return;
+      stopCamera(video);
+      setCameraReady(false); setCameraPaused(true);
+      livenessFrontalRef.current = null;
+      livenessRefSamplesRef.current = [];
+    };
+    const onVis = () => { if (document.hidden) pauseCamera(); };
     document.addEventListener("visibilitychange", onVis);
-    return () => { cancelled = true; document.removeEventListener("visibilitychange", onVis); stopCamera(video); setCameraReady(false); };
+    window.addEventListener("orientationchange", pauseCamera);
+    return () => { cancelled = true; document.removeEventListener("visibilitychange", onVis); window.removeEventListener("orientationchange", pauseCamera); stopCamera(video); setCameraReady(false); };
   }, [captureFacing, consented, cameraEpoch]);
 
   // if there are no challenge actions, don't linger on the liveness step
@@ -421,6 +441,20 @@ export function VerificationWidget({
       flowRef.current.advance();
     }
   }, [flowState?.step]);
+
+  // Start the challenge clock when the user REACHES the liveness step: the
+  // server's challenge TTL and issue→first-frame window run from this call,
+  // not from session creation (consent, camera permission and document
+  // capture come first). Best-effort — on failure the server keeps the
+  // original clock. Re-armed per challenge (retry / reissue).
+  const begunEpochRef = useRef(-1);
+  useEffect(() => {
+    const client = clientRef.current;
+    if (!client || !consented || flowState?.step !== "liveness" || actionsRef.current.length === 0) return;
+    if (begunEpochRef.current === challengeEpoch) return;
+    begunEpochRef.current = challengeEpoch;
+    client.beginChallenge().catch(() => { begunEpochRef.current = -1; });
+  }, [flowState?.step, consented, challengeEpoch]);
 
   // E1: compact capture telemetry sent with submit (never decision input)
   const buildTelemetry = () => {
@@ -436,16 +470,21 @@ export function VerificationWidget({
   // challenge (server-capped + audited), excluding it.
   const reissueChallenge = useCallback(async () => {
     const client = clientRef.current;
-    if (!client || busy) return;
+    if (!client || busy || capturingRef.current) return;
+    capturingRef.current = true;
     const action = actionsRef.current[actionIdxRef.current];
     setBusy(true);
     try {
       const r = await client.reissueChallenge([action]);
+      if (client.controller.signal.aborted) return;
       const acts = r.livenessChallenge?.actions || [];
       const tel = telemetryRef.current.actions.find((a) => a.action === action && !a.done);
       if (tel) { tel.reissued = true; tel.done = true; }
       actionsRef.current = acts;
       setActions(acts);
+      setChallengeEpoch(e => e + 1);
+      livenessFrontalRef.current = null;
+      livenessRefSamplesRef.current = [];
       actionIdxRef.current = 0;
       setActionIdx(0);
       livenessFrameCountsRef.current = {};
@@ -453,6 +492,7 @@ export function VerificationWidget({
     } catch (err) {
       setFeedback(err.message || String(err));
     } finally {
+      capturingRef.current = false;
       setBusy(false);
     }
   }, [busy]);
@@ -493,7 +533,7 @@ export function VerificationWidget({
       }
     };
     try {
-      if (step === "liveness" && opts.advanceOnly) { advanceLiveness(); return; }
+      if (step === "liveness" && opts.advanceOnly) { advanceLiveness(); return true; }
       if (step === "liveness"
         && (livenessFrameCountsRef.current[actionsRef.current[actionIdxRef.current]] || 0) >= LIVENESS_FRAME_BUDGET) {
         // Budget spent for this action — no frame can be uploaded, so skip
@@ -503,6 +543,7 @@ export function VerificationWidget({
       }
       // Documents are cropped to the on-screen card guide so the ID FILLS the
       // evidence photo (matches what the user aligned to; better OCR/review).
+      await nextVideoFrame(videoRef.current, { signal: client.controller.signal });
       const { imageData, base64 } = isDocumentStep(step)
         ? captureGuideFrame(videoRef.current, DOC_GUIDE)
         : step === "liveness"
@@ -525,13 +566,15 @@ export function VerificationWidget({
       }
       if (isDocumentStep(step)) {
         await client.uploadDocument(base64, step === "document_back" ? "back" : "front");
+        if (client.controller.signal.aborted) return false;
         flow.advance();
         // ID_ONLY has no face step — the document is the last capture, so THIS
         // branch must submit, or the session sits in "started" forever.
         if (flow.state().step === "processing") {
           client.setCaptureTelemetry(buildTelemetry());
-        await client.submit();
+          await client.submit();
           const result = await client.waitForResult({ timeoutMs: 300000 }); // 5 min — covers worker restarts + stale-job reclaim
+          if (client.controller.signal.aborted) return false;
           flow.finish(result);
           if (onCompleteRef.current) onCompleteRef.current(result);
         }
@@ -560,15 +603,17 @@ export function VerificationWidget({
         // advances. More frames per action = far better odds the server finds
         // one live, single-face, pose-matching frame.
         if (livenessAdvance) advanceLiveness();
+        return true;
       } else if (step === "face") {
         await client.uploadFace(base64);
+        if (client.controller.signal.aborted) return false;
         // Screen-flash liveness (v7 1.1): the face is framed and frontal right
         // now — flash a random colour sequence and upload the tiled response.
         // Best-effort and record-first: any failure here must never block the
         // customer (the server scores what it gets; nothing = no signal).
         if (screenFlashRef.current && detectorRef.current && framingRef.current && framingRef.current.box) {
           try {
-            const mosaic = await runScreenFlash(videoRef.current, framingRef.current.box, setFlashColor);
+            const mosaic = await runScreenFlash(videoRef.current, framingRef.current.box, setFlashColor, client.flashSequence, client.controller.signal);
             if (mosaic) await client.uploadFlash(mosaic.base64, mosaic.sequence, mosaic.tile);
           } catch (_) { /* record-first: ignore */ } finally { setFlashColor(null); }
         }
@@ -576,6 +621,7 @@ export function VerificationWidget({
         client.setCaptureTelemetry(buildTelemetry());
         await client.submit();
         const result = await client.waitForResult({ timeoutMs: 300000 }); // 5 min — covers worker restarts + stale-job reclaim
+        if (client.controller.signal.aborted) return false;
         flow.finish(result);
         if (onCompleteRef.current) onCompleteRef.current(result);
       }
@@ -602,6 +648,8 @@ export function VerificationWidget({
     setFeedback(null);
     try {
       const r = await client.retrySession();
+      if (client.controller.signal.aborted) return;
+      setChallengeEpoch(e => e + 1);
       const acts = r.livenessChallenge?.actions || [];
       actionsRef.current = acts;
       livenessFrameCountsRef.current = {}; // reissued challenge → fresh budgets
@@ -656,6 +704,7 @@ export function VerificationWidget({
         client.setCaptureTelemetry(buildTelemetry());
         await client.submit();
         const result = await client.waitForResult({ timeoutMs: 300000 }); // 5 min — covers worker restarts + stale-job reclaim
+        if (client.controller.signal.aborted) return false;
         flow.finish(result);
         if (onCompleteRef.current) onCompleteRef.current(result);
       }
@@ -679,8 +728,10 @@ export function VerificationWidget({
     let det = null;
     detectorRef.current = null;
     setDetectorStatus("loading");
+    let timedOut = false;
+    let timeoutId;
     const timeout = new Promise((_, reject) => {
-      window.setTimeout(() => reject(new Error("Face model load timed out")), 12000);
+      timeoutId = window.setTimeout(() => { timedOut = true; reject(new Error("Face model load timed out")); }, 12000);
     });
     // Framing: minRatio relaxed 0.34 → 0.24. Replay of real sessions showed the
     // median face width at a normal laptop distance is ≈0.34 of the frame, so
@@ -688,9 +739,10 @@ export function VerificationWidget({
     // a face large enough for the server's liveness/face-match crops.
     const detectorOpts = { landmarkUrl: landmarkModelUrl, framing: { minRatio: 0.24, centerTol: 0.13 } };
     const loadStart = performance.now();
-    Promise.race([createFaceDetector(faceModelUrl, detectorOpts), timeout])
+    Promise.race([createFaceDetector(faceModelUrl, detectorOpts).then(d => { if (disposed || timedOut) { d.dispose?.(); throw new Error("Model load cancelled"); } return d; }), timeout])
       .then((d) => {
         if (disposed) { d.dispose && d.dispose(); return; }
+        clearTimeout(timeoutId);
         det = d;
         detectorRef.current = d;
         telemetryRef.current.modelLoadMs = Math.round(performance.now() - loadStart);
@@ -701,7 +753,7 @@ export function VerificationWidget({
         detectorRef.current = null;
         setDetectorStatus("failed");
       });
-    return () => { disposed = true; detectorRef.current = null; if (det && det.dispose) det.dispose(); };
+    return () => { disposed = true; clearTimeout(timeoutId); detectorRef.current = null; if (det && det.dispose) det.dispose(); };
   }, [faceModelUrl, landmarkModelUrl]);
 
   // Auto-capture loop. When the face model is loaded (face/liveness steps), the
@@ -793,6 +845,12 @@ export function VerificationWidget({
     let hintShown = false;
     let lastHint = null;      // last diagnosis shown ("wrong_way" | "face_lost" | "further" | "none")
     let lastHintAt = 0;
+    // The pitch proxy from the browser landmarks is noisy on tilted faces: a
+    // single "wrong way" tick coaching the user to reverse a correct look-down
+    // pushed testers into reissuing the challenge (3 sessions, 2026-09-07).
+    // Only a sustained opposite-direction reading is a wrong-way diagnosis.
+    let wrongWayStreak = 0;
+    const WRONG_WAY_TICKS = 4;
     // What did the detector actually see? Drives the coaching copy.
     //   wrong_way — pose moved past threshold in the OPPOSITE direction
     //   face_lost — the face left detection mid-movement
@@ -800,7 +858,7 @@ export function VerificationWidget({
     //   none      — nothing at all
     const isExprAction = () => currentAction === "blink" || currentAction === "open_mouth" || currentAction === "smile";
     const coachDiag = (now) => (actionState.armed === false && now - lastPresentAt <= 700) ? (isExprAction() ? "none" : "recenter")
-      : actionState.wrongWay ? "wrong_way"
+      : wrongWayStreak >= WRONG_WAY_TICKS ? "wrong_way"
       : (now - lastPresentAt > 700) ? "face_lost"
       : (actionState.magnitude > 0.08) ? "further"
       : "none";
@@ -815,6 +873,7 @@ export function VerificationWidget({
     // after the face has already turned out of detection range, and the
     // server requires at least one face-bearing frame per action.
     let earlyShotTaken = false;
+    let expressionShotTaken = false;
     // True when the current burst was started by the AWAIT_FALLBACK_MS timer
     // rather than the action detector — relaxes the per-shot hold/presence
     // gates that a detector-blind movement can never satisfy.
@@ -834,6 +893,8 @@ export function VerificationWidget({
     };
 
     const tick = () => {
+      if (cancelled) return;
+      if (document.hidden) { raf = requestAnimationFrame(tick); return; }
       const video = videoRef.current;
       if (video) {
         const now = performance.now();
@@ -928,7 +989,7 @@ export function VerificationWidget({
               if (next.inFrame) {
                 const faceCrop = cropImageData(modelFrame, next.box);
                 const focus = faceCrop ? laplacianVariance(faceCrop) : 0;
-                next = { ...next, focus, inFrame: focus >= FACE_FOCUS_MIN, guide: focus >= FACE_FOCUS_MIN ? "ok" : "focus" };
+                next = { ...next, observedAt: performance.now(), focus, inFrame: focus >= FACE_FOCUS_MIN, guide: focus >= FACE_FOCUS_MIN ? "ok" : "focus" };
               }
               framingRef.current = next;
               // Stabilizer absorbs per-detection jitter; publish its guide only
@@ -950,6 +1011,7 @@ export function VerificationWidget({
                   : { eyes: 0, mouth: 0 };
                 prevModelGray = gray;
                 actionState = actionDet.update({ box: next.box, eyes: bands.eyes, mouth: bands.mouth, pose: next.pose || null, expr: next.expr || null });
+                wrongWayStreak = actionState.wrongWay ? wrongWayStreak + 1 : 0;
               } else {
                 prevModelGray = toGrayscale(modelFrame);
               }
@@ -980,7 +1042,7 @@ export function VerificationWidget({
             // accumulate reference-frontal samples (tight band) while aligning
             if (alignPose && lockedOk && isReferencePose(alignPose)) {
               const arr = livenessRefSamplesRef.current;
-              if (!arr.length || arr[arr.length - 1] !== alignPose) { arr.push({ yaw: alignPose.yaw, pitch: alignPose.pitch }); if (arr.length > 15) arr.shift(); }
+              if (!arr.length || arr[arr.length - 1].observedAt !== framingRef.current.observedAt) { arr.push({ yaw: alignPose.yaw, pitch: alignPose.pitch, observedAt: framingRef.current.observedAt }); if (arr.length > 15) arr.shift(); }
             }
             if (lockedOk && alignFrontal && stable.lockedSince && now - stable.lockedSince >= ALIGN_LOCK_MS) {
               phase = "await";
@@ -999,6 +1061,7 @@ export function VerificationWidget({
               });
               actionState = { ok: false, triggered: false, holding: false, armed: true, hasPose: false };
               earlyShotTaken = false;
+              expressionShotTaken = false;
               awaitStart = now;
               awaitSamples = 0;
               hintShown = false;
@@ -1024,11 +1087,19 @@ export function VerificationWidget({
             }
             // the detector self-heals a bad reference; keep the session in sync
             if (actionDet && actionDet.healed && actionDet.poseBaseline) livenessFrontalRef.current = actionDet.poseBaseline;
-            if (actionState.ok && rawBox && !earlyShotTaken && !capturingRef.current) {
+            // Taken as soon as the face is detectable in the await phase: it
+            // is the FRONTAL reference for this action — the only frame of a
+            // look-up/look-down burst the frontal-biased passive model can
+            // score, and the start point of the trajectory. The server
+            // excludes it from the per-action time window, so coaching time
+            // before the movement no longer counts against the user.
+            if (rawBox && !earlyShotTaken && !capturingRef.current) {
               // movement just started and the face is STILL detectable —
               // grab the guaranteed face-bearing frame for this action now
-              earlyShotTaken = true;
-              captureRef.current({ livenessAdvance: false, mode: "auto" });
+              captureRef.current({ livenessAdvance: false, mode: "auto" }).then(ok => { if (!cancelled && ok) earlyShotTaken = true; });
+            }
+            if (earlyShotTaken && !expressionShotTaken && ["blink", "open_mouth"].includes(currentAction) && actionState.ok && !capturingRef.current) {
+              captureRef.current({ livenessAdvance: false, mode: "auto" }).then(ok => { if (!cancelled && ok) expressionShotTaken = true; });
             }
             if (facePresent && actionState.triggered) {
               phase = "capturing";
@@ -1099,9 +1170,8 @@ export function VerificationWidget({
             const presenceOk = facePresent || (fallbackBurst && shots > 0);
             if (shots < BURST_AT.length && now - triggerAt >= BURST_AT[shots] && !capturingRef.current && presenceOk && canShoot) {
               const isLast = shots === BURST_AT.length - 1;
-              shots++;
-              captureRef.current({ livenessAdvance: isLast, mode: fallbackBurst ? "fallback" : "auto" });
-            } else if (!fallbackBurst && shots > 0 && shots < BURST_AT.length && !capturingRef.current && now - triggerAt > BURST_AT[shots] + 1200) {
+              captureRef.current({ livenessAdvance: isLast, mode: fallbackBurst ? "fallback" : "auto" }).then(ok => { if (!cancelled && ok) shots++; });
+            } else if (!fallbackBurst && shots >= 2 && shots < BURST_AT.length && !capturingRef.current && now - triggerAt > BURST_AT[shots] + 1200) {
               // pose released before the remaining shots: finish the action
               // with the frames already uploaded — no frontal padding frames
               shots = BURST_AT.length;
@@ -1228,7 +1298,7 @@ export function VerificationWidget({
     };
     raf = requestAnimationFrame(tick);
     return () => { cancelled = true; cancelAnimationFrame(raf); setGreen(false); framingRef.current = null; };
-  }, [cameraReady, flowState?.step, actionIdx, faceModelUrl, detectorStatus]);
+  }, [cameraReady, flowState?.step, actionIdx, challengeEpoch, faceModelUrl, detectorStatus]);
 
   if (!flowState) return null;
   const { step, steps, stepIndex, error, result } = flowState;
@@ -1259,6 +1329,8 @@ export function VerificationWidget({
   const pillDisplay = showGuide ? (GUIDE_COPY[framingGuide] || "Position your face") : pillText;
   const ringColor = green ? "#059669" : "#E5E7EB";
 
+  if (initError) return <div role="alert"><p>{initError}</p><button onClick={() => { setInitError(null); setInitEpoch(e => e + 1); }}>Retry loading verification</button></div>;
+  if (!flowState) return <p role="status">Loading verification…</p>;
   if (!consented) {
     return (
       <div style={{ maxWidth: 420, margin: "0 auto", fontFamily: "system-ui, sans-serif" }}>
@@ -1266,23 +1338,25 @@ export function VerificationWidget({
           <img src={theme.logoUrl} alt="" style={{ height: 32, marginBottom: 12 }} />
         )}
         <h2 style={{ margin: "0 0 8px", fontSize: 20 }}>Consent required</h2>
+        {feedback && <p role="alert">{feedback}</p>}
         <label style={{ display: "flex", gap: 10, alignItems: "flex-start", color: "#374151", fontSize: 14, lineHeight: 1.45 }}>
           <input type="checkbox" checked={consentChecked} onChange={(e) => setConsentChecked(e.target.checked)} style={{ marginTop: 3 }} />
           <span>{consentCopy}</span>
         </label>
+        {screenFlash && <label style={{ display: "block", margin: "12px 0" }}>
+          <input type="checkbox" checked={allowFlash} onChange={e => setAllowFlash(e.target.checked)} />
+          Allow a short sequence of changing screen colours. Leave this unchecked if flashing light causes discomfort; verification can be reviewed without it.
+        </label>}
         <button
           type="button"
-          onClick={() => {
-            // Persist the consent record server-side (set-once, audit-logged;
-            // production refuses uploads without it). Fire-and-forget: a
-            // transient failure here surfaces as a clear upload error later
-            // rather than blocking the user at the consent screen.
-            if (clientRef.current) {
-              clientRef.current.recordConsent(CONSENT_COPY_VERSION).catch(() => {});
-            }
-            setConsented(true);
+          onClick={async () => {
+            if (!clientRef.current || busy) return;
+            setBusy(true); setFeedback(null);
+            try { await clientRef.current.recordConsent(CONSENT_COPY_VERSION); setConsented(true); }
+            catch (err) { setFeedback(err.message); }
+            finally { setBusy(false); }
           }}
-          disabled={!consentChecked}
+          disabled={!consentChecked || busy}
           style={{
             width: "100%", marginTop: 16, padding: "12px 0", borderRadius: 8,
             background: primary, color: "#fff", border: 0, fontSize: 16,

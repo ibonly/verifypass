@@ -10,7 +10,9 @@ const { computeRiskSignals } = require("./riskSignals");
 // Stamped into every rawResult + logged at worker startup. When a decision
 // looks impossible, this settles WHICH code produced it — Node caches modules
 // at process start, so an unrestarted worker silently runs old logic.
-const PIPELINE_VERSION = "2026-07-10.5-idback-screening";
+const PIPELINE_VERSION = require("../lib/release").policyVersion;
+const { transaction } = require("../services/atomic");
+const { addOutbox, flushOutbox } = require("../services/outbox");
 
 function defaultEvidenceKey(config) {
   return resolveEvidenceKey({
@@ -32,17 +34,58 @@ function dbEnqueue(db) {
     db.jobQueue.create({ data: { type, payload: jobPayload, status: "pending", runAfter, maxAttempts } });
 }
 
-async function runVerification(payload, { db, provider, evidenceKey, env, modelVersion = null, enqueueJob, screen, flashTileMeans }) {
+async function runVerification(payload, deps) {
+  const budgetMs = Math.max(1, Math.min(Number(deps.budgetMs) || 180000, 240000));
+  const startedAt = Date.now();
+  const metrics = { providerCalls: 0, cacheHits: 0 };
+  const deadline = startedAt + budgetMs;
+  let expired = false;
+  const assertActive = () => { if (expired || Date.now() >= deadline) throw new Error("VERIFICATION_DEADLINE_EXCEEDED"); };
+  const methods = new Set(["checkLiveness", "faceLandmarks", "faceEmbedding", "compareFaces", "extractDocument"]);
+  const cache = new Map();
+  const provider = new Proxy(deps.provider, { get(target, name) {
+    if (!methods.has(name) || typeof target[name] !== "function") return target[name];
+    return async (...args) => {
+      assertActive();
+      const key = `${name}:` + args.map(arg => Buffer.isBuffer(arg) ? require("crypto").createHash("sha256").update(arg).digest("hex") : arg && typeof arg === "object" ? JSON.stringify(arg) : String(arg)).join(":");
+      if (cache.has(key)) { metrics.cacheHits++; return cache.get(key); }
+      metrics.providerCalls++;
+      const result = await target[name](...args);
+      assertActive();
+      if (cache.size < 256) cache.set(key, result);
+      return result;
+    };
+  } });
+  let timer;
+  try {
+    return await Promise.race([
+      runVerificationInternal(payload, { ...deps, provider, assertActive, metrics, startedAt }),
+      new Promise((_, reject) => { timer = setTimeout(() => { expired = true; reject(new Error("VERIFICATION_DEADLINE_EXCEEDED")); }, budgetMs); })
+    ]);
+  } finally { clearTimeout(timer); expired = true; cache.clear(); }
+}
+
+async function runVerificationInternal(payload, { db, provider, evidenceKey, env, modelVersion = null, enqueueJob, screen, flashTileMeans, assertActive, metrics, startedAt }) {
   const tileMeans = flashTileMeans || mosaicTileMeans; // injectable for tests (sharp-free)
   const doScreen = screen || require("./screening").screenCustomer;
   const dispatch = enqueueJob || dbEnqueue(db);
   const { sessionUid } = payload;
-  const session = await db.verificationSession.findFirst({ where: { sessionUid } });
+  // Deployment skew guard: the API stamps the policy version it bound the
+  // evidence for; a worker running different code must not judge the job
+  // (2026-09-07: a stale worker rejected genuine sessions because it could
+  // not verify the newer frame bindings). The worker loop releases the job
+  // without consuming an attempt on this error.
+  if (payload.policyVersion && payload.policyVersion !== PIPELINE_VERSION) {
+    throw new Error(`POLICY_VERSION_MISMATCH: job requires ${payload.policyVersion}, this worker runs ${PIPELINE_VERSION}`);
+  }
+  const storedSession = await db.verificationSession.findFirst({ where: { sessionUid } });
+  const session = storedSession ? { ...storedSession } : null;
   if (!session) throw new Error(`run_verification: session ${sessionUid} not found`);
+  if (session.attemptId && payload.attemptId !== session.attemptId) return { skipped: true, reason: "superseded attempt" };
   if (session.status !== "submitted") return { skipped: true, reason: `status is ${session.status}` };
 
   const tenant = await db.tenant.findFirst({ where: { id: session.tenantId } });
-  const evidence = await db.evidenceFile.findMany({ where: { sessionId: session.id } });
+  const evidence = await db.evidenceFile.findMany({ where: { sessionId: session.id, ...(session.attemptId ? { attemptId: session.attemptId } : {}) } });
 
   // Newest first by createdAt — ids are ObjectId STRINGS on MongoDB, so
   // numeric subtraction on them is NaN and would silently not sort.
@@ -60,7 +103,15 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
   async function loadDecrypted(file) {
     // storage-backend aware: local fs path or s3:// URI (Lambda/split deploys)
     const raw = await storage.readStored(file.storagePath);
-    return decryptBuffer(raw, evidenceKey);
+    const plain = decryptBuffer(raw, evidenceKey);
+    const digest = require("crypto").createHash("sha256").update(plain).digest("hex");
+    if (file.checksum && file.checksum !== digest) throw new Error("EVIDENCE_CHECKSUM_MISMATCH");
+    if (session.attemptId && !file.checksum) throw new Error("EVIDENCE_CHECKSUM_MISSING");
+    if (session.attemptId && !verifyFrameBinding(require("../config").sdkTokenSecret, {
+      challengeNonce: file.challengeNonce, action: file.label || file.fileType, checksum: file.checksum, bindingHmac: file.bindingHmac,
+      context: [session.tenantId, session.id, file.attemptId, file.fileType, file.captureMode || null, file.meta || null]
+    })) throw new Error("EVIDENCE_BINDING_MISMATCH");
+    return plain;
   }
 
   // Fail closed: missing captures → failed session, not a crash loop.
@@ -69,13 +120,17 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
   const needsId = session.verificationType !== "FACE_ONLY";
   if ((needsSelfie && !selfie) || (needsId && !idFront)) {
     await finalize(db, session, {
-      dispatch,
+      dispatch, assertActive,
       decision: { status: "failed", riskLevel: "high", reasonCodes: ["MISSING_CAPTURES"] },
       // Record WHICH capture was missing — "MISSING_CAPTURES" alone told a
       // reviewer nothing when the evidence gallery clearly showed a photo.
       resultRow: {
         rawResult: {
           pipelineVersion: PIPELINE_VERSION,
+          performance: { ...metrics, elapsedMs: Date.now() - startedAt, rssBytes: process.memoryUsage().rss },
+          release: require("../lib/release").releaseIdentity(),
+          modelHashes: provider?.name === "onnx" ? require("../../scripts/model-manifest.json") : null,
+          policy: policyBlock(tenant),
           missing: {
             selfie: needsSelfie && !selfie,
             idFront: needsId && !idFront
@@ -90,7 +145,7 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
 
   const selfieBuf = needsSelfie ? await loadDecrypted(selfie) : null;
   const idBuf = idFront ? await loadDecrypted(idFront) : null;
-  const idBackBuf = idBack ? await loadDecrypted(idBack).catch(() => null) : null;
+  const idBackBuf = idBack ? await loadDecrypted(idBack) : null;
 
   // --- Provider calls (liveness + match + OCR) ---
   const liveness = selfieBuf ? await provider.checkLiveness(selfieBuf) : null;
@@ -174,7 +229,8 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
           challengeNonce: fr.challengeNonce,
           action: fr.label,
           checksum: fr.checksum,
-          bindingHmac: fr.bindingHmac
+          bindingHmac: fr.bindingHmac,
+          context: session.attemptId ? [session.tenantId, session.id, fr.attemptId, fr.fileType, fr.captureMode || null, fr.meta || null] : undefined
         });
         if (!bound) bindingRejected++;
         return bound;
@@ -190,9 +246,16 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
 
     const frames = [];
     const frameBufs = []; // parallel to frames — reused for identity/passive aggregation below
+    // Chronological order so each frame can hand the previous face box to the
+    // detector as a tracking prior (chin-up frames the detector misses at its
+    // standard threshold are recovered when a candidate overlaps that box).
+    currentFrames.sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0));
+    let priorBox = null;
     for (const fr of currentFrames) {
       const buf = await loadDecrypted(fr);
-      const lv = await provider.checkLiveness(buf);
+      const lv = await provider.checkLiveness(buf, priorBox ? { priorBox } : undefined);
+      if (lv?.raw?.box) priorBox = lv.raw.box;
+      if (!lv || !Number.isInteger(lv.faceCount) || lv.faceCount < 0 || (lv.faceCount > 0 && (!Number.isFinite(lv.score) || lv.score < 0 || lv.score > 1))) { throw new Error("INVALID_LIVENESS_PROVIDER_OUTPUT"); }
       // Free geometry signals (v7): five anchor points → rigidity/parallax,
       // EAR/MAR → blink / open-mouth verification. Best-effort per frame.
       let geo = null;
@@ -200,7 +263,7 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
         try { geo = await provider.faceLandmarks(buf); } catch (_) { geo = null; }
       }
       frames.push({
-        action: fr.label, liveness: { score: lv.score, faceCount: lv.faceCount }, pose: lv.pose || null,
+        action: fr.label, liveness: { score: lv.score, faceCount: lv.faceCount }, pose: lv.pose || null, box: lv.raw?.box || null, faceRatio: Number.isFinite(lv.faceRatio) ? lv.faceRatio : null, detection: lv.raw?.detection || "standard",
         points: geo ? geo.points : null, expr: geo ? geo.expr : null,
         checksum: fr.checksum || null, createdAt: fr.createdAt || null, captureMode: fr.captureMode || null
       });
@@ -221,16 +284,28 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
         const selfieEmb = await provider.faceEmbedding(selfieBuf);
         if (selfieEmb) {
           const sims = [];
+          let considered = 0;
           for (let i = 0; i < frames.length; i++) {
             const f = frames[i];
             if (!f.liveness || f.liveness.faceCount !== 1) continue;
-            if (f.pose && Math.abs(Number(f.pose.yaw) || 0) > 25) continue;
+            considered++;
+            if (!identityFrameQualifies(f, liveness)) continue;
             const emb = await provider.faceEmbedding(frameBufs[i]);
-            if (emb) sims.push({ action: f.action, score: provider.compareEmbeddings(selfieEmb, emb) });
+            if (!emb) throw new Error("Missing frame identity embedding");
+            const score = provider.compareEmbeddings(selfieEmb, emb);
+            if (!Number.isFinite(score) || score < 0 || score > 1) throw new Error("Invalid frame identity score");
+            sims.push({ action: f.action, score });
           }
           if (sims.length) {
+            // Decision score = BEST qualifying frontal frame. Genuine frontal
+            // frames score 0.66–0.89 against the selfie while turned/tilted
+            // frames score 0.15–0.50 (2026-09-07 analysis); the old minimum
+            // over frames up to 25° rejected every honest session.
+            const best = sims.reduce((a, b) => (b.score > a.score ? b : a));
             const min = sims.reduce((a, b) => (b.score < a.score ? b : a));
-            livenessIdentity = { score: min.score, frameAction: min.action, frames: sims.length, mean: +(sims.reduce((s, x) => s + x.score, 0) / sims.length).toFixed(3), perFrame: sims.map((s) => ({ action: s.action, score: +s.score.toFixed(3) })) };
+            livenessIdentity = { score: best.score, aggregation: "best-frontal", frameAction: best.action, min: +min.score.toFixed(3), frames: sims.length, considered, mean: +(sims.reduce((s, x) => s + x.score, 0) / sims.length).toFixed(3), perFrame: sims.map((s) => ({ action: s.action, score: +s.score.toFixed(3) })) };
+          } else if (considered) {
+            livenessIdentity = { score: null, reason: "no frontal single-face frame (|yaw|,|pitch| ≤ 15°, face ≥ 60% of selfie)", considered };
           }
         }
       } catch (e) {
@@ -238,37 +313,42 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
       }
     }
     if (selfieBuf && frames.length && !livenessIdentity) {
-      const candidates = frames
-        .map((f, i) => ({ f, i }))
-        .filter(({ f }) => f.liveness && f.liveness.faceCount === 1);
-      candidates.sort((a, b) => {
-        const ya = a.f.pose ? Math.abs(Number(a.f.pose.yaw) || 0) : 90;
-        const yb = b.f.pose ? Math.abs(Number(b.f.pose.yaw) || 0) : 90;
-        return ya - yb || (b.f.liveness.score || 0) - (a.f.liveness.score || 0);
-      });
-      const pick = candidates[0];
-      if (pick) {
+      const single = frames.map((f, i) => ({ f, i })).filter(({ f }) => f.liveness && f.liveness.faceCount === 1);
+      const candidates = single.filter(({ f }) => identityFrameQualifies(f, liveness));
+      if (candidates.length) {
         try {
-          const cmp = await provider.compareFaces(selfieBuf, frameBufs[pick.i]);
-          livenessIdentity = { score: typeof cmp.score === "number" ? cmp.score : null, frameAction: pick.f.action, frameYaw: pick.f.pose ? Number(pick.f.pose.yaw) || 0 : null };
-        } catch (e) {
-          livenessIdentity = { score: null, error: String(e && e.message || e).slice(0, 120) };
-        }
+          const scores = [];
+          for (const pick of candidates) {
+            const cmp = await provider.compareFaces(selfieBuf, frameBufs[pick.i]);
+            if (!Number.isFinite(cmp?.score)) throw new Error("Identity score unavailable");
+            scores.push(cmp.score);
+          }
+          livenessIdentity = { score: Math.max(...scores), aggregation: "best-frontal", min: Math.min(...scores), frames: scores.length, considered: single.length };
+        } catch (e) { livenessIdentity = { score: null, error: String(e.message).slice(0, 120) }; }
+      } else if (single.length) {
+        livenessIdentity = { score: null, reason: "no frontal single-face frame (|yaw|,|pitch| ≤ 15°, face ≥ 60% of selfie)", considered: single.length };
       }
     }
 
     // --- Multi-frame passive liveness (v5 C3): judge spoof on the selfie AND
     // the frontal-most challenge frames, aggregated by MEDIAN (robust to one
     // bad frame). Replaces single-frame luck with a multi-frame signal.
+    // Only FRONTAL frames (|yaw|,|pitch| ≤ 15°) enter the median: the passive
+    // model is frontal-biased and scored genuine look-up frames 0.02–0.14,
+    // dragging a 0.94 selfie to a 0.63 decision (2026-09-07 analysis).
     if (liveness && typeof liveness.score === "number") {
       const frontal = frames
-        .filter((f) => f.liveness && f.liveness.faceCount === 1 && typeof f.liveness.score === "number")
-        .sort((a, b) => (a.pose ? Math.abs(Number(a.pose.yaw) || 0) : 90) - (b.pose ? Math.abs(Number(b.pose.yaw) || 0) : 90))
+        .filter((f) => f.liveness && f.liveness.faceCount === 1 && typeof f.liveness.score === "number" && isFrontalPose(f.pose))
+        .sort((a, b) => (a.pose ? Math.abs(Number(a.pose.yaw) || 0) + Math.abs(Number(a.pose.pitch) || 0) : 0) - (b.pose ? Math.abs(Number(b.pose.yaw) || 0) + Math.abs(Number(b.pose.pitch) || 0) : 0))
         .slice(0, 3)
         .map((f) => f.liveness.score);
-      const all = [liveness.score, ...frontal].sort((x, y) => x - y);
-      const median = all[Math.floor(all.length / 2)];
-      passiveAggregate = { selfieScore: liveness.score, frameScores: frontal, median, n: all.length };
+      if (frontal.length) {
+        const all = [liveness.score, ...frontal].sort((x, y) => x - y);
+        const median = all.length % 2 ? all[Math.floor(all.length / 2)] : (all[all.length / 2 - 1] + all[all.length / 2]) / 2;
+        const fs = [...frontal].sort((x, y) => x - y);
+        const frontalMedian = fs.length % 2 ? fs[Math.floor(fs.length / 2)] : (fs[fs.length / 2 - 1] + fs[fs.length / 2]) / 2;
+        passiveAggregate = { selfieScore: liveness.score, frameScores: frontal, median, frontalMedian, n: all.length };
+      }
     }
     // Pose enforcement + direction strictness are tenant-opt-in flags, meant
     // to be enabled only after calibrating the deployed Faceplugin container's
@@ -286,8 +366,16 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
       // (rawResult.livenessChallenge.consistency / .sequence); ENFORCED once
       // a deployment has looked at a week of data. Env flags are the global
       // switch, tenant settings the per-tenant override.
-      enforceConsistency: process.env.CHALLENGE_ENFORCE_CONSISTENCY === "true" || tenant?.settings?.challenge?.enforceConsistency === true,
-      enforceSequence: process.env.CHALLENGE_ENFORCE_SEQUENCE === "true" || tenant?.settings?.challenge?.enforceSequence === true,
+      // Direction consistency: RECORD-only by default. The ONNX pose model's
+      // yaw sign matched the instructed direction on 51–56% of strong frames
+      // (52 frames, 2026-09-07) — a coin flip — so as a review trigger it
+      // would send half of all genuine sessions to a reviewer. Modes:
+      // record (default) | review | reject via CHALLENGE_CONSISTENCY_MODE or
+      // settings.challenge.consistencyMode, once a pose model with a
+      // measured sign accuracy is deployed.
+      enforceConsistency: consistencyMode(tenant) === "reject",
+      enforceSequence: true,
+      rigidityMinMotion: 0.3,
       // Rigidity (flat-object) check: review by default; reject when enforced
       enforceRigidity: process.env.CHALLENGE_ENFORCE_RIGIDITY === "true" || tenant?.settings?.challenge?.enforceRigidity === true,
       strictDirection: tenant?.settings?.challenge?.strictDirection === true,
@@ -296,7 +384,9 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
       // pose/lighting, not spoofing)
       selfieScore: liveness ? liveness.score : null
     };
+    challengeOpts.now = () => session.submittedAt ? new Date(session.submittedAt).getTime() : Date.now();
     challenge = verifyLivenessChallenge(session.livenessChallenge, frames, thresholds, challengeOpts);
+    challenge.policyUnverified = challengeOpts.enforcePose === false || session.livenessChallenge.assisted === true || (env === "production" && process.env.LIVENESS_VALIDATED_POLICY !== PIPELINE_VERSION);
     if (bindingRejected > 0) {
       challenge = {
         ...challenge,
@@ -318,15 +408,29 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
   // current attempt, scored against the colour sequence the widget emitted.
   // Recorded always (rawResult.liveness.flash); routes to review only when
   // CHALLENGE_ENFORCE_FLASH / tenant.settings.challenge.enforceFlash is on.
-  let flash = null;
+  const requireFlash = process.env.CHALLENGE_ENFORCE_FLASH === "true" || tenant?.settings?.challenge?.enforceFlash === true;
+  let flash = { ok: null, reason: "missing", enforced: requireFlash };
   if (liveness && flashMosaics.length) {
     const nonce = session.livenessChallenge && session.livenessChallenge.nonce;
     const current = flashMosaics
-      .filter((m) => !nonce || !m.challengeNonce || m.challengeNonce === nonce)
+      .filter((m) => m.challengeNonce === nonce && verifyFrameBinding(require("../config").sdkTokenSecret, { challengeNonce: m.challengeNonce, action: m.label, checksum: m.checksum, bindingHmac: m.bindingHmac, context: session.attemptId ? [session.tenantId, session.id, m.attemptId, m.fileType, m.captureMode || null, m.meta || null] : undefined }))
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
-    if (current && current.meta && Array.isArray(current.meta.sequence)) {
+    const expectedSequence = session.livenessChallenge?.flashSequence;
+    if (current && current.meta && Array.isArray(expectedSequence) && JSON.stringify(current.meta.sequence) === JSON.stringify(expectedSequence)) {
       try {
-        const means = await tileMeans(await loadDecrypted(current), current.meta.sequence.length + 1);
+        const mosaic = await loadDecrypted(current);
+        const sharp = require("sharp");
+        const dimensions = await sharp(mosaic).metadata();
+        const tile = current.meta.tile;
+        if (dimensions.height !== tile || dimensions.width !== tile * (expectedSequence.length + 1)) throw new Error("Invalid flash mosaic dimensions");
+        for (let i = 0; i <= expectedSequence.length; i++) {
+          const face = await sharp(mosaic).extract({ left: i * tile, top: 0, width: tile, height: tile }).jpeg().toBuffer();
+          const lv = await provider.checkLiveness(face);
+          const cmp = await provider.compareFaces(selfieBuf, face);
+          // Small tiles embed poorly: require the same person at the REJECT band, not the pass band.
+          if (lv?.faceCount !== 1 || !Number.isFinite(cmp?.score) || cmp.score < thresholds.faceMatch.reject) throw new Error("Flash tile identity unverified");
+        }
+        const means = await tileMeans(mosaic, current.meta.sequence.length + 1);
         const { scoreFlashResponse } = require("@verifypass/shared");
         flash = {
           ...scoreFlashResponse(means, current.meta.sequence),
@@ -334,7 +438,7 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
           enforced: process.env.CHALLENGE_ENFORCE_FLASH === "true" || tenant?.settings?.challenge?.enforceFlash === true
         };
       } catch (err) {
-        flash = { ok: null, reason: `error:${String(err.message).slice(0, 60)}`, enforced: false };
+        flash = { ok: null, reason: `error:${String(err.message).slice(0, 60)}`, enforced: requireFlash };
       }
     }
   }
@@ -342,17 +446,22 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
   const risk = await computeRiskSignals(db, session, thresholds, new Date(), { env });
   // Decision liveness score = multi-frame median when available (C3); the raw
   // selfie score is kept in rawResult for calibration.
+  // Decision passive score = the SELFIE score. The frontal-frame median is
+  // recorded for calibration only: even frontal mid-motion frames scored
+  // 0.06–0.33 on genuine users (2026-09-07), so it can only ever hurt honest
+  // sessions, and it can never help a bad selfie (the L11 guarantee).
   const decisionLiveness = liveness
-    ? { score: passiveAggregate ? passiveAggregate.median : liveness.score, ...(flash ? { flash: { ok: flash.ok, enforced: flash.enforced === true } } : {}) }
+    ? { score: liveness.score, frontalMedian: passiveAggregate ? passiveAggregate.frontalMedian : null, frontalFrames: passiveAggregate ? passiveAggregate.frameScores.length : 0, ...(flash ? { flash: { ok: flash.ok, enforced: flash.enforced === true } } : {}) }
     : null;
   const signals = {
     // ID_ONLY has no selfie: omit selfie/liveness sections entirely — the
     // decision engine treats absent sections as not-applicable (fail-closed
     // paths only trigger on PRESENT-but-bad signals).
-    ...(liveness ? { selfie: { faceCount: liveness.faceCount, occluded: liveness.occluded === true }, liveness: decisionLiveness } : {}),
-    ...(livenessIdentity ? { livenessIdentity } : {}),
-    ...(hasChallenge ? { livenessChallenge: { ok: challenge.ok, reasonCodes: challenge.reasonCodes, motionUnverified: challenge.motionUnverified === true, manualCapture: challenge.manualCapture === true, multiFaceActions: challenge.multiFaceActions || 0, poseProviderUnavailable: challenge.poseProviderUnavailable === true, flatObject: challenge.flatObject === true } } : {}),
-    ...(faceMatch ? { idFace: { found: faceMatch.idFaceFound }, faceMatch: { score: faceMatch.score } } : {}),
+    ...(needsSelfie ? { selfie: { faceCount: liveness?.faceCount, occluded: liveness?.occluded === true }, liveness: decisionLiveness || { score: null } } : {}),
+    ...(needsSelfie ? { livenessIdentity: livenessIdentity || { score: null } } : {}),
+    ...(!hasChallenge && needsSelfie ? { livenessChallenge: { ok: false, reasonCodes: ["LIVENESS_CHALLENGE_INCOMPLETE"] } } : {}),
+    ...(hasChallenge ? { livenessChallenge: { ok: challenge.ok, reasonCodes: challenge.reasonCodes, motionUnverified: challenge.motionUnverified === true, manualCapture: challenge.manualCapture === true, multiFaceActions: challenge.multiFaceActions || 0, poseProviderUnavailable: challenge.poseProviderUnavailable === true, flatObject: challenge.flatObject === true, directionInconsistent: consistencyMode(tenant) === "review" && challenge.directionInconsistent === true, evidenceInsufficient: challenge.evidenceInsufficient === true, policyUnverified: challenge.policyUnverified === true } } : {}),
+    ...(needsSelfie && needsId ? { idFace: { found: faceMatch?.idFaceFound === true }, faceMatch: { score: faceMatch?.score ?? null } } : {}),
     ...(doc ? {
       document: {
         ocrConfidence: doc.ocrConfidence,
@@ -382,22 +491,27 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
   }
 
   const resultRow = {
-    livenessScore: liveness ? liveness.score : null,
-    livenessStatus: !liveness ? null
-      : decision.reasonCodes.includes("LIVENESS_FAILED") ? "failed"
-      : decision.reasonCodes.includes("LIVENESS_BORDERLINE") ? "review" : "passed",
-    faceMatchScore: faceMatch?.score ?? null,
+    livenessScore: Number.isFinite(decisionLiveness?.score) ? decisionLiveness.score : null,
+    livenessStatus: !needsSelfie ? null
+      : decision.reasonCodes.some(c => c.startsWith("LIVENESS_") && decision.status === "rejected") ? "failed"
+      : decision.reasonCodes.some(c => c.startsWith("LIVENESS_")) ? "review" : "passed",
+    faceMatchScore: Number.isFinite(faceMatch?.score) ? faceMatch.score : null,
     faceMatchStatus: !faceMatch ? null
+      : faceMatch.idFaceFound === false || !Number.isFinite(faceMatch.score) ? "review"
       : decision.reasonCodes.includes("FACE_MATCH_FAILED") ? "not_matched"
       : decision.reasonCodes.includes("FACE_MATCH_BORDERLINE") ? "review" : "matched",
     documentStatus: !doc ? null
       : decision.reasonCodes.includes("DOCUMENT_OCR_FAILED") || decision.reasonCodes.includes("DOCUMENT_EXPIRED")
         || decision.reasonCodes.includes("DOCUMENT_IS_LIVE_FACE")
         ? "review" : "valid",
-    ocrConfidence: doc?.ocrConfidence ?? null,
+    ocrConfidence: Number.isFinite(doc?.ocrConfidence) ? doc.ocrConfidence : null,
     extractedData: doc?.extractedData ?? null,
     rawResult: {
       pipelineVersion: PIPELINE_VERSION,
+          performance: { ...metrics, elapsedMs: Date.now() - startedAt, rssBytes: process.memoryUsage().rss },
+          release: require("../lib/release").releaseIdentity(),
+          modelHashes: provider?.name === "onnx" ? require("../../scripts/model-manifest.json") : null,
+          policy: policyBlock(tenant),
       provider: provider.name,
       // Scores are only comparable within one model version — calibration
       // and analytics MUST group by this before aggregating similarity scores.
@@ -406,7 +520,7 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
       liveness: liveness ? { score: liveness.score, faceCount: liveness.faceCount, occluded: liveness.occluded, decisionScore: decisionLiveness ? decisionLiveness.score : null, passiveAggregate, texture, flash } : null,
       livenessIdentity,
       livenessChallenge: hasChallenge
-        ? { ok: challenge.ok, aggregateScore: challenge.aggregateScore, reasonCodes: challenge.reasonCodes, perAction: challenge.perAction, actions: session.livenessChallenge.actions, bindingRejected: challenge.bindingRejected || 0, consistency: challenge.consistency || null, sequence: challenge.sequence || null }
+        ? { ...challenge, actions: session.livenessChallenge.actions, bindingRejected: challenge.bindingRejected || 0 }
         : null,
       faceMatch: faceMatch ? { score: faceMatch.score, idFaceFound: faceMatch.idFaceFound, providerMatch: faceMatch.providerMatch ?? null } : null,
       document: doc ? {
@@ -434,51 +548,55 @@ async function runVerification(payload, { db, provider, evidenceKey, env, modelV
     }
   };
 
-  await finalize(db, session, { decision, resultRow, dispatch });
+  const committed = await finalize(db, session, { decision, resultRow, dispatch, assertActive });
+  if (!committed) return { skipped: true, reason: "superseded attempt or completed session" };
   return { status: decision.status, reasonCodes: decision.reasonCodes };
 }
 
-async function finalize(db, session, { decision, resultRow, dispatch }) {
+async function finalize(db, session, { decision, resultRow, dispatch, assertActive }) {
   const send = dispatch || dbEnqueue(db);
   // Optimistic compare-and-set: claim the session FIRST to prevent duplicate
   // results if the worker dies between result-create and session-update (M2).
   // Only one worker can flip the status away from its current value.
-  const claimed = await db.verificationSession.updateMany({
-    where: { id: session.id, status: session.status },
-    data: {
-      status: decision.status,
-      riskLevel: decision.riskLevel === "low" || decision.riskLevel === "medium" || decision.riskLevel === "high"
-        ? decision.riskLevel : null,
-      decisionReason: { reasonCodes: decision.reasonCodes },
-      completedAt: ["approved", "rejected", "failed"].includes(decision.status) ? new Date() : null
-    }
+  const committed = await transaction(db, async tx => {
+    assertActive?.();
+    const claimed = await tx.verificationSession.updateMany({
+      where: { id: session.id, status: "submitted", ...(session.attemptId ? { attemptId: session.attemptId } : { OR: [{ attemptId: null }, { attemptId: { isSet: false } }] }) },
+      data: { status: decision.status, riskLevel: decision.riskLevel, decisionReason: { reasonCodes: decision.reasonCodes }, completedAt: decision.status === "manual_review" ? null : new Date() }
+    });
+    if (!claimed.count) return false;
+    await tx.verificationResult.create({ data: { sessionId: session.id, attemptId: session.attemptId || null, ...resultRow, rawResult: JSON.parse(JSON.stringify(resultRow.rawResult || {})) } });
+    await tx.auditLog.create({ data: { tenantId: session.tenantId, sessionId: session.id, actorType: "system", action: "verification.decided", metadata: { attemptId: session.attemptId || null, status: decision.status, reasonCodes: decision.reasonCodes }, riskEvent: decision.riskLevel !== "low" } });
+    await addOutbox(tx, "send_webhook", { tenantId: String(session.tenantId), sessionUid: session.sessionUid, attemptId: session.attemptId || null, event: `verification.${decision.status}`, eventUid: `evt_${require("crypto").randomBytes(12).toString("hex")}`, snapshot: { customerReference: session.customerReference || null, status: decision.status, riskLevel: decision.riskLevel, attempt: session.attemptNumber || 1, attemptId: session.attemptId || null, createdAt: session.createdAt ? new Date(session.createdAt).toISOString() : null, completedAt: decision.status === "manual_review" ? null : new Date().toISOString() } });
+    assertActive?.();
+    return true;
   });
-  if (claimed.count === 0) {
-    // Another worker already finalized — skip to avoid duplicate results/webhooks.
-    return;
-  }
-  await db.verificationResult.create({ data: { sessionId: session.id, ...resultRow } });
-  await db.auditLog.create({
-    data: {
-      tenantId: session.tenantId,
-      sessionId: session.id,
-      actorType: "system",
-      action: "verification.decided",
-      metadata: { status: decision.status, reasonCodes: decision.reasonCodes },
-      riskEvent: decision.status === "rejected" || decision.reasonCodes.some((c) =>
-        ["REPEATED_FAILED_ATTEMPTS", "DEVICE_SHARED_ACROSS_IDENTITIES", "IP_VELOCITY_EXCEEDED"].includes(c))
-    }
-  });
-  // M4 webhook dispatcher consumes this (via the injected dispatch in
-  // Lambda/SQS topologies, or the job_queue table for the polling worker)
-  await send("send_webhook", {
-    tenantId: String(session.tenantId),
-    sessionUid: session.sessionUid,
-    event: `verification.${decision.status}`
-  });
+  await flushOutbox(db, send).catch(() => {});
+  return committed;
 }
 
-module.exports = { mosaicTileMeans, runVerification, defaultEvidenceKey, PIPELINE_VERSION };
+/** Frontal enough for identity embeddings and passive scoring; frames without pose are allowed (provider cannot say). */
+function isFrontalPose(pose, limit = 15) {
+  if (!pose) return true;
+  return Math.abs(Number(pose.yaw) || 0) <= limit && Math.abs(Number(pose.pitch) || 0) <= limit;
+}
+/** Identity continuity uses frontal frames whose face fills at least 60% of what the selfie's face fills (relative to each image — frames and selfies are captured at different resolutions). */
+function identityFrameQualifies(frame, selfieLiveness) {
+  if (!isFrontalPose(frame.pose)) return false;
+  const sr = selfieLiveness?.faceRatio, fr = frame.faceRatio;
+  if (Number.isFinite(sr) && Number.isFinite(fr) && sr > 0 && fr < 0.6 * sr) return false;
+  return true;
+}
+function consistencyMode(tenant) {
+  const raw = process.env.CHALLENGE_CONSISTENCY_MODE || tenant?.settings?.challenge?.consistencyMode
+    || (process.env.CHALLENGE_ENFORCE_CONSISTENCY === "true" || tenant?.settings?.challenge?.enforceConsistency === true ? "reject" : "record");
+  return ["record", "review", "reject"].includes(raw) ? raw : "record";
+}
+function policyBlock(tenant) {
+  return { version: 2, sequence: "enforced", consistency: consistencyMode(tenant), poseEstimator: "onnx-fr_pose+mirror", identity: "best-frontal", passiveAggregate: "recorded", flatObject: "two-actions-review", minimumDistinctFrames: 3, flash: "experimental", validated: process.env.LIVENESS_VALIDATED_POLICY === PIPELINE_VERSION };
+}
+
+module.exports = { mosaicTileMeans, runVerification, defaultEvidenceKey, PIPELINE_VERSION, isFrontalPose, identityFrameQualifies, consistencyMode };
 
 
 /**

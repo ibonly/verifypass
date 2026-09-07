@@ -70,7 +70,7 @@ test("uploadLivenessFrame posts action + image to the liveness-frame endpoint", 
   assert.equal(res.label, "blink");
   const call = fetch.calls[0];
   assert.equal(call.url, "https://api.test/v1/verification-sessions/vps_1/liveness-frame");
-  assert.deepEqual(JSON.parse(call.opts.body), { sdkToken: "sdk_tok", action: "blink", imageBase64: "IMG64", captureMode: "auto" });
+  assert.deepEqual(JSON.parse(call.opts.body), { sdkToken: "sdk_tok", action: "blink", imageBase64: "IMG64", captureMode: "unknown" });
   assert.equal(call.opts.headers["X-VP-SDK-Token"], "sdk_tok");
 });
 
@@ -83,6 +83,22 @@ test("getChallenge fetches the server-issued actions", async () => {
   assert.ok(fetch.calls[0].url.endsWith("/challenge"));
   assert.ok(!fetch.calls[0].url.includes("sdkToken="));
   assert.equal(fetch.calls[0].opts.headers["X-VP-SDK-Token"], "sdk_tok");
+});
+
+test("beginChallenge posts to /challenge/begin with the attempt and records the deadlines", async () => {
+  const fetch = mockFetch([
+    { body: { success: true, verificationType: "FACE_ONLY", livenessActions: ["turn_left", "turn_right"], attemptId: "att_1" } },
+    { body: { success: true, refreshed: true, challengeIssuedAt: "2026-09-07T10:00:00.000Z", challengeExpiresAt: "2026-09-07T10:10:00.000Z", firstFrameDeadline: "2026-09-07T10:03:00.000Z", sessionExpiresAt: "2026-09-07T10:30:00.000Z" } }
+  ]);
+  const client = new VerifyPassClient({ ...BASE, fetchImpl: fetch });
+  await client.getChallenge();
+  const res = await client.beginChallenge();
+  assert.equal(res.refreshed, true);
+  const call = fetch.calls[1];
+  assert.equal(call.url, "https://api.test/v1/verification-sessions/vps_1/challenge/begin");
+  assert.equal(call.opts.method, "POST");
+  assert.deepEqual(JSON.parse(call.opts.body), { sdkToken: "sdk_tok", attemptId: "att_1" });
+  assert.deepEqual(client.challengeDeadlines, { challengeExpiresAt: "2026-09-07T10:10:00.000Z", firstFrameDeadline: "2026-09-07T10:03:00.000Z", sessionExpiresAt: "2026-09-07T10:30:00.000Z" });
 });
 
 test("getStatus sends the sdk token as a header (not in the URL)", async () => {

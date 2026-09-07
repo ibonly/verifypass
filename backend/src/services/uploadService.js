@@ -6,7 +6,7 @@
 // pre-checks quality, but the server never trusts the client.
 
 const { AppError, CHALLENGE_ACTIONS, computeFrameBinding } = require("@verifypass/shared");
-const { verifySdkToken } = require("./sessionService");
+const { verifySdkToken, validateAttempt } = require("./sessionService");
 
 // sharp is required in production; in dev environments where its native
 // binary can't load (cross-OS node_modules, CI sandboxes) we fall back to a
@@ -18,8 +18,8 @@ try {
   if (process.env.NODE_ENV === "production") throw err;
   console.warn("uploadService: sharp unavailable — DEV JPEG passthrough (no sanitization). Do not use in production.");
 }
-const { saveEvidence } = require("./evidenceStore");
-const { uploadEvidenceImage } = require("./cloudinaryService");
+const { saveEvidence, deleteEvidence } = require("./evidenceStore");
+const { uploadEvidenceImage, destroyEvidenceImage } = require("./cloudinaryService");
 
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MIN_IMAGE_BYTES = 1024;
@@ -119,12 +119,13 @@ const MAX_FLASH_MOSAICS = 2;
  */
 const CAPTURE_MODES = new Set(["auto", "manual", "fallback"]);
 
-async function handleUpload({ scopedDb, tenantUid, sessionUid, sdkToken, kind, side, action, captureMode, imageBase64, meta, evidenceDir, retentionDays }) {
+async function handleUpload({ scopedDb, tenantUid, sessionUid, sdkToken, kind, side, action, captureMode, attemptId, imageBase64, meta, evidenceDir, retentionDays }) {
   const spec = UPLOAD_KINDS[kind];
   if (!spec) throw new AppError("VALIDATION_ERROR", "unknown upload kind");
 
   const session = await scopedDb.sessions.findByUid(sessionUid);
   if (!session) throw new AppError("SESSION_NOT_FOUND");
+  validateAttempt(session, sdkToken, attemptId);
 
   if (!sdkToken || !session.sdkTokenHash || !verifySdkToken(sessionUid, sdkToken, session.sdkTokenHash)) {
     throw new AppError("INVALID_API_KEY", "invalid SDK token for this session");
@@ -166,7 +167,7 @@ async function handleUpload({ scopedDb, tenantUid, sessionUid, sdkToken, kind, s
   let fileMeta = null;
   if (kind === "flash") {
     const { validFlashSequence, FLASH } = require("@verifypass/shared");
-    if (!meta || !validFlashSequence(meta.sequence)) throw new AppError("VALIDATION_ERROR", "flash upload needs a valid colour sequence");
+    if (!meta || !validFlashSequence(meta.sequence) || JSON.stringify(meta.sequence) !== JSON.stringify(session.livenessChallenge?.flashSequence)) throw new AppError("VALIDATION_ERROR", "flash upload needs a valid colour sequence");
     label = FLASH_LABEL;
     fileMeta = {
       sequence: meta.sequence,
@@ -219,13 +220,15 @@ async function handleUpload({ scopedDb, tenantUid, sessionUid, sdkToken, kind, s
   const decoded = decodeImage(imageBase64);
   const sanitized = await sanitizeImage(decoded.buffer);
 
+  let staging;
   const stored = await saveEvidence({
     tenantUid,
     sessionUid,
     fileType,
     buffer: sanitized.buffer,
     retentionDays,
-    baseDir: evidenceDir
+    baseDir: evidenceDir,
+    onPrepared: async storagePath => { staging = await scopedDb.db.evidenceStaging.create({ data: { storagePath, status: "pending" } }); }
   });
 
   // Best-effort Cloudinary mirror for visual review/comparison. The filename
@@ -236,7 +239,8 @@ async function handleUpload({ scopedDb, tenantUid, sessionUid, sdkToken, kind, s
     sessionUid,
     fileType,
     label,
-    buffer: sanitized.buffer
+    buffer: sanitized.buffer,
+    onPrepared: async publicId => { await scopedDb.db.evidenceStaging.update({ where: { id: staging.id }, data: { cloudinaryPublicId: publicId } }); }
   });
 
   // P0 binding: stamp liveness frames with the challenge nonce and an HMAC
@@ -249,14 +253,31 @@ async function handleUpload({ scopedDb, tenantUid, sessionUid, sdkToken, kind, s
   const mode = fileType === "liveness_frame"
     ? (kind === "flash" ? "auto" : CAPTURE_MODES.has(captureMode) ? captureMode : "unknown")
     : null;
-  const binding = fileType === "liveness_frame" && currentNonce && stored.checksum
+  const boundNonce = currentNonce || session.attemptId;
+  const binding = boundNonce && stored.checksum
     ? {
-        challengeNonce: currentNonce,
-        bindingHmac: computeFrameBinding(config.sdkTokenSecret, currentNonce, label, stored.checksum)
+        challengeNonce: boundNonce,
+        bindingHmac: computeFrameBinding(config.sdkTokenSecret, boundNonce, label || fileType, stored.checksum, session.attemptId ? [session.tenantId, session.id, session.attemptId, fileType, mode, fileMeta] : undefined)
       }
     : {};
 
-  await scopedDb.evidence.create({
+  try {
+    await scopedDb.transaction(async tx => {
+      const current = await tx.sessions.findByUid(sessionUid);
+      validateAttempt(current, sdkToken, attemptId);
+      if (!["created", "started"].includes(current.status) || current.livenessChallenge?.nonce !== session.livenessChallenge?.nonce) throw new AppError("VALIDATION_ERROR", "Capture attempt changed or was submitted");
+      if (current.expiresAt && new Date(current.expiresAt) < new Date()) throw new AppError("SESSION_EXPIRED");
+      const rows = await tx.evidence.listForSession(session.id);
+      const currentRows = rows.filter(e => session.attemptId ? e.attemptId === session.attemptId : inAttempt(e));
+      if (rows.length >= MAX_EVIDENCE_PER_SESSION) throw new AppError("VALIDATION_ERROR", "Evidence upload limit reached");
+      const count = currentRows.filter(e => e.fileType === fileType && (fileType !== "liveness_frame" || e.label === label)).length;
+      const max = kind === "flash" ? MAX_FLASH_MOSAICS : fileType === "liveness_frame" ? MAX_LIVENESS_FRAMES_PER_ACTION : MAX_SELFIES_PER_SESSION;
+      if (count >= max) throw new AppError("VALIDATION_ERROR", "Evidence upload limit reached for this capture");
+      const reserved = await tx.db.evidenceStaging.deleteMany({ where: { id: staging.id, status: "pending" } });
+      if (!reserved.count) throw new AppError("VALIDATION_ERROR", "Capture expired during upload; retry");
+      // A write to the session serializes upload commits against submit/retry.
+      await tx.sessions.update(sessionUid, { status: "started", revision: { increment: 1 } });
+      await tx.evidence.create({
     sessionId: session.id,
     fileType,
     label,
@@ -268,11 +289,24 @@ async function handleUpload({ scopedDb, tenantUid, sessionUid, sdkToken, kind, s
     encrypted: true,
     retentionExpiresAt: stored.retentionExpiresAt,
     cloudinaryUrl: cloud?.url || null,
-    cloudinaryPublicId: cloud?.publicId || null
-  });
-
-  if (session.status === "created") {
-    await scopedDb.sessions.update(sessionUid, { status: spec.nextStatus });
+    cloudinaryPublicId: cloud?.publicId || null,
+        attemptId: session.attemptId || null
+      });
+    });
+  } catch (err) {
+    let cleanupFailed = false;
+    await deleteEvidence(stored.storagePath).catch(() => { cleanupFailed = true; });
+    if (cloud?.publicId && !await destroyEvidenceImage(cloud.publicId).catch(() => false)) cleanupFailed = true;
+    let queued = false;
+    if (cleanupFailed) {
+      queued = await require("./outbox").addOutbox(scopedDb.db, "cleanup_evidence", { storagePath: stored.storagePath, cloudinaryPublicId: cloud?.publicId || null })
+        .then(() => true)
+        .catch(() => { console.error("EVIDENCE_CLEANUP_REQUIRES_RECONCILIATION", { storagePath: stored.storagePath, cloudinaryPublicId: cloud?.publicId || null }); return false; });
+    }
+    // The staging row only needs to survive when nothing else will clean the
+    // object up (reconcileEvidence sweeps it after 30 min); otherwise drop it.
+    if (staging && (!cleanupFailed || queued)) await scopedDb.db.evidenceStaging.deleteMany({ where: { id: staging.id } }).catch(() => {});
+    throw err;
   }
 
   return {
@@ -285,7 +319,7 @@ async function handleUpload({ scopedDb, tenantUid, sessionUid, sdkToken, kind, s
     checksum: stored.checksum,
     sizeBytes: sanitized.buffer.length,
     cloudinaryUrl: cloud?.url || null,
-    cloudinaryPublicId: cloud?.publicId || null
+    cloudinaryPublicId: cloud?.publicId || null,
   };
 }
 

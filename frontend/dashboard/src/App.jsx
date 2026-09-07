@@ -13,6 +13,11 @@ const STATUS_COLORS = {
 
 // Human-readable labels for decision reason codes
 const REASON_LABELS = {
+  LIVENESS_POLICY_UNVERIFIED: "Liveness policy requires validation for automatic approval",
+  LIVENESS_EVIDENCE_INSUFFICIENT: "Insufficient distinct movement evidence",
+  LIVENESS_IDENTITY_UNAVAILABLE: "Challenge identity could not be verified",
+  LIVENESS_CHALLENGE_SEQUENCE_INVALID: "Challenge actions out of order or too slow",
+  LIVENESS_DIRECTION_INCONSISTENT: "Left/right turns were not in opposite directions",
   LIVENESS_FAILED: "Liveness check failed",
   LIVENESS_BORDERLINE: "Liveness score in borderline range",
   LIVENESS_CHALLENGE_FAILED: "Liveness challenge failed",
@@ -450,9 +455,15 @@ function SessionDetail({ sessionId, onClose }) {
             )}
             {data.diagnostics?.pipelineVersion && (
               <p style={{ fontSize: 11, color: "#9CA3AF", margin: "0 0 12px" }}>
-                Judged by pipeline {data.diagnostics.pipelineVersion}
+                Judged by pipeline {data.diagnostics.pipelineVersion}{data.release?.commit ? ` · build ${String(data.release.commit).slice(0, 7)}` : ""}{data.release?.policyVersion && data.release.policyVersion !== data.diagnostics.pipelineVersion ? ` · policy ${data.release.policyVersion}` : ""}
               </p>
             )}
+            {data.policy && <div style={{ padding: 12, background: "#F9FAFB", borderRadius: 8, marginBottom: 12, fontSize: 13 }}>
+              <strong>Liveness policy {data.policy.version}</strong>
+              <p>Capture order is enforced. Direction consistency is {data.policy.consistency === "reject" || data.policy.consistency === "enforced" ? "enforced" : data.policy.consistency === "review" ? "reviewed, not auto-rejected" : "recorded only (the pose model's turn direction is not reliable enough to act on)"}. Each action needs at least {data.policy.minimumDistinctFrames} distinct observations. Identity continuity is judged on the best frontal frame; missing frontal evidence requires review.</p>
+              <p>Screen illumination and texture measurements are experimental; screen illumination is opt-in per user, so an enforcing tenant sees users who decline it here. Camera labels and capture timing are advisory signals.</p>
+              <p>{data.policy.validated ? "This deployment declares validation for this policy version." : "Validation for automatic production approval has not been recorded."}</p>
+            </div>}
             {/* v5 E2: active-liveness evidence for the reviewer */}
             {data.livenessChallenge && <ChallengeDetail lc={data.livenessChallenge} identity={data.livenessIdentity} telemetry={data.captureTelemetry} signals={data.livenessSignals} />}
             <div style={rowStyle}>

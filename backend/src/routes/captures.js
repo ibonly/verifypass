@@ -10,7 +10,7 @@ const { tenantScope } = require("../middleware/tenantScope");
 const { handleUpload } = require("../services/uploadService");
 const { enqueue } = require("../services/jobService");
 const { audit } = require("../services/auditLogger");
-const { AppError } = require("@verifypass/shared");
+const { AppError, DEFAULT_TTL_MS, SEQUENCE_LIMITS } = require("@verifypass/shared");
 
 const router = express.Router();
 const { standardLimiters } = require("../middleware/rateLimit");
@@ -26,7 +26,8 @@ function uploadRoute(kind) {
         scopedDb: req.scopedDb,
         tenantUid: req.tenant.tenantUid,
         sessionUid: req.params.sessionId,
-        sdkToken: req.body?.sdkToken,
+        sdkToken: req.headers["x-vp-sdk-token"] || req.body?.sdkToken,
+        attemptId: req.body?.attemptId,
         kind,
         side: req.body?.side,
         action: req.body?.action,
@@ -65,27 +66,9 @@ router.post("/:sessionId/flash", bigBody, ...sdkAuth, uploadRoute("flash"));
 // POST /v1/verification-sessions/:sessionId/verify (PRD §12.5)
 router.post("/:sessionId/verify", bigBody, ...sdkAuth, async (req, res, next) => {
   try {
-    const session = await req.scopedDb.sessions.findByUid(req.params.sessionId);
-    if (!session) throw new AppError("SESSION_NOT_FOUND");
-    if (session.status !== "started") {
-      throw new AppError("VALIDATION_ERROR", `cannot verify a session in status '${session.status}' (upload captures first)`);
-    }
-    const { verifySdkToken, attachDeviceInfo } = require("../services/sessionService");
-    if (!req.body?.sdkToken || !verifySdkToken(session.sessionUid, req.body.sdkToken, session.sdkTokenHash)) {
-      throw new AppError("INVALID_API_KEY", "invalid SDK token for this session");
-    }
-
-    // Device fingerprint + client IP for fraud-signal checks (Phase 2)
-    const clientIp = req.ip || req.socket?.remoteAddress || null;
-    await attachDeviceInfo(req.scopedDb, req.tenant.tenantUid, session.sessionUid, req.body?.device, clientIp, req.body?.capture, req.body?.telemetry);
-
-    await req.scopedDb.sessions.update(session.sessionUid, { status: "submitted" });
-    await enqueue("run_verification", { sessionUid: session.sessionUid, tenantId: String(req.tenant.id) });
-    await audit({
-      tenantId: req.tenant.id, sessionId: session.id, actorType: "api",
-      actorId: `key:${req.apiKey.prefix}`, action: "session.submitted", req
-    });
-    res.status(202).json({ success: true, sessionId: session.sessionUid, status: "submitted" });
+    const { submitSession } = require("../services/sessionService");
+    const result = await submitSession(req.scopedDb, req.params.sessionId, req.body?.sdkToken, req.body?.attemptId, { tenantUid: req.tenant.tenantUid, device: req.body?.device, clientIp: req.ip, capture: req.body?.capture, telemetry: req.body?.telemetry });
+    res.status(202).json(result);
   } catch (err) {
     next(err);
   }
@@ -105,6 +88,7 @@ router.post("/:sessionId/retry", bigBody, ...sdkAuth, async (req, res, next) => 
     const payload = await retrySession(req.scopedDb, req.params.sessionId, req.body?.sdkToken, {
       tenantId: req.tenant.id,
       actorId: `key:${req.apiKey.prefix}`,
+      attemptId: req.body?.attemptId,
       req
     });
     res.json(payload);
@@ -120,9 +104,24 @@ router.post("/:sessionId/challenge/reissue", bigBody, ...sdkAuth, async (req, re
   try {
     const { reissueChallenge } = require("../services/sessionService");
     const payload = await reissueChallenge(req.scopedDb, req.params.sessionId, req.body?.sdkToken, {
-      excludeActions: req.body?.excludeActions, tenantId: req.tenant.id, actorId: `key:${req.apiKey.prefix}`, req
+      attemptId: req.body?.attemptId, excludeActions: req.body?.excludeActions, tenantId: req.tenant.id, actorId: `key:${req.apiKey.prefix}`, req
     });
     res.json(payload);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /v1/verification-sessions/:sessionId/challenge/begin — the SDK has
+// reached the liveness step: start the challenge clock now. The challenge TTL
+// and the issue→first-frame window run from here, not from session creation
+// (consent, camera permission and document capture come first). Idempotent
+// once a frame exists for the current challenge; returns the deadlines the
+// UI should surface. Logic in sessionService.beginChallenge.
+router.post("/:sessionId/challenge/begin", bigBody, ...sdkAuth, async (req, res, next) => {
+  try {
+    const { beginChallenge } = require("../services/sessionService");
+    res.json(await beginChallenge(req.scopedDb, req.params.sessionId, req.body?.sdkToken, { attemptId: req.body?.attemptId }));
   } catch (err) {
     next(err);
   }
@@ -167,6 +166,8 @@ router.get("/:sessionId/status", ...sdkAuth, async (req, res, next) => {
       success: true,
       sessionId: session.sessionUid,
       status: session.status,
+      attemptId: session.attemptId || null,
+      release: require("../lib/release").releaseIdentity(),
       ...(terminal ? { decision: { status: session.status, reasonCodes: codes } } : {})
     });
   } catch (err) {
@@ -181,6 +182,9 @@ const USER_SAFE_REASON_CODES = new Set([
   "LIVENESS_FAILED", "LIVENESS_BORDERLINE",
   "LIVENESS_CHALLENGE_FAILED", "LIVENESS_CHALLENGE_INCOMPLETE", "LIVENESS_CHALLENGE_EXPIRED",
   "LIVENESS_POSE_UNAVAILABLE",
+  // Sequence timing is usually a genuine user who was slow or paused, not a
+  // fraud signal worth hiding — tell them to try again.
+  "LIVENESS_CHALLENGE_SEQUENCE_INVALID",
   "FACE_MATCH_FAILED", "FACE_MATCH_BORDERLINE",
   "NO_FACE_ON_SELFIE", "NO_FACE_ON_DOCUMENT", "MULTIPLE_FACES_DETECTED",
   "DOCUMENT_IMAGE_LOW_QUALITY", "DOCUMENT_OCR_FAILED", "DOCUMENT_EXPIRED", "DOCUMENT_IS_LIVE_FACE",
@@ -209,13 +213,24 @@ router.get("/:sessionId/challenge", ...sdkAuth, async (req, res, next) => {
       success: true,
       sessionId: session.sessionUid,
       verificationType: session.verificationType || "ID_AND_FACE",
+      hostedBaseUrl: require("../config").hostedBaseUrl,
       // Two-sided document types (voter's card, driver's licence) tell the
       // SDK to add a back-of-ID capture step.
       documentTypes: Array.isArray(session.documentTypes) ? session.documentTypes : [],
       livenessActions: Array.isArray(session.livenessChallenge?.actions) ? session.livenessChallenge.actions : [],
-      attempts: priorRetries + 1,
+      attemptId: session.attemptId || null,
+      flashSequence: session.livenessChallenge?.flashSequence || null,
+      challengeNonce: session.livenessChallenge?.nonce || null,
+      // Both clocks, so the UI can show them together: the challenge TTL and
+      // the first-frame window count from challengeIssuedAt (refreshed by
+      // POST /challenge/begin); expiresAt is the session's own deadline.
+      challengeIssuedAt: session.livenessChallenge?.issuedAt || null,
+      challengeTtlMs: DEFAULT_TTL_MS,
+      firstFrameWindowMs: SEQUENCE_LIMITS.maxIssueToFirstMs,
+      expiresAt: session.expiresAt,
+      attempts: session.attemptNumber || priorRetries + 1,
       maxAttempts: RETRY_MAX_ATTEMPTS,
-      manualUploadSuggested: priorRetries + 1 > RETRY_MANUAL_UPLOAD_AFTER
+      manualUploadSuggested: (session.attemptNumber || priorRetries + 1) > RETRY_MANUAL_UPLOAD_AFTER
     });
   } catch (err) {
     next(err);

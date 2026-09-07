@@ -29,7 +29,7 @@ const FLASH = Object.freeze({
   minScore: 0.5,     // correlation at/above this = the face answered the flash
   minMagnitude: 3,   // colour variation below this = the face did not answer (no_response)
   maxBaselineLuma: 200, // baseline brighter than this (daylight) → inconclusive
-  tile: 96           // px, square tiles in the mosaic
+  tile: 160          // px, square tiles in the mosaic (96 was too small for the per-tile identity check)
 });
 
 /** n distinct palette colours; rng() in [0,1). */

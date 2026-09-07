@@ -19,7 +19,7 @@ const KEY = crypto.randomBytes(32);
 function stubProvider(overrides = {}) {
   return {
     name: "stub",
-    checkLiveness: async () => ({ score: 0.95, faceCount: 1, occluded: false, raw: {}, ...(overrides.liveness || {}) }),
+    checkLiveness: async (buf) => ({ pose: buf.toString("utf8", 0, 8) === '{"pose":' ? JSON.parse(buf.toString()).pose : null, score: 0.95, faceCount: 1, occluded: false, raw: {}, ...(overrides.liveness || {}) }),
     compareFaces: async () => ({ score: 0.9, idFaceFound: true, raw: {}, ...(overrides.faceMatch || {}) }),
     extractDocument: async () => ({
       available: true, ocrConfidence: 0.94,
@@ -37,14 +37,26 @@ async function seed({ settings = {}, withSelfie = true, withId = true, type = "I
     data: {
       sessionUid: "vps_PIPE1", tenantId: tenant.id, status: "submitted",
       verificationType: type, isLive: false,
-      livenessChallenge: withChallenge ? { actions: ["turn_left"], nonce: "nonce" } : null
+      livenessChallenge: withChallenge ? { actions: ["turn_left"], nonce: "nonce" } : type === "ID_ONLY" ? null : { actions: ["turn_left", "turn_right"], nonce: "baseline", issuedAt: new Date(Date.now() - 10000).toISOString() }
     }
   });
 
+  let fileNo = 0;
   async function addEvidence(fileType, extra = {}) {
-    const p = path.join(dir, `${fileType}${extra.label || ""}${extra.createdAt ? extra.createdAt.getTime() : ""}.enc`);
-    await fs.writeFile(p, encryptBuffer(crypto.randomBytes(2000), KEY));
-    await db.evidenceFile.create({ data: { sessionId: session.id, fileType, storagePath: p, encrypted: true, ...extra } });
+    const p = path.join(dir, `${++fileNo}.enc`);
+    const plain = extra.plain || (extra.checksum ? Buffer.from(extra.checksum.repeat(2000)) : crypto.randomBytes(2000));
+    const checksum = crypto.createHash("sha256").update(plain).digest("hex");
+    const row = { ...extra, checksum };
+    delete row.plain;
+    if (row.bindingHmac && row.bindingHmac !== "0".repeat(64)) row.bindingHmac = require("@verifypass/shared").computeFrameBinding(require("../src/config").sdkTokenSecret, row.challengeNonce, row.label, checksum);
+    await fs.writeFile(p, encryptBuffer(plain, KEY));
+    await db.evidenceFile.create({ data: { sessionId: session.id, fileType, storagePath: p, encrypted: true, ...row } });
+  }
+  if (!withChallenge && type !== "ID_ONLY") {
+    let i = 0;
+    for (const action of ["turn_left", "turn_right"]) for (const yaw of [0, 10, 20]) {
+      await addEvidence("liveness_frame", { label: action, captureMode: "auto", challengeNonce: "baseline", bindingHmac: "auto", createdAt: new Date(Date.now() - 9000 + i++ * 500), plain: Buffer.from(JSON.stringify({ pose: { yaw: action === "turn_left" ? -yaw : yaw, pitch: 0 }, i })) });
+    }
   }
   if (withId) await addEvidence("id_front");
   if (withSelfie) await addEvidence("selfie");
@@ -185,9 +197,11 @@ test("genuine card: doc image scores Spoof (it IS a printed photo) → no flag",
   const { db } = await seed();
   const provider = stubProvider();
   let call = 0;
-  provider.checkLiveness = async () => {
+  const original = provider.checkLiveness;
+  provider.checkLiveness = async (buf) => {
     call++;
     // 1st call = selfie (Real), later call = ID image (Spoof — expected!)
+    if (call > 2) return original(buf);
     return call === 1
       ? { score: 0.95, verdict: "Real", faceCount: 1, occluded: false, raw: {} }
       : { score: 0.1, verdict: "Spoof", faceCount: 1, occluded: false, raw: {} };
@@ -297,7 +311,7 @@ test("challenge frames uploaded AFTER the reissue verify normally", async () => 
   await addEvidence("liveness_frame", { label: "smile", createdAt: new Date(now + 30 * 1000) });
 
   const out = await runVerification({ sessionUid: "vps_PIPE1" }, { db, provider: stubProvider(), evidenceKey: KEY });
-  assert.equal(out.status, "approved", `got ${out.reasonCodes}`);
+  assert.equal(out.status, "manual_review", `got ${out.reasonCodes}`);
 });
 
 test("tenant thresholds from settings are applied", async () => {
@@ -436,7 +450,7 @@ test("FV-1: distinct frame per action verifies normally", async () => {
   // signal reaching the movement threshold (smile is exempt — no pose flag).
   const provider = stubProvider({ liveness: { pose: { yaw: -20, pitch: 0 } } });
   const out = await runVerification({ sessionUid: "vps_PIPE1" }, { db, provider, evidenceKey: KEY });
-  assert.equal(out.status, "approved", `got ${out.reasonCodes}`);
+  assert.equal(out.status, "manual_review", `got ${out.reasonCodes}`);
 });
 
 test("P0 binding: nonce-matching frame with a bad HMAC → LIVENESS_FRAME_BINDING_FAILED (not INCOMPLETE)", async (t) => {
@@ -475,7 +489,8 @@ test("P0 binding: correctly bound frame verifies end-to-end", async (t) => {
 
   const provider = stubProvider({ liveness: { pose: { yaw: -20, pitch: 0 } } });
   const out = await runVerification({ sessionUid: "vps_PIPE1" }, { db, provider, evidenceKey: KEY });
-  assert.equal(out.status, "approved", `got ${out.reasonCodes}`);
+  assert.equal(out.status, "manual_review", `got ${out.reasonCodes}`);
+  assert.ok(out.reasonCodes.includes("LIVENESS_EVIDENCE_INSUFFICIENT"));
   const r = await db.verificationResult.findFirst({ where: { sessionId: session.id } });
   assert.equal(r.rawResult.livenessChallenge.bindingRejected, 0);
 });
@@ -504,8 +519,9 @@ test("v5 A4/C3: challenge performer must match the selfie; decision liveness use
   const now = Date.now();
   await db.verificationSession.updateMany({ where: { id: session.id }, data: { livenessChallenge: { version: 1, actions: ["turn_left"], nonce: "n-id", issuedAt: new Date(now).toISOString() } } });
   await addEvidence("liveness_frame", { label: "turn_left", checksum: "c1", createdAt: new Date(now + 1000), challengeNonce: "n-id", bindingHmac: computeFrameBinding(secret, "n-id", "turn_left", "c1") });
-  // provider: selfie↔ID matches (first compareFaces call), selfie↔challenge frame does NOT (second call)
-  const provider = stubProvider({ liveness: { pose: { yaw: -20, pitch: 0 } } });
+  // provider: selfie↔ID matches (first compareFaces call), selfie↔challenge frame does NOT (second call).
+  // The frame is frontal (|yaw| ≤ 15°) so it qualifies for identity continuity.
+  const provider = stubProvider({ liveness: { pose: { yaw: -10, pitch: 0 } } });
   let calls = 0;
   provider.compareFaces = async () => ({ score: ++calls === 1 ? 0.9 : 0.2, idFaceFound: true, raw: {} });
   const out = await runVerification({ sessionUid: "vps_PIPE1" }, { db, provider, evidenceKey: KEY });
@@ -516,28 +532,111 @@ test("v5 A4/C3: challenge performer must match the selfie; decision liveness use
   assert.ok(r.rawResult.liveness.passiveAggregate && r.rawResult.liveness.passiveAggregate.n >= 2);
 });
 
-test("v7 1.1 screen-flash: mosaic scored against the emitted sequence; review only when enforced", async () => {
-  const { computeFrameBinding } = require("@verifypass/shared");
-  const secret = require("../src/config").sdkTokenSecret;
-  const seq = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255]];
-  const base = [110, 90, 80];
-  const respond = () => [base, ...seq.map((c) => c.map((v, ch) => base[ch] + 14 * v / 255 + 1))];
-  const flat = () => [base, ...seq.map(() => base.map((v) => v + 1))];
+test("screen-flash: unsigned mosaic cannot satisfy an enforced flash policy", async () => {
+  const { db, session, addEvidence } = await seed({ settings: { challenge: { enforceFlash: true } } });
+  await addEvidence("liveness_frame", { label: "flash", challengeNonce: "baseline", meta: { sequence: [[255,0,0],[0,255,0],[0,0,255],[255,255,255]], tile: 96 } });
+  const out = await runVerification({ sessionUid: "vps_PIPE1" }, { db, provider: stubProvider(), evidenceKey: KEY });
+  assert.equal(out.status, "manual_review");
+  assert.ok(out.reasonCodes.includes("LIVENESS_FLASH_UNVERIFIED"));
+  const r = await db.verificationResult.findFirst({ where: { sessionId: session.id } });
+  assert.equal(r.rawResult.liveness.flash.ok, null);
+});
 
-  for (const [tileMeans, enforce, expectStatus, expectOk] of [[respond, false, "approved", true], [flat, false, "approved", false], [flat, true, "manual_review", false]]) {
-    const { db, session, addEvidence } = await seed({ settings: enforce ? { challenge: { enforceFlash: true } } : {} });
-    const now = Date.now();
-    await db.verificationSession.updateMany({ where: { id: session.id }, data: { livenessChallenge: { version: 1, actions: ["turn_left"], nonce: "n-fl", issuedAt: new Date(now).toISOString() } } });
-    await addEvidence("liveness_frame", { label: "turn_left", checksum: "c1", createdAt: new Date(now + 1000), challengeNonce: "n-fl", bindingHmac: computeFrameBinding(secret, "n-fl", "turn_left", "c1") });
-    await addEvidence("liveness_frame", { label: "flash", checksum: "cf", createdAt: new Date(now + 2000), challengeNonce: "n-fl", meta: { sequence: seq, baselineIndex: 0, tile: 96 } });
-    const provider = stubProvider({ liveness: { pose: { yaw: -20, pitch: 0 } } });
-    const out = await runVerification({ sessionUid: "vps_PIPE1" }, { db, provider, evidenceKey: KEY, flashTileMeans: async () => tileMeans() });
-    assert.equal(out.status, expectStatus, `enforce=${enforce}: ${out.reasonCodes}`);
-    const r = await db.verificationResult.findFirst({ where: { sessionId: session.id } });
-    assert.equal(r.rawResult.liveness.flash.ok, expectOk);
-    assert.deepEqual(r.rawResult.liveness.flash.sequence, seq);
-    // the mosaic is never counted as a challenge frame
-    assert.deepEqual(Object.keys(r.rawResult.livenessChallenge.perAction), ["turn_left"]);
-    if (enforce) assert.ok(out.reasonCodes.includes("LIVENESS_FLASH_UNVERIFIED"));
-  }
+test("hardening: result insertion failure rolls back decision, audit and outbox", async () => {
+  const { db, session } = await seed();
+  const original = db.verificationResult.create;
+  db.verificationResult.create = async () => { throw new Error("injected result failure"); };
+  await assert.rejects(runVerification({ sessionUid: session.sessionUid }, { db, provider: stubProvider(), evidenceKey: KEY }), /injected result failure/);
+  assert.equal((await db.verificationSession.findFirst({ where: { id: session.id } })).status, "submitted");
+  assert.equal(db.verificationResult.rows.length, 0);
+  assert.equal(db.outbox.rows.length, 0);
+  assert.equal(db.auditLog.rows.filter(r => r.action === "verification.decided").length, 0);
+  db.verificationResult.create = original;
+  assert.equal((await runVerification({ sessionUid: session.sessionUid }, { db, provider: stubProvider(), evidenceKey: KEY })).status, "approved");
+});
+
+test("hardening: stale worker payload cannot touch a new submitted attempt", async () => {
+  const { db, session } = await seed();
+  await db.verificationSession.update({ where: { id: session.id }, data: { attemptId: "new-attempt" } });
+  const out = await runVerification({ sessionUid: session.sessionUid, attemptId: "old-attempt" }, { db, provider: stubProvider(), evidenceKey: KEY });
+  assert.equal(out.skipped, true);
+  assert.equal(db.verificationResult.rows.length, 0);
+  assert.equal(session.status, "submitted");
+});
+
+test("hardening: identity provider failure reviews instead of approving", async () => {
+  const { db, session } = await seed({ type: "FACE_ONLY", withId: false });
+  const provider = stubProvider();
+  provider.compareFaces = async () => { throw new Error("identity unavailable"); };
+  const out = await runVerification({ sessionUid: session.sessionUid }, { db, provider, evidenceKey: KEY });
+  assert.equal(out.status, "manual_review");
+  assert.ok(out.reasonCodes.includes("LIVENESS_IDENTITY_UNAVAILABLE"));
+});
+
+test("hardening: good challenge frames cannot replace a failed selfie score", async () => {
+  const { db, session } = await seed();
+  const provider = stubProvider();
+  const original = provider.checkLiveness;
+  let n = 0;
+  provider.checkLiveness = async buf => ({ ...await original(buf), ...(n++ === 0 ? { score: 0.1 } : {}) });
+  const out = await runVerification({ sessionUid: session.sessionUid }, { db, provider, evidenceKey: KEY });
+  // Frames can never lift a failed selfie to approval. Passing frontal frames
+  // contradict it, so a reviewer decides; the persisted score is the selfie's.
+  assert.notEqual(out.status, "approved");
+  assert.equal(out.status, "manual_review");
+  assert.ok(out.reasonCodes.includes("LIVENESS_BORDERLINE"));
+  assert.equal(db.verificationResult.rows[0].livenessScore, 0.1);
+});
+
+test("hardening: plaintext checksum substitution is detected", async () => {
+  const { db, session } = await seed();
+  db.evidenceFile.rows.find(r => r.fileType === "selfie").checksum = "f".repeat(64);
+  await assert.rejects(runVerification({ sessionUid: session.sessionUid }, { db, provider: stubProvider(), evidenceKey: KEY }), /CHECKSUM_MISMATCH/);
+  assert.equal(session.status, "submitted");
+  assert.equal(db.verificationResult.rows.length, 0);
+});
+
+test("hardening: dispatch failure leaves one recoverable outbox record", async () => {
+  const { db, session } = await seed();
+  const out = await runVerification({ sessionUid: session.sessionUid }, { db, provider: stubProvider(), evidenceKey: KEY, enqueueJob: async () => { throw new Error("queue offline"); } });
+  assert.equal(out.status, "approved");
+  assert.equal(db.verificationResult.rows.length, 1);
+  assert.equal(db.outbox.rows[0].status, "pending");
+  assert.equal(db.outbox.rows[0].payload.snapshot.status, "approved");
+  const { flushOutbox } = require("../src/services/outbox");
+  const sent = [];
+  await flushOutbox(db, async (type, payload) => sent.push({ type, payload }));
+  await flushOutbox(db, async (type, payload) => sent.push({ type, payload }));
+  assert.equal(sent.length, 1);
+  assert.equal(db.outbox.rows[0].status, "sent");
+});
+
+test("hardening: a late inference result cannot finalize after the total deadline", async () => {
+  const { db, session } = await seed();
+  const provider = stubProvider();
+  const original = provider.checkLiveness;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  provider.checkLiveness = async buf => { await gate; return original(buf); };
+  await assert.rejects(runVerification({ sessionUid: session.sessionUid }, { db, provider, evidenceKey: KEY, budgetMs: 10 }), /DEADLINE_EXCEEDED/);
+  release();
+  await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(session.status, "submitted");
+  assert.equal(db.verificationResult.rows.length, 0);
+});
+
+test("hardening: an in-flight legacy worker cannot overwrite a retry submitted during inference", async () => {
+  const { db, session } = await seed();
+  const provider=stubProvider(), original=provider.checkLiveness;
+  let entered, release;
+  const begun=new Promise(r=>{entered=r;});
+  const gate=new Promise(r=>{release=r;});
+  provider.checkLiveness=async buf=>{entered();await gate;return original(buf);};
+  const work=runVerification({sessionUid:session.sessionUid},{db,provider,evidenceKey:KEY});
+  await begun;
+  await db.verificationSession.update({where:{id:session.id},data:{attemptId:"replacement",status:"submitted"}});
+  release();
+  assert.equal((await work).skipped,true);
+  assert.equal(session.status,"submitted");
+  assert.equal(db.verificationResult.rows.length,0);
 });
