@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-// POST /render.php (X-Email-Key) — render a template WITHOUT sending.
+// POST /render.php (HMAC authenticated) — render a template WITHOUT sending.
 // Used for previews and integration tests.
 
 require dirname(__DIR__) . '/src/bootstrap.php';

@@ -14,24 +14,27 @@ const calls = [];
 const realFetch = global.fetch;
 
 function mockMailApi(t) {
+  const environment = Object.fromEntries(["EMAIL_API_URL", "EMAIL_API_KEY", "DASHBOARD_URL", "NODE_ENV"].map(name => [name, process.env[name]]));
   process.env.EMAIL_API_URL = "https://mailer.example.test";
   process.env.EMAIL_API_KEY = "test-key-32-chars-minimum-xxxxx";
   process.env.DASHBOARD_URL = "https://app.example.test";
   global.fetch = async (url, opts) => {
-    calls.push({ url, body: JSON.parse(opts.body), rawBody: opts.body, headers: opts.headers });
+    calls.push({ url, body: JSON.parse(opts.body), rawBody: opts.body, headers: opts.headers, redirect: opts.redirect });
     return { ok: true, status: 200, json: async () => ({ success: true }) };
   };
   t.after(() => {
     global.fetch = realFetch;
-    delete process.env.EMAIL_API_URL;
-    delete process.env.EMAIL_API_KEY;
-    delete process.env.DASHBOARD_URL;
+    for (const [name, value] of Object.entries(environment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
   });
 }
 
 const user = { email: "owner@acme.test" };
 
-test("disabled mode: every helper is a safe no-op, never throws", async () => {
+test("disabled mode: every helper is a safe no-op, never throws", async (t) => {
+  mockMailApi(t);
   delete process.env.EMAIL_API_URL;
   delete process.env.EMAIL_API_KEY;
   for (const fn of [
@@ -61,15 +64,31 @@ test("verify_email embeds a 24h action token and returns its hash", async (t) =>
     .update(`v1\n${call.headers["X-Email-Timestamp"]}\n${call.headers["X-Email-Nonce"]}\n${call.rawBody}`).digest("hex");
   assert.equal(call.headers["X-Email-Signature"], expected);
   assert.equal(call.headers["X-Email-Key"], undefined);
+  assert.equal(call.redirect, "error");
 });
 
 test("production refuses a plaintext mail API URL", async (t) => {
   mockMailApi(t); calls.length = 0;
   process.env.NODE_ENV = "production";
   process.env.EMAIL_API_URL = "http://mailer.example.test";
-  t.after(() => { delete process.env.NODE_ENV; });
   await assert.rejects(email.sendWelcome(user, { companyName: "Acme" }), /must use HTTPS/);
   assert.equal(calls.length, 0);
+});
+
+test("delivery requires an explicit success acknowledgement", async (t) => {
+  mockMailApi(t);
+  for (const response of [null, {}, { success: false }, { success: "true" }]) {
+    global.fetch = async () => ({ ok: true, status: 200, json: async () => response });
+    await assert.rejects(email.sendWelcome(user, { companyName: "Acme" }), /invalid delivery acknowledgement/);
+  }
+  global.fetch = async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError("Invalid JSON"); } });
+  await assert.rejects(email.sendWelcome(user, { companyName: "Acme" }), /invalid delivery acknowledgement/);
+});
+
+test("delivery errors do not propagate arbitrary remote error content", async (t) => {
+  mockMailApi(t);
+  global.fetch = async () => ({ ok: false, status: 503, json: async () => ({ error: "private recipient data" }) });
+  await assert.rejects(email.sendWelcome(user, { companyName: "Acme" }), { message: "email api HTTP 503", status: 503 });
 });
 
 test("password_reset uses a 30-minute token and records request ip", async (t) => {

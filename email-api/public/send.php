@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-// POST /send.php  (X-Email-Key) — render a catalogue email and deliver it via
+// POST /send.php (HMAC authenticated) — render a catalogue email and deliver it via
 // SMTP immediately. Called server-to-server by the Node backend.
 
 require dirname(__DIR__) . '/src/bootstrap.php';

@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 require dirname(__DIR__) . '/src/bootstrap.php';
 
-use VpMail\{HttpException, Mailer, Renderer, RequestGuard};
+use VpMail\{HttpException, Mailer, Renderer, RequestGuard, SmtpClient};
 
 $config = require dirname(__DIR__) . '/config.example.php';
 $config['env'] = 'development';
@@ -45,6 +45,13 @@ $headers = function (string $body, ?int $timestamp = null, ?string $nonce = null
         'HTTP_X_EMAIL_SIGNATURE' => hash_hmac('sha256', "v1\n{$timestamp}\n{$nonce}\n{$body}", $config['api_key']),
     ];
 };
+
+$run('HTTP exception autoloads independently of request guard', function (): void {
+    $error = new HttpException(405, 'Method not allowed', ['Allow' => 'GET']);
+    if ($error->status !== 405 || $error->headers !== ['Allow' => 'GET']) {
+        throw new RuntimeException('HTTP exception contract changed');
+    }
+});
 
 $run('valid HMAC is accepted once', function () use ($config, $headers): void {
     $body = '{"to":"user@example.com"}';
@@ -98,6 +105,38 @@ $run('mailer rejects recipient and header injection before SMTP', function () us
             continue;
         }
         throw new RuntimeException('injection input was accepted');
+    }
+});
+
+$run('SMTP accepts complete replies and rejects truncated or oversized replies', function (): void {
+    $reflection = new ReflectionClass(SmtpClient::class);
+    $expect = $reflection->getMethod('expect');
+    foreach ([
+        ["250 OK\r\n", true],
+        ["250-STARTTLS\r\n250 AUTH LOGIN\r\n", true],
+        ["250-STARTTLS\r\n", false],
+        ["250 OK", false],
+        ["250 OK\n", false],
+        ["250-STARTTLS\r\n550 Rejected\r\n", false],
+        ["250 " . str_repeat('x', 509) . "\r\n", false],
+        [str_repeat("250-Capability\r\n", 1200) . "250 OK\r\n", false],
+    ] as [$reply, $valid]) {
+        $client = $reflection->newInstanceWithoutConstructor();
+        $stream = fopen('php://temp', 'w+');
+        fwrite($stream, $reply);
+        rewind($stream);
+        $reflection->getProperty('sock')->setValue($client, $stream);
+        try {
+            $accepted = true;
+            try {
+                $expect->invoke($client, 250);
+            } catch (RuntimeException) {
+                $accepted = false;
+            }
+            if ($accepted !== $valid) throw new RuntimeException('Unexpected SMTP reply acceptance');
+        } finally {
+            fclose($stream);
+        }
     }
 });
 

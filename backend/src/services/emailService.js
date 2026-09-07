@@ -19,7 +19,7 @@ function enabled() {
   return Boolean(BASE() && KEY());
 }
 
-/** sha256-hashed 128-bit action token (returned plaintext once, stored hashed by caller). */
+/** sha256-hashed 256-bit action token (returned plaintext once, stored hashed by caller). */
 function newActionToken() {
   const token = crypto.randomBytes(32).toString("base64url");
   return { token, hash: crypto.createHash("sha256").update(token).digest("hex") };
@@ -45,6 +45,7 @@ async function send(to, template, vars = {}, { required = false } = {}) {
   const signature = crypto.createHmac("sha256", KEY()).update(`v1\n${timestamp}\n${nonce}\n${body}`).digest("hex");
   const res = await fetch(base + "/send.php", {
     method: "POST",
+    redirect: "error",
     headers: {
       "Content-Type": "application/json",
       "X-Email-Timestamp": timestamp,
@@ -54,12 +55,13 @@ async function send(to, template, vars = {}, { required = false } = {}) {
     body,
     signal: AbortSignal.timeout(8000)
   });
-  const json = await res.json().catch(() => ({}));
+  const json = await res.json().catch(() => null);
   if (!res.ok) {
-    const err = new Error(json.error || `email api HTTP ${res.status}`);
+    const err = new Error(`email api HTTP ${res.status}`);
     err.status = res.status;
     throw err;
   }
+  if (!json || json.success !== true) throw new Error("email api returned an invalid delivery acknowledgement");
   return json;
 }
 
@@ -81,7 +83,7 @@ function sendWelcome(user, { companyName }) {
 }
 
 /** A3: team invitation. Caller stores the Invitation + tokenHash. */
-async function sendTeamInvite({ to, companyName, role, inviter, invitationId }) {
+async function sendTeamInvite({ to, companyName, role, inviter }) {
   const { token, hash } = newActionToken();
   const out = await send(to, "team_invite", {
     companyName, role, inviter,
@@ -107,7 +109,7 @@ function sendPasswordChanged(user, { ip }) {
   return send(user.email, "password_changed", { changedAt: new Date().toISOString(), ip });
 }
 
-function sendEmailChangeNotice(user, { newEmail, ip }) {
+function sendEmailChangeNotice(user, { newEmail }) {
   const { token, hash } = newActionToken();
   const masked = newEmail.replace(/^(.{1,2}).*(@.*)$/, "$1***$2");
   return send(user.email, "email_change_notice", {

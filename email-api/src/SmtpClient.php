@@ -5,7 +5,7 @@ namespace VpMail;
 
 /**
  * Minimal SMTP client (RFC 5321): EHLO, STARTTLS/SSL, AUTH LOGIN, DATA with
- * dot-stuffing. fsockopen only — no extensions beyond openssl. Throws on any
+ * dot-stuffing. PHP streams with OpenSSL. Throws on any
  * unexpected response code.
  */
 final class SmtpClient
@@ -117,21 +117,26 @@ final class SmtpClient
         $codes = (array) $code;
         $response = '';
         $responseCode = null;
-        while (($line = fgets($this->sock, 512)) !== false) {
-            if (!preg_match('/^(\d{3})([ -])/', $line, $match)) {
+        $complete = false;
+        while (($line = fgets($this->sock, 513)) !== false) {
+            if (!str_ends_with($line, "\r\n") || !preg_match('/^(\d{3})([ -])/', $line, $match)) {
                 throw new \RuntimeException('Malformed SMTP response');
             }
             $lineCode = (int) $match[1];
             $responseCode ??= $lineCode;
             if ($lineCode !== $responseCode) throw new \RuntimeException('Inconsistent SMTP response');
             $response .= $line;
-            if ($match[2] === ' ') break;
+            if (strlen($response) > 16384) throw new \RuntimeException('SMTP response too large');
+            if ($match[2] === ' ') {
+                $complete = true;
+                break;
+            }
         }
         $meta = stream_get_meta_data($this->sock);
         if (($meta['timed_out'] ?? false) === true) throw new \RuntimeException('SMTP response timed out');
-        if ($responseCode === null) throw new \RuntimeException('SMTP connection closed unexpectedly');
+        if (!$complete) throw new \RuntimeException('SMTP connection closed unexpectedly');
         if (!in_array($responseCode, $codes, true)) {
-            throw new \RuntimeException('SMTP error ' . $responseCode . ': ' . trim($response));
+            throw new \RuntimeException('SMTP error ' . $responseCode);
         }
         return $response;
     }

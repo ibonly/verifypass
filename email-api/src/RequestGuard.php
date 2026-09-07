@@ -175,12 +175,3 @@ final class RequestGuard
             && !isset($parts['user']) && !isset($parts['pass']);
     }
 }
-
-final class HttpException extends \RuntimeException
-{
-    /** @param array<string,string> $headers */
-    public function __construct(public readonly int $status, string $message, public readonly array $headers = [])
-    {
-        parent::__construct($message);
-    }
-}
