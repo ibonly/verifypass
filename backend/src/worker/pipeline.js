@@ -578,6 +578,24 @@ async function finalize(db, session, { decision, resultRow, dispatch, assertActi
     return true;
   });
   await flushOutbox(db, send).catch(() => {});
+  // C1: a case landing in manual_review notifies the tenant's reviewers.
+  // Fire-and-forget after commit so mail latency/failure never stalls the worker.
+  if (committed && decision.status === "manual_review") {
+    const email = require("../services/emailService");
+    if (email.enabled()) {
+      (async () => {
+        const realDb = require("../lib/db").getDb();
+        const tenant = await realDb.tenant.findFirst({ where: { id: String(session.tenantId) } });
+        const waiting = await realDb.verificationSession.findMany({ where: { tenantId: String(session.tenantId), status: "manual_review" } });
+        const oldest = waiting.reduce((m, s) => (s.createdAt < m ? s.createdAt : m), new Date());
+        const oldestWait = `${Math.max(0, Math.round((Date.now() - new Date(oldest)) / 60000))} min`;
+        const reviewersList = await realDb.user.findMany({ where: { tenantId: String(session.tenantId), role: { in: ["tenant_admin", "compliance_reviewer"] }, status: "active" } });
+        for (const user of reviewersList) {
+          await email.sendReviewWaiting(user, { companyName: tenant?.companyName || "your workspace", pendingCount: waiting.length, oldestWait });
+        }
+      })().catch(err => console.error("review-waiting email failed:", err.message));
+    }
+  }
   return committed;
 }
 

@@ -9,6 +9,7 @@
     "dev:backend": "node scripts/dev-stack.js",
     "test": "npm test --prefix backend && npm test --prefix frontend/sdk/core && npm test --prefix frontend/dashboard",
     "test:backend": "npm test --prefix backend",
+    "test:email": "php email-api/test/self-test.php && php email-api/test/security-test.php && node --test backend/tests/emailTriggers.test.js",
     "test:sdk": "npm test --prefix frontend/sdk/core",
     "build": "npm run prisma:validate --prefix backend && npm run prisma:generate --prefix backend && (cd frontend/sdk/js && npm run build) && (cd frontend/dashboard && npm run build) && (cd frontend/verify-page && npm run build) && (cd sample-app && npm run build)",
     "models:fetch": "node backend/scripts/fetch-models.js",

@@ -65,6 +65,23 @@ const RETRY_SCHEDULE_SECONDS = [60, 300, 1800, 7200, 43200];
 const MAX_ATTEMPTS = RETRY_SCHEDULE_SECONDS.length;
 const TIMEOUT_MS = 10000;
 
+// C3: alert tenant admins when delivery is exhausted — the primary channel
+// (webhook) is the thing that broke, so email is the fallback. Throttled
+// per-tenant via the queue's idempotency; fire-and-forget.
+function notifyWebhookExhausted(tenant, delivery, attempts, error) {
+  const email = require("../services/emailService");
+  if (!email.enabled()) return;
+  (async () => {
+    const { getDb } = require("../lib/db");
+    const host = tenant.webhookUrl ? new URL(tenant.webhookUrl).host : "unknown";
+    const errorClass = /SSRF/.test(error) ? "blocked address" : /HTTP/.test(error) ? error : "connection/timeout";
+    const admins = await getDb().user.findMany({ where: { tenantId: String(tenant.id), role: "tenant_admin", status: "active" } });
+    for (const admin of admins) {
+      await email.sendWebhookFailing(admin, { endpointHost: host, errorClass, attempts });
+    }
+  })().catch(err => console.error("webhook-exhausted email failed:", err.message));
+}
+
 /**
  * @param {object} payload job payload:
  *   fresh event: {tenantId, sessionUid, event}
@@ -149,6 +166,8 @@ async function sendWebhook(payload, deps = {}) {
   if (!exhausted) {
     // scheduling is managed here, not by generic job retry
     await dispatch("send_webhook", { deliveryId: delivery.id }, { runAfter: nextAt, maxAttempts: 1 });
+  } else {
+    notifyWebhookExhausted(tenant, delivery, attempts, error || "unknown");
   }
   return { delivered: false, attempts, exhausted };
 }

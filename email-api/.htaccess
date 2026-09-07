@@ -1,0 +1,2 @@
+# Only email-api/public/ is web-exposed. This denies everything else.
+Require all denied

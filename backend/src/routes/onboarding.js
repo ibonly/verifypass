@@ -10,8 +10,24 @@ const { createSession } = require("../services/sessionService");
 const { enqueue } = require("../services/jobService");
 const { validateRetention, validateReview } = require("../services/settingsService");
 const { validateProfile, validateWebhookUrl, onboardingStatus, saveOnboarding } = require("../services/onboardingService");
+const email = require("../services/emailService");
+const { getDb } = require("../lib/db");
 
 const router = Router();
+
+function notify(promise) { Promise.resolve(promise).catch(err => console.error("email trigger failed:", err.message)); }
+
+// Notify all tenant admins of a webhook configuration change (B5).
+function notifyWebhookChanged(tenant, actor) {
+  if (!email.enabled()) return;
+  (async () => {
+    const host = tenant.webhookUrl ? new URL(tenant.webhookUrl).host : "none";
+    const admins = await getDb().user.findMany({ where: { tenantId: String(tenant.id), role: "tenant_admin", status: "active" } });
+    for (const admin of admins) {
+      await email.sendWebhookChanged(admin, { companyName: tenant.companyName, endpointHost: host, secretRotated: true, actor });
+    }
+  })().catch(err => console.error("webhook-changed email failed:", err.message));
+}
 router.use(requireUser("tenant_admin", "super_admin"), (req, res, next) => {
   res.setHeader("Cache-Control", "no-store");
   if (!req.tenant) return next(new AppError("VALIDATION_ERROR", "Select a tenant to begin onboarding"));
@@ -46,6 +62,7 @@ router.put("/webhook", route(async (req, res) => {
   const secret = `whsec_${crypto.randomBytes(24).toString("base64url")}`;
   await saveOnboarding(req.tenant, { deliveryMethod: "webhook" }, { webhookUrl: url, webhookSecret: secret });
   await log(req, "webhook.config_updated", { url });
+  notifyWebhookChanged({ ...req.tenant, webhookUrl: url }, req.user.email);
   res.json({ success: true, url, secret });
 }));
 router.post("/webhooks/:eventId/retry", route(async (req, res) => {
@@ -86,5 +103,25 @@ router.post("/complete", route(async (req, res) => {
     await log(req, "onboarding.completed");
   }
   res.json(await onboardingStatus(req.tenant, req.user));
+}));
+
+// POST /v1/onboarding/request-production — tenant asks ops for live access (C6)
+router.post("/request-production", route(async (req, res) => {
+  const status = await onboardingStatus(req.tenant, req.user);
+  if (!status.ready) throw new AppError("VALIDATION_ERROR", "Complete the setup checklist before requesting production access");
+  await saveOnboarding(req.tenant, { productionRequestedAt: new Date().toISOString() });
+  await log(req, "onboarding.production_requested");
+  const opsAddress = process.env.OPS_ALERT_EMAIL || null;
+  if (email.enabled() && opsAddress) {
+    const testSessions = await getDb().verificationSession.findMany({ where: { tenantId: req.tenant.id, isLive: false, status: { in: ["approved", "rejected", "manual_review"] } } });
+    notify(email.sendProductionRequestOps(opsAddress, {
+      companyName: req.tenant.companyName,
+      tenantUid: req.tenant.tenantUid,
+      contactEmail: status.profile?.contactEmail || req.user.email,
+      checklistSummary: Object.entries(status.steps).map(([k, v]) => `${k}:${v ? "done" : "pending"}`).join(", "),
+      testSessions: testSessions.length
+    }));
+  }
+  res.json({ success: true, requested: true });
 }));
 module.exports = router;

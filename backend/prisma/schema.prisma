@@ -79,8 +79,19 @@ model User {
   passwordHash String   @map("password_hash")
   role         UserRole
   mfaSecret    String?  @map("mfa_secret")
-  status       String   @default("active")
+  status       String   @default("active") // active | invited
   createdAt    DateTime @default(now()) @map("created_at")
+
+  // Email lifecycle (docs/EMAIL_REQUIREMENTS.md). Token fields store sha256
+  // hashes only — plaintext travels in the email link once.
+  emailVerifiedAt    DateTime? @map("email_verified_at")
+  pendingEmail       String?   @map("pending_email")
+  emailVerificationToken Json? @map("email_verification_token")
+  passwordResetToken      Json? @map("password_reset_token")
+  emailChangeCancelToken  Json? @map("email_change_cancel_token")
+  pendingEmailToken       Json? @map("pending_email_token")
+  inviteToken             Json? @map("invite_token")
+  knownLoginIps           Json? @map("known_login_ips")
 
   tenant Tenant? @relation(fields: [tenantId], references: [id])
 

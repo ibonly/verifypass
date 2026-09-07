@@ -3,6 +3,24 @@
 const crypto = require("crypto");
 const { AppError } = require("@verifypass/shared");
 const { getDb } = require("../lib/db");
+const email = require("./emailService");
+
+// B4: out-of-band confirmation of credential changes to the tenant's admins.
+// Fire-and-forget — key operations never fail because mail is down.
+function notifyKeyEvent(tenantId, { environment, keyAction, keyPrefix, actor }) {
+  if (!email.enabled()) return;
+  (async () => {
+    const db = getDb();
+    const tenant = await db.tenant.findFirst({ where: { id: String(tenantId) } });
+    const admins = await db.user.findMany({ where: { tenantId: String(tenantId), role: "tenant_admin", status: "active" } });
+    for (const admin of admins) {
+      await email.sendApiKeyEvent(admin, {
+        companyName: tenant?.companyName || "your workspace",
+        environment, keyAction, keyPrefix, actor
+      });
+    }
+  })().catch(err => console.error("api key email trigger failed:", err.message));
+}
 
 const KEY_RE = /^vp_(pub|sec)_(live|test)_([A-Za-z0-9]{32})$/;
 
@@ -47,11 +65,12 @@ function parseKey(key) {
 }
 
 /** Create and persist a key for a tenant. Returns plaintext key once. */
-async function issueKey(tenantId, keyType, isLive) {
+async function issueKey(tenantId, keyType, isLive, { actor = "unknown" } = {}) {
   const { key, keyHash, prefix } = generateKey(keyType, isLive);
   const record = await getDb().apiKey.create({
     data: { tenantId, keyType, isLive, keyHash, prefix, status: "active" }
   });
+  notifyKeyEvent(tenantId, { environment: isLive ? "live" : "test", keyAction: "created", keyPrefix: prefix, actor });
   return { key, id: record.id, prefix };
 }
 
@@ -80,7 +99,7 @@ async function resolveKey(key, expectedType) {
 }
 
 /** Revoke a key (tenant-scoped: caller must pass the tenant id). */
-async function revokeKey(tenantId, keyId) {
+async function revokeKey(tenantId, keyId, { actor = "unknown" } = {}) {
   keyId = assertKeyId(keyId);
   const db = getDb();
   const res = await db.apiKey.updateMany({
@@ -88,16 +107,18 @@ async function revokeKey(tenantId, keyId) {
     data: { status: "revoked", revokedAt: new Date() }
   });
   if (!res.count) throw new AppError("NOT_FOUND", "API key not found");
+  notifyKeyEvent(tenantId, { environment: "test", keyAction: "revoked", keyPrefix: keyId.slice(0, 8), actor });
 }
 
 /** Rotate: issue replacement, then revoke old. Returns the new plaintext key. */
-async function rotateKey(tenantId, keyId) {
+async function rotateKey(tenantId, keyId, { actor = "unknown" } = {}) {
   keyId = assertKeyId(keyId);
   const db = getDb();
   const old = await db.apiKey.findFirst({ where: { id: keyId, tenantId, status: "active" } });
   if (!old) throw new AppError("NOT_FOUND", "API key not found");
-  const issued = await issueKey(tenantId, old.keyType, old.isLive);
-  await revokeKey(tenantId, keyId);
+  const issued = await issueKey(tenantId, old.keyType, old.isLive, { actor });
+  await db.apiKey.updateMany({ where: { id: keyId, tenantId, status: "active" }, data: { status: "revoked", revokedAt: new Date() } });
+  notifyKeyEvent(tenantId, { environment: old.isLive ? "live" : "test", keyAction: "rotated", keyPrefix: issued.prefix, actor });
   return issued;
 }
 

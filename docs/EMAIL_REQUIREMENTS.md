@@ -3,6 +3,37 @@
 Date: 2026-09-07
 Scope: full codebase — backend API/worker, shared package, dashboard, SDK, verify-page, sample app, onboarding and admin tooling.
 
+> **Implementation status:** the SMTP mail API and the full 21-type catalogue
+> are implemented in [email-api/](../email-api/README.md) (PHP, cPanel SMTP),
+> the Node-side named helpers in
+> [emailService.js](../backend/src/services/emailService.js), and the trigger
+> points are now wired end to end:
+>
+> | Finding | Trigger wired |
+> | --- | --- |
+> | A1 email verification | `register` + `POST /v1/auth/verify-email/request|confirm` |
+> | A2 password recovery | `POST /v1/auth/password/forgot|reset` (uniform response) |
+> | A3 team invitations | `POST /v1/auth/users/invite` + `/invite/accept` |
+> | A4 email change | `POST /v1/auth/email/change` + `/cancel` + `/confirm` |
+> | B1 password change | `POST /v1/auth/password/change` + changed notice |
+> | B2 MFA change | `mfa/confirm` → notification |
+> | B3 new sign-in | `login` → first-seen-IP alert |
+> | B4 API key events | issue/rotate/revoke → tenant admins |
+> | B5 webhook changed | `onboarding/webhook` → tenant admins |
+> | C1 review waiting | pipeline `finalize` → manual_review → reviewers |
+> | C2 second confirmation | review `proposed` → other reviewers |
+> | C3 webhook exhausted | dispatcher `exhausted` → tenant admins |
+> | C5 workspace status | `tenantStatusService.setTenantStatus` |
+> | C6 production request | `onboarding/request-production` → ops |
+> | D1 deletion completed | `customers/biometric-data` DELETE → audit ref + confirm |
+>
+> New `User` fields: `emailVerifiedAt`, `pendingEmail`, five token-hash slots,
+> `knownLoginIps` (see [schema.prisma](../backend/prisma/schema.prisma)). Tokens
+> are 256-bit, sha256-stored, single-use, TTL-bound. All sends are
+> fire-and-forget so mail outages never block user flows. Ops-alert (E21),
+> weekly digest (E20), incident notice (E19) and evidence-purge notice (E17)
+> helpers exist; their schedulers/admin UIs are the remaining follow-ups.
+
 ## 1. Executive summary
 
 **VerifyPass sends no email today.** There is no mail provider integration, no

@@ -9,9 +9,35 @@ const { tenantScope } = require("../middleware/tenantScope");
 const { getDb } = require("../lib/db");
 const { audit } = require("../services/auditLogger");
 const { enqueue } = require("../services/jobService");
+const email = require("../services/emailService");
 
 const router = Router();
 const reviewers = requireUser("super_admin", "tenant_admin", "compliance_reviewer");
+
+function notify(promise) { Promise.resolve(promise).catch(err => console.error("email trigger failed:", err.message)); }
+
+// C1: notify tenant reviewers when a case enters manual_review.
+function notifyReviewWaiting(tenant, pendingCount, oldestWait) {
+  if (!email.enabled()) return;
+  (async () => {
+    const reviewersList = await getDb().user.findMany({ where: { tenantId: String(tenant.id), role: { in: ["tenant_admin", "compliance_reviewer"] }, status: "active" } });
+    for (const user of reviewersList) {
+      await email.sendReviewWaiting(user, { companyName: tenant.companyName, pendingCount, oldestWait });
+    }
+  })().catch(err => console.error("review-waiting email failed:", err.message));
+}
+
+// C2: notify OTHER reviewers that a dual-approval proposal needs confirmation.
+function notifySecondConfirmation(tenant, proposer, proposedDecision, caseAge) {
+  if (!email.enabled()) return;
+  (async () => {
+    const others = await getDb().user.findMany({ where: { tenantId: String(tenant.id), role: { in: ["tenant_admin", "compliance_reviewer"] }, status: "active" } });
+    for (const user of others) {
+      if (String(user.id) === String(proposer.id)) continue; // not the proposer
+      await email.sendReviewSecondConfirmation(user, { proposer: proposer.email, proposedDecision, caseAge });
+    }
+  })().catch(err => console.error("second-confirmation email failed:", err.message));
+}
 
 function requireTenant(req, _res, next) {
   if (!req.tenant) return next(new AppError("VALIDATION_ERROR", "X-Tenant-Id header required for super admin"));
@@ -94,6 +120,8 @@ router.post("/:sessionId/decision", reviewers, requireTenant, tenantScope, async
           actorId: `user:${req.user.id}`, action: "review.proposed", req,
           metadata: { decision, note: note || null, superseded: proposedDecision || null }
         });
+        const caseAge = session.createdAt ? `${Math.round((Date.now() - new Date(session.createdAt)) / 60000)} min` : "unknown";
+        notifySecondConfirmation(req.tenant, req.user, decision === "approved" ? "approval" : "rejection", caseAge);
         return res.json({
           success: true, sessionId: session.sessionUid,
           status: "pending_second_approval", proposedDecision: decision

@@ -1,0 +1,20 @@
+Options -Indexes
+ServerSignature Off
+LimitRequestBody 65536
+
+<FilesMatch "^(?!send\.php$|render\.php$|health\.php$).+">
+  Require all denied
+</FilesMatch>
+
+<IfModule mod_headers.c>
+  Header always unset X-Powered-By
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set X-Frame-Options "DENY"
+  Header always set Referrer-Policy "no-referrer"
+  Header always set Cache-Control "no-store"
+  Header always set Content-Security-Policy "default-src 'none'; frame-ancestors 'none'"
+</IfModule>
+
+<FilesMatch "^\.">
+  Require all denied
+</FilesMatch>
