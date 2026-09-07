@@ -56,17 +56,46 @@ version. Before a deploy:
    MongoDB is a replica set (transactions), the outbox table, model digests
    against `scripts/model-manifest.json`, and prints the release identity
    (commit, source digest, policy version, model set) that `/health`,
-   `/status` and `/result` also report.
+  `/status` and `/result` also report. It exits nonzero when any effective
+  tenant policy lacks a matching release-validation receipt.
 3. `node backend/scripts/smoke-liveness-local.js` against a LOCAL replica-set
    database — CORS preflight, consent, a synthetic upload through sanitize +
    encrypt, and transaction rollback. Never smoke-test with a real face.
-4. Production auto-approval is gated: until `LIVENESS_VALIDATED_POLICY` equals
-   the policy version, every production face session routes to manual review
-   with `LIVENESS_POLICY_UNVERIFIED`. Set it only after evaluating the policy on
-   an independently labelled held-out dataset
-   (`node backend/scripts/evaluate-liveness-dataset.js labelled.json`).
+4. Production liveness approval requires `LIVENESS_VALIDATION_RECEIPTS`, a JSON
+  array of `{ "fingerprint": "<reported fingerprint>", "dataset": "<dataset version>",
+  "evaluation": "<evaluation report reference>" }` entries. The release check
+  reports the required fingerprint for each tenant. Record a receipt only
+  after evaluating that exact build and effective policy on an independently
+  labelled held-out dataset (`node backend/scripts/evaluate-liveness-dataset.js labelled.json`).
+  Missing/mismatched receipts add `LIVENESS_POLICY_UNVERIFIED` and prevent
+  automatic approval; rejection signals still take precedence over review.
+  `LIVENESS_VALIDATED_POLICY` alone no longer enables approval. Receipts are
+  operator attestations, not independently verified certificates.
 5. Set `BUILD_COMMIT` where `.git` is absent (Lambda) so results carry the
    deployed commit.
+
+The validation fingerprint includes backend source, model-manifest identity,
+tenant settings, effective thresholds, provider identity and decision-related
+runtime configuration. Changing these requires re-evaluation. External model
+services must use immutable versions and set `PROVIDER_MODEL_VERSION`; changing
+an unversioned remote model in place cannot be detected from its URL alone.
+
+The polling worker now runs bounded session-expiry maintenance every minute.
+External schedulers can continue invoking `expire_sessions`; concurrent sweeps
+are idempotent. Expiration only touches overdue `created`/`started` attempts,
+records an audit event transactionally, and preserves previous results/evidence.
+Dashboard lists and counts report overdue sessions as expired before cleanup.
+
+The dashboard detail panel has a result/attempt selector. New results retain
+their decision and consumed evidence IDs. Historical results without those IDs
+show attempt-level evidence; legacy rows without attempt IDs remain explicitly
+unbound. Historical null-score face matches display as review, not matched.
+
+After deploying these changes, restart the API and worker together: the policy
+version is now `2026-09-07.1-release-validation`. Drain old-policy jobs using
+their matching worker before switching producers; do not rewrite queued policy
+versions to bypass compatibility checks. Existing results are never rejudged
+or overwritten automatically.
 
 ## SDK / API contract notes (policy v2)
 
@@ -109,6 +138,6 @@ Open the dashboard and choose **Create a workspace** to register a sandbox busin
 
 Saved progress is tenant-scoped and survives refresh/sign-in. Completing setup does not activate production. For test links to work, run the backend worker and hosted verification app, and configure `API_PUBLIC_URL` and `HOSTED_BASE_URL` for that deployment. Sandbox checks still process submitted images.
 
-Email ownership verification, email-based password recovery, team invitations, and production approval are not implemented; existing administration is required for those operations. See [dashboard analysis and onboarding workflow](DASHBOARD_ONBOARDING_ANALYSIS.md) for API details, validation and remaining gaps.
+Email ownership verification, email-based password recovery, team invitations, and production approval are not implemented; existing administration is required for those operations. See [dashboard analysis and onboarding workflow](DASHBOARD_ONBOARDING_ANALYSIS.md) for API details, validation and remaining gaps, and [email requirements and gap analysis](docs/EMAIL_REQUIREMENTS.md) for the complete email catalogue (21 message types, content specs, and the missing mail platform, token service, and endpoints required to send them).
 
 Dashboard client tests: `npm test --prefix frontend/dashboard` (also included in root `npm test`).

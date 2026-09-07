@@ -43,7 +43,12 @@ const REASON_CODES = Object.freeze({
 
 /** Default tenant thresholds (PRD §14). Tenant settings may override within bounds. */
 const DEFAULT_THRESHOLDS = Object.freeze({
-  liveness: { reject: 0.7, pass: 0.85 },
+  // autoApprove: a passive liveness score STRICTLY ABOVE this approves the
+  // liveness gate outright (product rule 2026-09-07: "> 60%"). Set to 1 to
+  // disable. challengePassApproves: a passed active challenge (ok:true) does
+  // the same. Either waives the liveness-quality codes (see
+  // decisionEngine.LIVENESS_WAIVABLE); identity/replay/tamper codes never waive.
+  liveness: { reject: 0.7, pass: 0.85, autoApprove: 0.6, challengePassApproves: true },
   faceMatch: { reject: 0.65, pass: 0.82 },
   maxFailedAttempts: 3,
   risk: Object.freeze({
@@ -56,7 +61,7 @@ const DEFAULT_THRESHOLDS = Object.freeze({
 
 /** Hard bounds the platform enforces on tenant-configured thresholds. */
 const THRESHOLD_BOUNDS = Object.freeze({
-  liveness: { rejectMin: 0.5, passMax: 0.99 },
+  liveness: { rejectMin: 0.5, passMax: 0.99, autoApproveMin: 0.3, autoApproveMax: 1 },
   faceMatch: { rejectMin: 0.5, passMax: 0.99 },
   risk: Object.freeze({
     // caps sized to accommodate sandbox/testing tenants (one device running
@@ -85,12 +90,12 @@ const THRESHOLD_BOUNDS = Object.freeze({
  */
 const THRESHOLD_PROFILES = Object.freeze({
   faceplugin: Object.freeze({
-    defaults: Object.freeze({ liveness: { reject: 0.7, pass: 0.85 }, faceMatch: { reject: 0.65, pass: 0.82 } }),
-    bounds: Object.freeze({ liveness: { rejectMin: 0.5, passMax: 0.99 }, faceMatch: { rejectMin: 0.5, passMax: 0.99 } })
+    defaults: Object.freeze({ liveness: { reject: 0.7, pass: 0.85, autoApprove: 0.6, challengePassApproves: true }, faceMatch: { reject: 0.65, pass: 0.82 } }),
+    bounds: Object.freeze({ liveness: { rejectMin: 0.5, passMax: 0.99, autoApproveMin: 0.3, autoApproveMax: 1 }, faceMatch: { rejectMin: 0.5, passMax: 0.99 } })
   }),
   onnx: Object.freeze({
-    defaults: Object.freeze({ liveness: { reject: 0.5, pass: 0.65 }, faceMatch: { reject: 0.28, pass: 0.42 } }),
-    bounds: Object.freeze({ liveness: { rejectMin: 0.3, passMax: 0.99 }, faceMatch: { rejectMin: 0.15, passMax: 0.9 } })
+    defaults: Object.freeze({ liveness: { reject: 0.5, pass: 0.65, autoApprove: 0.6, challengePassApproves: true }, faceMatch: { reject: 0.28, pass: 0.42 } }),
+    bounds: Object.freeze({ liveness: { rejectMin: 0.3, passMax: 0.99, autoApproveMin: 0.3, autoApproveMax: 1 }, faceMatch: { rejectMin: 0.15, passMax: 0.9 } })
   })
 });
 

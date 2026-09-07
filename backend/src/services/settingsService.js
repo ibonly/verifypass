@@ -37,6 +37,19 @@ function validateThresholds(input = {}) {
     clean[band] = {};
     if (input[band].reject != null) clean[band].reject = input[band].reject;
     if (input[band].pass != null) clean[band].pass = input[band].pass;
+    if (band === "liveness") {
+      const aa = input.liveness.autoApprove;
+      if (aa != null) {
+        if (typeof aa !== "number" || Number.isNaN(aa) || aa < b.autoApproveMin || aa > b.autoApproveMax) {
+          errors.push(`liveness.autoApprove must be a number ${b.autoApproveMin}-${b.autoApproveMax} (1 disables)`);
+        } else clean.liveness.autoApprove = aa;
+      }
+      const cpa = input.liveness.challengePassApproves;
+      if (cpa != null) {
+        if (typeof cpa !== "boolean") errors.push("liveness.challengePassApproves must be a boolean");
+        else clean.liveness.challengePassApproves = cpa;
+      }
+    }
   }
 
   if (input.maxFailedAttempts != null) {

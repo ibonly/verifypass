@@ -239,7 +239,7 @@ function verifyLivenessChallenge(challenge, frames = [], thresholds = {}, opts =
     const maxScore = scores.length ? Math.max(...scores) : null;
     if (maxScore !== null && maxScore < floor) {
       reasonCodes.push("LIVENESS_CHALLENGE_FAILED");
-      perAction[action] = { present: true, live: false, poseOk: false, score: maxScore };
+      perAction[action] = { present: true, live: false, poseOk: false, poseChecked: false, failureStage: "passive_floor", passiveFloor: floor, score: maxScore };
       continue;
     }
 

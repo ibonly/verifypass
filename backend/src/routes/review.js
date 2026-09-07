@@ -33,6 +33,10 @@ router.get("/", reviewers, requireTenant, tenantScope, async (req, res, next) =>
         status: s.status,
         riskLevel: s.riskLevel,
         reasonCodes: s.decisionReason?.reasonCodes || [],
+        waivedReasonCodes: s.decisionReason?.waivedReasonCodes || [],
+        verificationType: s.verificationType || "ID_AND_FACE",
+        attemptNumber: s.attemptNumber || 1,
+        submittedAt: s.submittedAt ? new Date(s.submittedAt).toISOString() : null,
         scores: r ? {
           liveness: r.livenessScore != null ? Number(r.livenessScore) : null,
           faceMatch: r.faceMatchScore != null ? Number(r.faceMatchScore) : null,
@@ -121,10 +125,23 @@ router.post("/:sessionId/decision", reviewers, requireTenant, tenantScope, async
         status: decision,
         completedAt: new Date()
       });
+      // verification.approved / verification.rejected — same event names as
+      // the automatic path so consumers handle both identically; the
+      // snapshot says a human decided and carries the original reason codes.
       await enqueue("send_webhook", {
         tenantId: String(req.tenant.id),
         sessionUid: session.sessionUid,
-        event: `verification.${decision}`
+        attemptId: session.attemptId || null,
+        event: `verification.${decision}`,
+        snapshot: {
+          status: decision,
+          riskLevel: session.riskLevel || null,
+          decisionSource: "manual_review",
+          reasonCodes: session.decisionReason?.reasonCodes || [],
+          attempt: session.attemptNumber || 1,
+          attemptId: session.attemptId || null,
+          completedAt: new Date().toISOString()
+        }
       });
     }
 

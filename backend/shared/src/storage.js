@@ -24,8 +24,20 @@
 // deployments and the test suite never need it installed.
 
 const fs = require("fs/promises");
+const path = require("path");
 
 const S3_SCHEME = "s3://";
+
+// Local-backend rows written before evidenceDir became absolute hold paths
+// like ".evidence-store/<tenant>/<session>/x.enc". Resolving those against
+// process.cwd() made the SAME row readable or not depending on which
+// directory the API/worker happened to be launched from (repo root vs
+// backend/). Anchor them on EVIDENCE_LOCAL_ROOT instead — backend/src/env.js
+// defaults it to the backend directory — so every entrypoint agrees.
+function resolveLocal(storagePath) {
+  if (path.isAbsolute(storagePath)) return storagePath;
+  return path.resolve(process.env.EVIDENCE_LOCAL_ROOT || process.cwd(), storagePath);
+}
 
 function backend() {
   return (process.env.EVIDENCE_BACKEND || "local").toLowerCase();
@@ -129,7 +141,7 @@ async function readStored(storagePath) {
     const out = await getClient().send(new GetObjectCommand({ Bucket: bucket, Key: key }));
     return bodyToBuffer(out.Body);
   }
-  return fs.readFile(storagePath);
+  return fs.readFile(resolveLocal(storagePath));
 }
 
 /** Delete stored ciphertext. Returns false when already gone (idempotent). */
@@ -141,7 +153,7 @@ async function removeStored(storagePath) {
     return true; // S3 deletes are idempotent — no existence signal
   }
   try {
-    await fs.unlink(storagePath);
+    await fs.unlink(resolveLocal(storagePath));
     return true;
   } catch (err) {
     if (err.code === "ENOENT") return false;
@@ -155,5 +167,6 @@ module.exports = {
   writeStored,
   readStored,
   removeStored,
+  resolveLocal,
   __setTestClient
 };

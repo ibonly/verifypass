@@ -11,6 +11,8 @@ const { tenantScope } = require("../middleware/tenantScope");
 const { readEvidence, signEvidenceAccess, verifyEvidenceAccess } = require("../services/evidenceStore");
 const { resolveEvidenceKey } = require("@verifypass/shared");
 const config = require("../config");
+const { effectiveSessionStatus, isSessionOverdue } = require("../services/sessionExpiry");
+const { getDb } = require("../lib/db");
 
 const router = Router();
 const anyUser = requireUser(); // all roles may view
@@ -18,6 +20,21 @@ const anyUser = requireUser(); // all roles may view
 function requireTenant(req, _res, next) {
   if (!req.tenant) return next(new AppError("VALIDATION_ERROR", "X-Tenant-Id header required for super admin"));
   next();
+}
+
+async function selectedResult(session, resultId) {
+  if (typeof resultId !== "string" || !/^[a-f0-9]{24}$/i.test(resultId)) throw new AppError("VALIDATION_ERROR", "Invalid result ID");
+  const result = await getDb().verificationResult.findFirst({ where: { id: resultId, sessionId: session.id } });
+  if (!result) throw new AppError("NOT_FOUND", "Result not found for this session");
+  return result;
+}
+
+async function resultDecision(session, result) {
+  if (result.rawResult?.decision) return result.rawResult.decision;
+  if (!result.attemptId) return { status: "unknown", reasonCodes: [] };
+  const logs = await getDb().auditLog.findMany({ where: { sessionId: session.id, action: "verification.decided" }, orderBy: { createdAt: "asc" } });
+  const event = logs.find(log => log.metadata?.attemptId === result.attemptId);
+  return event ? { status: event.metadata.status, reasonCodes: event.metadata.reasonCodes || [] } : { status: "unknown", reasonCodes: [] };
 }
 
 // GET /v1/dashboard/stats
@@ -28,8 +45,10 @@ router.get("/stats", anyUser, requireTenant, tenantScope, async (req, res, next)
     const byStatus = {};
     let totalCompletionMs = 0;
     let completedCount = 0;
+    const now = new Date();
     for (const s of sessions) {
-      byStatus[s.status] = (byStatus[s.status] || 0) + 1;
+      const status = effectiveSessionStatus(s, now);
+      byStatus[status] = (byStatus[status] || 0) + 1;
       if (s.completedAt && s.createdAt) {
         totalCompletionMs += new Date(s.completedAt) - new Date(s.createdAt);
         completedCount++;
@@ -49,15 +68,21 @@ router.get("/stats", anyUser, requireTenant, tenantScope, async (req, res, next)
 // GET /v1/dashboard/sessions?status=&limit=
 router.get("/sessions", anyUser, requireTenant, tenantScope, async (req, res, next) => {
   try {
-    const where = req.query.status ? { status: req.query.status } : {};
-    const limit = Math.min(Number(req.query.limit || 50), 200);
+    const now = new Date();
+    const status = req.query.status;
+    let where = status ? { status } : {};
+    if (status === "expired") where = { OR: [{ status: "expired" }, { status: { in: ["created", "started"] }, expiresAt: { lte: now } }] };
+    if (["created", "started"].includes(status)) where = { status, OR: [{ expiresAt: { gt: now } }, { expiresAt: null }, { expiresAt: { isSet: false } }] };
+    const limit = Math.max(1, Math.min(Number(req.query.limit) || 50, 200));
     const sessions = await req.scopedDb.sessions.list(where, { orderBy: { createdAt: "desc" }, take: limit });
     res.json({
       success: true,
       sessions: sessions.map((s) => ({
         sessionId: s.sessionUid,
         customerReference: s.customerReference,
-        status: s.status,
+        status: effectiveSessionStatus(s, now),
+        storedStatus: s.status,
+        overdue: isSessionOverdue(s, now),
         riskLevel: s.riskLevel,
         isLive: s.isLive,
         createdAt: s.createdAt ? new Date(s.createdAt).toISOString() : null,
@@ -75,7 +100,12 @@ router.get("/sessions/:sessionId", anyUser, requireTenant, tenantScope, async (r
     const session = await req.scopedDb.sessions.findByUid(req.params.sessionId);
     if (!session) throw new AppError("SESSION_NOT_FOUND", "Verification session not found");
     const latest = await req.scopedDb.results.latestForSession(session.id);
-    const r = latest && (!session.attemptId || latest.attemptId === session.attemptId) ? latest : null;
+    const r = req.query.resultId ? await selectedResult(session, req.query.resultId)
+      : latest && (!session.attemptId || latest.attemptId === session.attemptId) ? latest : null;
+    const currentStatus = effectiveSessionStatus(session);
+    const decision = req.query.resultId ? await resultDecision(session, r)
+      : { status: currentStatus, reasonCodes: isSessionOverdue(session) ? ["SESSION_EXPIRED"] : session.decisionReason?.reasonCodes || [],
+          waivedReasonCodes: session.decisionReason?.waivedReasonCodes || [], livenessWaiver: session.decisionReason?.livenessWaiver || null };
     // Independent products: FACE_ONLY has no document to show, ID_ONLY runs
     // no liveness/face checks. Omit non-applicable sections entirely so the
     // dashboard never renders "—" rows for checks that don't exist.
@@ -86,8 +116,17 @@ router.get("/sessions/:sessionId", anyUser, requireTenant, tenantScope, async (r
       success: true,
       sessionId: session.sessionUid,
       customerReference: session.customerReference,
-      status: session.status,
-      riskLevel: session.riskLevel || null,
+      status: decision.status,
+      currentStatus,
+      currentAttemptId: session.attemptId || null,
+      attemptNumber: session.attemptNumber || 1,
+      resultId: r?.id || null,
+      resultAttemptId: r?.attemptId || null,
+      resultAt: r?.createdAt ? new Date(r.createdAt).toISOString() : null,
+      historicalResult: !!req.query.resultId,
+      legacyResult: !!r && !r.attemptId,
+      overdue: isSessionOverdue(session),
+      riskLevel: req.query.resultId ? decision.riskLevel || null : session.riskLevel || null,
       isLive: session.isLive,
       verificationType: vType,
       ...(hasDocument ? {
@@ -105,14 +144,11 @@ router.get("/sessions/:sessionId", anyUser, requireTenant, tenantScope, async (r
       } : {}),
       ...(hasFace && hasDocument ? {
         faceMatch: r ? {
-          status: r.faceMatchStatus,
+          status: r.faceMatchStatus === "matched" && r.faceMatchScore == null ? "review" : r.faceMatchStatus,
           similarityScore: r.faceMatchScore != null ? Number(r.faceMatchScore) : null
         } : null
       } : {}),
-      decision: {
-        status: session.status,
-        reasonCodes: session.decisionReason?.reasonCodes || []
-      },
+      decision,
       // NDPA consent proof — when the user accepted, and which copy version
       consent: session.consentAt ? {
         at: new Date(session.consentAt).toISOString(),
@@ -124,10 +160,11 @@ router.get("/sessions/:sessionId", anyUser, requireTenant, tenantScope, async (r
       // present/live/pose/peaks/trajectory/manual + consistency & sequence.
       livenessChallenge: r?.rawResult?.livenessChallenge || null,
       livenessIdentity: r?.rawResult?.livenessIdentity || null,
-      captureTelemetry: session.deviceMeta?.telemetry || null,
+      captureTelemetry: req.query.resultId ? null : session.deviceMeta?.telemetry || null,
       // v7 free anti-spoof signals: flash response, texture heuristics,
       // nightly telemetry anomaly flags (all record-first)
       livenessSignals: r ? {
+        passive: r.rawResult?.liveness || null,
         flash: r.rawResult?.liveness?.flash || null,
         texture: r.rawResult?.liveness?.texture || null,
         telemetryAnomaly: r.rawResult?.riskSignals?.telemetryAnomaly || null
@@ -141,7 +178,7 @@ router.get("/sessions/:sessionId", anyUser, requireTenant, tenantScope, async (r
         document: r.rawResult?.document || null
       } : null,
       createdAt: session.createdAt ? new Date(session.createdAt).toISOString() : null,
-      completedAt: session.completedAt ? new Date(session.completedAt).toISOString() : null,
+      completedAt: req.query.resultId ? null : session.completedAt ? new Date(session.completedAt).toISOString() : null,
       expiresAt: session.expiresAt ? new Date(session.expiresAt).toISOString() : null
     });
   } catch (err) {
@@ -150,6 +187,20 @@ router.get("/sessions/:sessionId", anyUser, requireTenant, tenantScope, async (r
 });
 
 // GET /v1/dashboard/webhook-deliveries?status= — delivery log (JWT auth, Option A)
+router.get("/sessions/:sessionId/results", anyUser, requireTenant, tenantScope, async (req, res, next) => {
+  try {
+    const session = await req.scopedDb.sessions.findByUid(req.params.sessionId);
+    if (!session) throw new AppError("SESSION_NOT_FOUND");
+    const results = await getDb().verificationResult.findMany({ where: { sessionId: session.id }, orderBy: { createdAt: "desc" } });
+    res.json({ success: true, currentAttemptId: session.attemptId || null, results: results.map(result => ({
+      resultId: result.id, attemptId: result.attemptId || null, legacy: !result.attemptId,
+      createdAt: new Date(result.createdAt).toISOString(),
+      decision: result.rawResult?.decision || null,
+      release: result.rawResult?.release || null
+    })) });
+  } catch (err) { next(err); }
+});
+
 // Proxies webhook delivery data without requiring the secret API key from the browser.
 router.get("/webhook-deliveries", anyUser, requireTenant, tenantScope, async (req, res, next) => {
   try {
@@ -184,9 +235,14 @@ router.get("/sessions/:sessionId/evidence", anyUser, requireTenant, tenantScope,
     const session = await req.scopedDb.sessions.findByUid(req.params.sessionId);
     if (!session) throw new AppError("SESSION_NOT_FOUND", "Verification session not found");
     const { getDb } = require("../lib/db");
+    const result = req.query.resultId ? await selectedResult(session, req.query.resultId) : null;
+    const attemptId = result ? result.attemptId : session.attemptId;
+    const exactIds = result?.rawResult?.consumedEvidenceIds;
+    const attribution = Array.isArray(exactIds) ? "consumed" : attemptId ? "attempt" : "legacy-unbound";
     const files = await getDb().evidenceFile.findMany({
-      where: { sessionId: session.id },
-      select: { id: true, fileType: true, label: true, createdAt: true, cloudinaryUrl: true, storagePath: true },
+      where: { sessionId: session.id, ...(Array.isArray(exactIds) ? { id: { in: exactIds } }
+        : attemptId ? { attemptId } : { OR: [{ attemptId: null }, { attemptId: { isSet: false } }] }) },
+      select: { id: true, fileType: true, label: true, createdAt: true, cloudinaryUrl: true, attemptId: true, captureMode: true },
       orderBy: { createdAt: "asc" }
     });
     const evidence = files.map((f) => {
@@ -195,13 +251,15 @@ router.get("/sessions/:sessionId/evidence", anyUser, requireTenant, tenantScope,
         evidenceId: String(f.id),
         fileType: f.fileType,
         label: f.label || null,
+        attemptId: f.attemptId || null,
+        captureMode: f.captureMode || null,
         createdAt: f.createdAt ? new Date(f.createdAt).toISOString() : null,
         cloudinaryUrl: f.cloudinaryUrl || null,
         // Signed URL to fetch decrypted image from the server
         serveUrl: `/v1/dashboard/evidence/${f.id}/image?token=${token}`
       };
     });
-    res.json({ success: true, sessionId: req.params.sessionId, evidence });
+    res.json({ success: true, sessionId: req.params.sessionId, attemptId: attemptId || null, attribution, evidence });
   } catch (err) { next(err); }
 });
 
@@ -289,7 +347,7 @@ router.get("/sessions/:sessionId/attempts", anyUser, requireTenant, tenantScope,
     res.json({
       success: true,
       sessionId: session.sessionUid,
-      currentStatus: session.status,
+      currentStatus: effectiveSessionStatus(session),
       attemptCount: attempts.length,
       attempts
     });

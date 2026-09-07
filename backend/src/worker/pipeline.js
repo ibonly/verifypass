@@ -6,6 +6,7 @@
 
 const { decide, resolveThresholds, decryptBuffer, resolveEvidenceKey, verifyLivenessChallenge, verifyFrameBinding, storage } = require("@verifypass/shared");
 const { computeRiskSignals } = require("./riskSignals");
+const { livenessValidation } = require("../lib/livenessValidation");
 
 // Stamped into every rawResult + logged at worker startup. When a decision
 // looks impossible, this settles WHICH code produced it — Node caches modules
@@ -99,6 +100,7 @@ async function runVerificationInternal(payload, { db, provider, evidenceKey, env
   // fence) but are NOT challenge frames — split them off here.
   const flashMosaics = evidence.filter((e) => e.fileType === "liveness_frame" && e.label === "flash");
   const livenessFrames = evidence.filter((e) => e.fileType === "liveness_frame" && e.label !== "flash");
+  const consumedEvidenceIds = new Set();
 
   async function loadDecrypted(file) {
     // storage-backend aware: local fs path or s3:// URI (Lambda/split deploys)
@@ -111,6 +113,7 @@ async function runVerificationInternal(payload, { db, provider, evidenceKey, env
       challengeNonce: file.challengeNonce, action: file.label || file.fileType, checksum: file.checksum, bindingHmac: file.bindingHmac,
       context: [session.tenantId, session.id, file.attemptId, file.fileType, file.captureMode || null, file.meta || null]
     })) throw new Error("EVIDENCE_BINDING_MISMATCH");
+    consumedEvidenceIds.add(String(file.id));
     return plain;
   }
 
@@ -130,11 +133,12 @@ async function runVerificationInternal(payload, { db, provider, evidenceKey, env
           performance: { ...metrics, elapsedMs: Date.now() - startedAt, rssBytes: process.memoryUsage().rss },
           release: require("../lib/release").releaseIdentity(),
           modelHashes: provider?.name === "onnx" ? require("../../scripts/model-manifest.json") : null,
-          policy: policyBlock(tenant),
+          policy: policyBlock(tenant, provider?.name),
           missing: {
             selfie: needsSelfie && !selfie,
             idFront: needsId && !idFront
           },
+          consumedEvidenceIds: [],
           verificationType: session.verificationType,
           evidenceTypesSeen: evidence.map((e) => e.fileType)
         }
@@ -263,6 +267,7 @@ async function runVerificationInternal(payload, { db, provider, evidenceKey, env
         try { geo = await provider.faceLandmarks(buf); } catch (_) { geo = null; }
       }
       frames.push({
+        evidenceId: String(fr.id),
         action: fr.label, liveness: { score: lv.score, faceCount: lv.faceCount }, pose: lv.pose || null, box: lv.raw?.box || null, faceRatio: Number.isFinite(lv.faceRatio) ? lv.faceRatio : null, detection: lv.raw?.detection || "standard",
         points: geo ? geo.points : null, expr: geo ? geo.expr : null,
         checksum: fr.checksum || null, createdAt: fr.createdAt || null, captureMode: fr.captureMode || null
@@ -386,7 +391,7 @@ async function runVerificationInternal(payload, { db, provider, evidenceKey, env
     };
     challengeOpts.now = () => session.submittedAt ? new Date(session.submittedAt).getTime() : Date.now();
     challenge = verifyLivenessChallenge(session.livenessChallenge, frames, thresholds, challengeOpts);
-    challenge.policyUnverified = challengeOpts.enforcePose === false || session.livenessChallenge.assisted === true || (env === "production" && process.env.LIVENESS_VALIDATED_POLICY !== PIPELINE_VERSION);
+    challenge.policyUnverified = challengeOpts.enforcePose === false || session.livenessChallenge.assisted === true || (env === "production" && !policyBlock(tenant, provider?.name).validated);
     if (bindingRejected > 0) {
       challenge = {
         ...challenge,
@@ -508,10 +513,11 @@ async function runVerificationInternal(payload, { db, provider, evidenceKey, env
     extractedData: doc?.extractedData ?? null,
     rawResult: {
       pipelineVersion: PIPELINE_VERSION,
+      consumedEvidenceIds: [...consumedEvidenceIds],
           performance: { ...metrics, elapsedMs: Date.now() - startedAt, rssBytes: process.memoryUsage().rss },
           release: require("../lib/release").releaseIdentity(),
           modelHashes: provider?.name === "onnx" ? require("../../scripts/model-manifest.json") : null,
-          policy: policyBlock(tenant),
+          policy: policyBlock(tenant, provider?.name),
       provider: provider.name,
       // Scores are only comparable within one model version — calibration
       // and analytics MUST group by this before aggregating similarity scores.
@@ -562,12 +568,12 @@ async function finalize(db, session, { decision, resultRow, dispatch, assertActi
     assertActive?.();
     const claimed = await tx.verificationSession.updateMany({
       where: { id: session.id, status: "submitted", ...(session.attemptId ? { attemptId: session.attemptId } : { OR: [{ attemptId: null }, { attemptId: { isSet: false } }] }) },
-      data: { status: decision.status, riskLevel: decision.riskLevel, decisionReason: { reasonCodes: decision.reasonCodes }, completedAt: decision.status === "manual_review" ? null : new Date() }
+      data: { status: decision.status, riskLevel: decision.riskLevel, decisionReason: { reasonCodes: decision.reasonCodes, ...(decision.waivedReasonCodes?.length ? { waivedReasonCodes: decision.waivedReasonCodes, livenessWaiver: decision.livenessWaiver || null } : {}) }, completedAt: decision.status === "manual_review" ? null : new Date() }
     });
     if (!claimed.count) return false;
-    await tx.verificationResult.create({ data: { sessionId: session.id, attemptId: session.attemptId || null, ...resultRow, rawResult: JSON.parse(JSON.stringify(resultRow.rawResult || {})) } });
+    await tx.verificationResult.create({ data: { sessionId: session.id, attemptId: session.attemptId || null, ...resultRow, rawResult: JSON.parse(JSON.stringify({ ...resultRow.rawResult, decision: { status: decision.status, riskLevel: decision.riskLevel, reasonCodes: decision.reasonCodes, ...(decision.waivedReasonCodes?.length ? { waivedReasonCodes: decision.waivedReasonCodes, livenessWaiver: decision.livenessWaiver || null } : {}) } })) } });
     await tx.auditLog.create({ data: { tenantId: session.tenantId, sessionId: session.id, actorType: "system", action: "verification.decided", metadata: { attemptId: session.attemptId || null, status: decision.status, reasonCodes: decision.reasonCodes }, riskEvent: decision.riskLevel !== "low" } });
-    await addOutbox(tx, "send_webhook", { tenantId: String(session.tenantId), sessionUid: session.sessionUid, attemptId: session.attemptId || null, event: `verification.${decision.status}`, eventUid: `evt_${require("crypto").randomBytes(12).toString("hex")}`, snapshot: { customerReference: session.customerReference || null, status: decision.status, riskLevel: decision.riskLevel, attempt: session.attemptNumber || 1, attemptId: session.attemptId || null, createdAt: session.createdAt ? new Date(session.createdAt).toISOString() : null, completedAt: decision.status === "manual_review" ? null : new Date().toISOString() } });
+    await addOutbox(tx, "send_webhook", { tenantId: String(session.tenantId), sessionUid: session.sessionUid, attemptId: session.attemptId || null, event: `verification.${decision.status}`, eventUid: `evt_${require("crypto").randomBytes(12).toString("hex")}`, snapshot: { customerReference: session.customerReference || null, status: decision.status, riskLevel: decision.riskLevel, decisionSource: "automatic", reasonCodes: decision.reasonCodes || [], ...(decision.waivedReasonCodes?.length ? { waivedReasonCodes: decision.waivedReasonCodes } : {}), attempt: session.attemptNumber || 1, attemptId: session.attemptId || null, createdAt: session.createdAt ? new Date(session.createdAt).toISOString() : null, completedAt: decision.status === "manual_review" ? null : new Date().toISOString() } });
     assertActive?.();
     return true;
   });
@@ -592,8 +598,10 @@ function consistencyMode(tenant) {
     || (process.env.CHALLENGE_ENFORCE_CONSISTENCY === "true" || tenant?.settings?.challenge?.enforceConsistency === true ? "reject" : "record");
   return ["record", "review", "reject"].includes(raw) ? raw : "record";
 }
-function policyBlock(tenant) {
-  return { version: 2, sequence: "enforced", consistency: consistencyMode(tenant), poseEstimator: "onnx-fr_pose+mirror", identity: "best-frontal", passiveAggregate: "recorded", flatObject: "two-actions-review", minimumDistinctFrames: 3, flash: "experimental", validated: process.env.LIVENESS_VALIDATED_POLICY === PIPELINE_VERSION };
+function policyBlock(tenant, provider = "onnx") {
+  const settings = tenant?.settings || {};
+  const validation = livenessValidation({ settings, thresholds: resolveThresholds(settings, provider), provider });
+  return { version: 2, sequence: "enforced", consistency: consistencyMode(tenant), poseEstimator: "onnx-fr_pose+mirror", identity: "best-frontal", passiveAggregate: "recorded", flatObject: "two-actions-review", minimumDistinctFrames: 3, flash: "experimental", ...validation };
 }
 
 module.exports = { mosaicTileMeans, runVerification, defaultEvidenceKey, PIPELINE_VERSION, isFrontalPose, identityFrameQualifies, consistencyMode };

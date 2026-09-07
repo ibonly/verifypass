@@ -10,6 +10,12 @@ const assert = require("node:assert/strict");
 const crypto = require("crypto");
 const fs = require("fs/promises");
 const os = require("os");
+// STRICT = the liveness auto-approve rule switched off (tenant knobs). The
+// contracts below describe how each signal routes when nothing waives it;
+// the default rule (score > autoApprove OR challenge passed → waive liveness
+// quality codes) is covered by its own tests.
+const STRICT = { thresholds: { liveness: { autoApprove: 1, challengePassApproves: false } } };
+const STRICT_T = require("@verifypass/shared").resolveThresholds(STRICT);
 const path = require("path");
 const { encryptBuffer, computeFrameBinding, verifyLivenessChallenge, assessSequence, assessTrajectory, decide } = require("@verifypass/shared");
 const { createMockDb } = require("./helpers/mockDb");
@@ -48,7 +54,7 @@ async function seed({ actions = ["turn_left", "turn_right"], frames, selfie = { 
   }
   await add("selfie", null, selfie, new Date(NOW + 1000));
   for (const f of frames) await add("liveness_frame", f.action, f.plain, new Date(NOW + f.atMs));
-  const run = () => runVerification({ sessionUid: "vps_fix", attemptId, policyVersion: PIPELINE_VERSION }, { db, provider: provider(), evidenceKey: KEY, env: "test", screen: async () => ({ hit: false }) });
+  const run = (env = "test") => runVerification({ sessionUid: "vps_fix", attemptId, policyVersion: PIPELINE_VERSION }, { db, provider: provider(), evidenceKey: KEY, env, screen: async () => ({ hit: false }) });
   return { db, session, run, cleanup: () => fs.rm(dir, { recursive: true, force: true }) };
 }
 
@@ -63,6 +69,23 @@ function turns({ leftSim = 0.9, rightSim = 0.9, turnedSim = 0.2, startMs = 5000,
   return out;
 }
 
+test("production approval requires a receipt bound to the effective release", async t => {
+  const { resolveThresholds } = require("@verifypass/shared");
+  const { validationFingerprint } = require("../src/lib/livenessValidation");
+  const previous = process.env.LIVENESS_VALIDATION_RECEIPTS;
+  t.after(() => { if (previous === undefined) delete process.env.LIVENESS_VALIDATION_RECEIPTS; else process.env.LIVENESS_VALIDATION_RECEIPTS = previous; });
+  delete process.env.LIVENESS_VALIDATION_RECEIPTS;
+  const unvalidated = await seed({ frames: turns() }); t.after(unvalidated.cleanup);
+  const denied = await unvalidated.run("production");
+  assert.notEqual(denied.status, "approved");
+  assert.ok(denied.reasonCodes.includes("LIVENESS_POLICY_UNVERIFIED"));
+  const fingerprint = validationFingerprint({ settings: {}, thresholds: resolveThresholds({}, "stub"), provider: "stub" });
+  process.env.LIVENESS_VALIDATION_RECEIPTS = JSON.stringify([{ fingerprint, dataset: "labelled-test-fixture", evaluation: "test-only" }]);
+  const validated = await seed({ frames: turns() }); t.after(validated.cleanup);
+  assert.equal((await validated.run("production")).status, "approved");
+  assert.equal(validated.db.verificationResult.rows[0].rawResult.policy.fingerprint, fingerprint);
+});
+
 test("identity continuity: a low similarity on a turned frame no longer rejects when a frontal frame matches", async t => {
   const fx = await seed({ frames: turns({ turnedSim: 0.15 }) }); t.after(fx.cleanup);
   const out = await fx.run();
@@ -72,6 +95,9 @@ test("identity continuity: a low similarity on a turned frame no longer rejects 
   assert.equal(id.score, 0.9);
   assert.equal(id.frames, 4, "only the frontal frames (5° and 12°) qualify; 22° and 30° do not");
   assert.equal(id.considered, 8);
+  const raw = fx.db.verificationResult.rows[0].rawResult;
+  assert.equal(raw.decision.status, "approved");
+  assert.deepEqual(new Set(raw.consumedEvidenceIds), new Set(fx.db.evidenceFile.rows.map(file => file.id)));
 });
 
 test("identity continuity: a frontal frame that does NOT match still rejects; no frontal frame → review", async t => {
@@ -113,6 +139,9 @@ test("tilt frames under the spoof floor count for pose when the action has a liv
   // no live frame at all in the action → still fails at the floor
   const dead = verifyLivenessChallenge(lookUp, [f("look_up", 0, 2, 0.04, 0), f("look_up", 0, -25, 0.03, 1), f("look_up", 0, -38, 0.02, 2), f("look_up", 0, -40, 0.05, 3)], {}, opts);
   assert.equal(dead.ok, false); assert.ok(dead.reasonCodes.includes("LIVENESS_CHALLENGE_FAILED"));
+  assert.equal(dead.perAction.look_up.failureStage, "passive_floor");
+  assert.equal(dead.perAction.look_up.poseChecked, false);
+  assert.equal(typeof dead.perAction.look_up.passiveFloor, "number");
   // turn_left: a frontal live frame cannot vouch for near-zero turned frames unless landmarks prove parallax (audit L04)
   const turn = { actions: ["turn_left"], nonce: "n", issuedAt: new Date(NOW).toISOString() };
   const turned = [f("turn_left", -2, 0, 0.95, 0), f("turn_left", -25, 0, 0.03, 1), f("turn_left", -38, 0, 0.02, 2), f("turn_left", -40, 0, 0.05, 3)];
@@ -160,7 +189,7 @@ test("direction consistency: same-sign turns route to review by default and reje
   const reviewed = verifyLivenessChallenge(ch, sameSign, {}, { enforcePose: true, now: () => NOW + 60000 });
   assert.equal(reviewed.ok, true, JSON.stringify(reviewed.reasonCodes));
   assert.equal(reviewed.directionInconsistent, true);
-  assert.equal(decide({ livenessChallenge: reviewed }).status, "manual_review");
+  assert.equal(decide({ livenessChallenge: reviewed }, STRICT_T).status, "manual_review");
   const enforced = verifyLivenessChallenge(ch, sameSign, {}, { enforcePose: true, enforceConsistency: true, now: () => NOW + 60000 });
   assert.equal(enforced.ok, false);
   assert.ok(enforced.reasonCodes.includes("LIVENESS_DIRECTION_INCONSISTENT"));
@@ -205,7 +234,7 @@ test("direction consistency mode: record (default) approves and records; review 
     assert.equal(lc.directionInconsistent, true, "still recorded for calibration");
     assert.equal(rec.db.verificationResult.rows[0].rawResult.policy.consistency, "record");
     process.env.CHALLENGE_CONSISTENCY_MODE = "review";
-    const rev = await seed({ frames: sameSign }); t.after(rev.cleanup);
+    const rev = await seed({ frames: sameSign, settings: STRICT }); t.after(rev.cleanup);
     const o2 = await rev.run(); assert.equal(o2.status, "manual_review"); assert.ok(o2.reasonCodes.includes("LIVENESS_DIRECTION_INCONSISTENT"));
     process.env.CHALLENGE_CONSISTENCY_MODE = "reject";
     const rej = await seed({ frames: sameSign }); t.after(rej.cleanup);

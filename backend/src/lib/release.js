@@ -1,7 +1,7 @@
 "use strict";
 const crypto = require("crypto");
 const modelHashes = require("../../scripts/model-manifest.json");
-const policyVersion = "2026-09-06.1-liveness-policy-v2";
+const policyVersion = "2026-09-07.1-release-validation";
 let commit = process.env.BUILD_COMMIT || null;
 if (!commit) {
   try { commit = require("child_process").execFileSync("git", ["rev-parse", "HEAD"], { cwd: __dirname, encoding: "utf8", timeout: 1000, stdio: ["ignore", "pipe", "ignore"] }).trim(); } catch (_) { /* release builds supply BUILD_COMMIT */ }

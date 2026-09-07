@@ -13,6 +13,7 @@ const STATUS_COLORS = {
 
 // Human-readable labels for decision reason codes
 const REASON_LABELS = {
+  SESSION_EXPIRED: "Session expired before submission",
   LIVENESS_POLICY_UNVERIFIED: "Liveness policy requires validation for automatic approval",
   LIVENESS_EVIDENCE_INSUFFICIENT: "Insufficient distinct movement evidence",
   LIVENESS_IDENTITY_UNAVAILABLE: "Challenge identity could not be verified",
@@ -67,7 +68,7 @@ export default function App() {
   const views = {
     overview: <Overview />,
     sessions: <Sessions onSelectSession={setSelectedSession} />,
-    ...(["super_admin", "tenant_admin", "compliance_reviewer"].includes(user.role) ? { review: <ReviewQueue /> } : {}),
+    ...(["super_admin", "tenant_admin", "compliance_reviewer"].includes(user.role) ? { review: <ReviewQueue onSelectSession={setSelectedSession} /> } : {}),
     ...(user.role !== "developer" ? { reports: <Reports /> } : {}),
     ...(isAdmin ? { onboarding: <Onboarding onExit={() => setView("overview")} onSelectSession={setSelectedSession} />, settings: <Settings /> } : {}),
     webhooks: <Webhooks canManage={isAdmin} />
@@ -110,6 +111,7 @@ export default function App() {
       {/* Session Detail Slide-in Panel */}
       {selectedSession && (
         <SessionDetail
+          key={selectedSession}
           sessionId={selectedSession}
           onClose={() => setSelectedSession(null)}
         />
@@ -284,7 +286,15 @@ function Sessions({ onSelectSession }) {
 // ─── Session Detail Panel ─────────────────────────────────────────────────────
 
 function SessionDetail({ sessionId, onClose }) {
-  const { data, error } = useData(`/v1/dashboard/sessions/${sessionId}`, [sessionId]);
+  const [resultId, setResultId] = useState("");
+  const history = useData(`/v1/dashboard/sessions/${sessionId}/results`, [sessionId]);
+  return <SessionDetailContent key={`${sessionId}:${resultId}`} sessionId={sessionId} onClose={onClose}
+    resultId={resultId} onSelectResult={setResultId} history={history} />;
+}
+
+function SessionDetailContent({ sessionId, onClose, resultId, onSelectResult, history }) {
+  const query = resultId ? `?resultId=${encodeURIComponent(resultId)}` : "";
+  const { data, error } = useData(`/v1/dashboard/sessions/${sessionId}${query}`, [sessionId, resultId]);
   const attempts = useData(`/v1/dashboard/sessions/${sessionId}/attempts`, [sessionId]);
   const panelRef = useRef(null);
 
@@ -325,7 +335,7 @@ function SessionDetail({ sessionId, onClose }) {
 
       {/* Slide-in panel */}
       <div ref={panelRef} style={{
-        position: "fixed", top: 0, right: 0, bottom: 0, width: 440,
+        position: "fixed", top: 0, right: 0, bottom: 0, width: 440, maxWidth: "100vw", boxSizing: "border-box",
         background: "#fff", boxShadow: "-4px 0 24px rgba(0,0,0,0.15)",
         zIndex: 101, overflowY: "auto", padding: 24
       }}>
@@ -334,6 +344,19 @@ function SessionDetail({ sessionId, onClose }) {
           <button onClick={onClose} style={{ background: "none", border: 0, cursor: "pointer", fontSize: 20, color: "#6B7280", lineHeight: 1 }}>✕</button>
         </div>
 
+        <label style={{ display: "block", fontSize: 13, marginBottom: 16 }}>
+          Result / Attempt
+          <select aria-label="Result / Attempt" value={resultId} onChange={event => onSelectResult(event.target.value)}
+            style={{ display: "block", width: "100%", minWidth: 0, marginTop: 6, padding: 8, border: "1px solid #D1D5DB", borderRadius: 4 }}>
+            <option value="">Current attempt</option>
+            {(history.data?.results || []).map((result, index) => (
+              <option key={result.resultId} value={result.resultId}>
+                Result {history.data.results.length - index} | {result.createdAt.slice(0, 19).replace("T", " ")} | {result.legacy ? "Legacy / unbound" : result.attemptId.slice(0, 8)}
+              </option>
+            ))}
+          </select>
+        </label>
+        {history.error && <p role="alert" style={{ color: "#DC2626", fontSize: 13 }}>Result history: {history.error.message}</p>}
         {error && <p style={{ color: "#DC2626", fontSize: 14 }}>{error.message}</p>}
         {!data && !error && <div style={{ textAlign: "center", padding: 32 }}><Spinner /></div>}
 
@@ -345,6 +368,10 @@ function SessionDetail({ sessionId, onClose }) {
                 {data.riskLevel && <StatusPill status={data.riskLevel} />}
               </div>
               <code style={{ fontSize: 11, color: "#6B7280", wordBreak: "break-all" }}>{data.sessionId}</code>
+              {data.historicalResult && <p style={{ fontSize: 12, color: "#6B7280" }}>Stored result | Current session: {data.currentStatus}</p>}
+              {data.legacyResult && <p style={{ fontSize: 12, color: "#B45309" }}>Legacy result: exact attempt binding unavailable.</p>}
+              {!data.resultId && <p style={{ fontSize: 12, color: "#6B7280" }}>No result for the current attempt.</p>}
+              {data.overdue && <p style={{ fontSize: 12, color: "#B45309" }}>Session overdue; expiry cleanup pending.</p>}
             </div>
 
             {/* Basic info */}
@@ -369,6 +396,7 @@ function SessionDetail({ sessionId, onClose }) {
                 <span style={labelStyle}>Completed</span>
                 <span style={valStyle}>{data.completedAt ? data.completedAt.slice(0, 19).replace("T", " ") : "—"}</span>
               </div>
+              {data.resultAt && <div style={rowStyle}><span style={labelStyle}>Result recorded</span><span style={valStyle}>{data.resultAt.slice(0, 19).replace("T", " ")}</span></div>}
               {data.expiresAt && !data.completedAt && (
                 <div style={rowStyle}>
                   <span style={labelStyle}>Expires</span>
@@ -432,6 +460,15 @@ function SessionDetail({ sessionId, onClose }) {
               </div>
             )}
 
+            {/* Liveness auto-approve waiver (codes the rule overrode) */}
+            {data.decision?.waivedReasonCodes?.length > 0 && (
+              <div style={{ marginBottom: 16, padding: "8px 10px", background: "#F3F4F6", borderRadius: 6, fontSize: 12, color: "#374151" }}>
+                <strong>Liveness auto-approve rule applied</strong>
+                {data.decision.livenessWaiver === "score" ? " (passive score above the auto-approve threshold)" : data.decision.livenessWaiver === "challenge" ? " (active challenge passed)" : ""}.
+                Overrode: {data.decision.waivedReasonCodes.join(", ")}
+              </div>
+            )}
+
             {/* Decision reason codes */}
             {data.decision?.reasonCodes?.length > 0 && (
               <div style={{ marginBottom: 16 }}>
@@ -454,15 +491,25 @@ function SessionDetail({ sessionId, onClose }) {
               </div>
             )}
             {data.diagnostics?.pipelineVersion && (
-              <p style={{ fontSize: 11, color: "#9CA3AF", margin: "0 0 12px" }}>
+              <p style={{ fontSize: 11, color: "#6B7280", margin: "0 0 12px", overflowWrap: "anywhere" }}>
                 Judged by pipeline {data.diagnostics.pipelineVersion}{data.release?.commit ? ` · build ${String(data.release.commit).slice(0, 7)}` : ""}{data.release?.policyVersion && data.release.policyVersion !== data.diagnostics.pipelineVersion ? ` · policy ${data.release.policyVersion}` : ""}
+                <br />Source digest: {data.release?.sourceDigest || "Not recorded"}
               </p>
             )}
             {data.policy && <div style={{ padding: 12, background: "#F9FAFB", borderRadius: 8, marginBottom: 12, fontSize: 13 }}>
               <strong>Liveness policy {data.policy.version}</strong>
               <p>Capture order is enforced. Direction consistency is {data.policy.consistency === "reject" || data.policy.consistency === "enforced" ? "enforced" : data.policy.consistency === "review" ? "reviewed, not auto-rejected" : "recorded only (the pose model's turn direction is not reliable enough to act on)"}. Each action needs at least {data.policy.minimumDistinctFrames} distinct observations. Identity continuity is judged on the best frontal frame; missing frontal evidence requires review.</p>
               <p>Screen illumination and texture measurements are experimental; screen illumination is opt-in per user, so an enforcing tenant sees users who decline it here. Camera labels and capture timing are advisory signals.</p>
-              <p>{data.policy.validated ? "This deployment declares validation for this policy version." : "Validation for automatic production approval has not been recorded."}</p>
+              <p>{data.policy.validated && data.policy.fingerprint ? "Matching release validation recorded." : "No matching release validation recorded."}</p>
+              {data.policy.fingerprint && <details style={{ overflowWrap: "anywhere" }}><summary>Validation record</summary>
+                <p>Fingerprint: {data.policy.fingerprint}</p><p>Dataset: {data.policy.dataset || "Not recorded"}</p><p>Evaluation: {data.policy.evaluation || "Not recorded"}</p>
+              </details>}
+            </div>}
+            {data.livenessSignals?.passive && <div style={{ marginBottom: 16, fontSize: 12 }}>
+              <h4 style={{ margin: "0 0 8px", fontSize: 13 }}>Passive Diagnostics</h4>
+              <div style={rowStyle}><span style={labelStyle}>Selfie score</span><span style={valStyle}>{data.livenessSignals.passive.score?.toFixed(3) ?? "Not recorded"}</span></div>
+              <div style={rowStyle}><span style={labelStyle}>Frontal median (record only)</span><span style={valStyle}>{data.livenessSignals.passive.passiveAggregate?.frontalMedian?.toFixed(3) ?? "Not recorded"}</span></div>
+              <div style={rowStyle}><span style={labelStyle}>Frontal frame scores</span><span style={{ ...valStyle, overflowWrap: "anywhere" }}>{data.livenessSignals.passive.passiveAggregate?.frameScores?.map(score => score.toFixed(3)).join(", ") || "Not recorded"}</span></div>
             </div>}
             {/* v5 E2: active-liveness evidence for the reviewer */}
             {data.livenessChallenge && <ChallengeDetail lc={data.livenessChallenge} identity={data.livenessIdentity} telemetry={data.captureTelemetry} signals={data.livenessSignals} />}
@@ -515,7 +562,7 @@ function SessionDetail({ sessionId, onClose }) {
             )}
 
             {/* Evidence photos */}
-            <EvidenceGallery sessionId={sessionId} />
+            <EvidenceGallery sessionId={sessionId} resultId={data.resultId || ""} />
           </>
         )}
       </div>
@@ -533,8 +580,9 @@ const FILE_TYPE_LABELS = {
 };
 
 /* __VP_API_BASE__ is injected by Vite at build time (same as in api.js) */
-function EvidenceGallery({ sessionId }) {
-  const { data, error } = useData(`/v1/dashboard/sessions/${sessionId}/evidence`, [sessionId]);
+function EvidenceGallery({ sessionId, resultId = "" }) {
+  const query = resultId ? `?resultId=${encodeURIComponent(resultId)}` : "";
+  const { data, error } = useData(`/v1/dashboard/sessions/${sessionId}/evidence${query}`, [sessionId, resultId]);
   const [lightbox, setLightbox] = useState(null); // full-size image URL
 
   if (error) return <p style={{ color: "#DC2626", fontSize: 13 }}>Could not load evidence: {error.message}</p>;
@@ -548,7 +596,11 @@ function EvidenceGallery({ sessionId }) {
       <h4 style={{ margin: "0 0 10px", fontSize: 13, color: "#374151", textTransform: "uppercase", letterSpacing: 0.5 }}>
         Evidence Photos ({data.evidence.length})
       </h4>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 8 }}>
+      <p style={{ fontSize: 12, color: data.attribution === "consumed" ? "#6B7280" : "#B45309", overflowWrap: "anywhere" }}>
+        {data.attribution === "consumed" ? "Consumed by this result" : data.attribution === "legacy-unbound" ? "Legacy evidence: exact attempt attribution unavailable" : "Attempt evidence: exact result attribution unavailable"}
+        {data.attemptId ? ` | ${data.attemptId}` : ""}
+      </p>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
         {data.evidence.map((ev) => {
           const imgSrc = `${__VP_API_BASE__}${ev.serveUrl}`;
           const title = FILE_TYPE_LABELS[ev.fileType] || ev.fileType;
@@ -560,14 +612,16 @@ function EvidenceGallery({ sessionId }) {
               <img
                 src={imgSrc}
                 alt={title + subtitle}
-                style={{ width: "100%", height: 110, objectFit: "cover", display: "block" }}
+                style={{ width: "100%", height: 110, objectFit: "contain", display: "block" }}
                 onError={(e) => { e.target.style.display = "none"; e.target.nextSibling.style.display = "flex"; }}
               />
               <div style={{ display: "none", height: 110, alignItems: "center", justifyContent: "center", color: "#9CA3AF", fontSize: 12 }}>
                 ⚠️ Load failed
               </div>
-              <div style={{ padding: "4px 8px", fontSize: 11, color: "#6B7280", fontWeight: 500 }}>
+              <div style={{ padding: "4px 8px", fontSize: 11, color: "#6B7280", fontWeight: 500, overflowWrap: "anywhere" }}>
                 {title}{subtitle}
+                <br />{ev.attemptId ? `Attempt ${ev.attemptId.slice(0, 8)}` : "Legacy / unbound"}
+                <br />{ev.createdAt?.slice(0, 19).replace("T", " ")}
               </div>
             </div>
           );
@@ -623,8 +677,10 @@ function ChallengeDetail({ lc, identity, telemetry, signals }) {
                 <tr key={a}>
                   <td style={cell}>{a}</td>
                   <td style={cell}>{yes(pa.present)}</td>
-                  <td style={cell}>{yes(pa.live)}</td>
-                  <td style={cell}>{pa.poseChecked ? yes(pa.poseOk) : pa.poseProviderUnavailable ? "no provider" : "n/a"}</td>
+                  <td style={cell} title={pa.failureStage === "passive_floor" ? `Passive maximum ${pa.score?.toFixed(3)} below floor ${pa.passiveFloor}` : ""}>
+                    {pa.failureStage === "passive_floor" ? `Below ${pa.passiveFloor}` : yes(pa.live)}
+                  </td>
+                  <td style={cell}>{pa.failureStage === "passive_floor" ? "not evaluated" : pa.poseChecked ? yes(pa.poseOk) : pa.poseProviderUnavailable ? "no provider" : "n/a"}</td>
                   <td style={cell}>{pa.peakYaw != null ? `${pa.peakYaw > 0 ? "+" : ""}${pa.peakYaw}` : "–"}</td>
                   <td style={cell}>{pa.peakPitch != null ? `${pa.peakPitch > 0 ? "+" : ""}${pa.peakPitch}` : "–"}</td>
                   <td style={cell}>{pa.trajectoryChecked ? (pa.trajectoryOk ? "ok" : "static") : "–"}</td>
@@ -659,7 +715,7 @@ function ChallengeDetail({ lc, identity, telemetry, signals }) {
   );
 }
 
-function ReviewQueue() {
+function ReviewQueue({ onSelectSession }) {
   const { data, error, reload } = useData("/v1/manual-review");
   const [notes, setNotes] = useState({});
   const [busy, setBusy] = useState(null);
@@ -685,10 +741,19 @@ function ReviewQueue() {
       {(data?.cases || []).length === 0 && data && <Card>No cases waiting for review. 🎉</Card>}
       {(data?.cases || []).map((c) => (
         <Card key={c.sessionId} title={c.customerReference || c.sessionId}>
-          <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap", alignItems: "center" }}>
             <StatusPill status={c.status} />
             {c.riskLevel && <StatusPill status={c.riskLevel} />}
+            <span style={{ fontSize: 12, color: "#6B7280" }}>
+              {c.verificationType?.replace(/_/g, " ")} · attempt {c.attemptNumber || 1}
+              {c.submittedAt ? ` · submitted ${c.submittedAt.slice(0, 19).replace("T", " ")}` : ""}
+            </span>
+            <button type="button" onClick={() => onSelectSession?.(c.sessionId)}
+              style={{ marginLeft: "auto", padding: "6px 12px", background: "#fff", color: PRIMARY, border: `1px solid ${PRIMARY}`, borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: 600 }}>
+              Full session details
+            </button>
           </div>
+          <div style={{ fontSize: 11, color: "#9CA3AF", marginBottom: 8, fontFamily: "ui-monospace, monospace" }}>{c.sessionId}</div>
           <div style={{ display: "flex", gap: 24, marginBottom: 10, fontSize: 13, flexWrap: "wrap" }}>
             <div>Liveness: <strong>{c.scores?.liveness != null ? `${(c.scores.liveness * 100).toFixed(1)}%` : "—"}</strong></div>
             <div>Face match: <strong>{c.scores?.faceMatch != null ? `${(c.scores.faceMatch * 100).toFixed(1)}%` : "—"}</strong></div>
@@ -696,6 +761,11 @@ function ReviewQueue() {
           </div>
 
           <ReasonCodes codes={c.reasonCodes} />
+          {c.waivedReasonCodes?.length > 0 && (
+            <p style={{ fontSize: 12, color: "#6B7280", margin: "6px 0 0" }}>
+              Waived by the liveness auto-approve rule: {c.waivedReasonCodes.join(", ")}
+            </p>
+          )}
 
           {c.extractedData && (
             <pre style={{ background: "#F9FAFB", padding: 8, borderRadius: 6, fontSize: 11, overflow: "auto", margin: "10px 0" }}>
@@ -831,6 +901,8 @@ function Settings() {
       const o = data.thresholds.overrides;
       setDraft({
         livenessReject: o.liveness?.reject ?? null, livenessPass: o.liveness?.pass ?? null,
+        livenessAutoApprove: o.liveness?.autoApprove ?? null,
+        challengePassApproves: o.liveness?.challengePassApproves ?? null,
         faceReject: o.faceMatch?.reject ?? null, facePass: o.faceMatch?.pass ?? null,
         maxFailedAttempts: o.maxFailedAttempts ?? null,
         maxIdentitiesPerDevice: o.risk?.maxIdentitiesPerDevice ?? null,
@@ -843,10 +915,12 @@ function Settings() {
   async function saveThresholds() {
     setMsg(null);
     const body = {};
-    if (draft.livenessReject != null || draft.livenessPass != null) {
+    if (draft.livenessReject != null || draft.livenessPass != null || draft.livenessAutoApprove != null || draft.challengePassApproves != null) {
       body.liveness = {};
       if (draft.livenessReject != null) body.liveness.reject = draft.livenessReject;
       if (draft.livenessPass != null) body.liveness.pass = draft.livenessPass;
+      if (draft.livenessAutoApprove != null) body.liveness.autoApprove = draft.livenessAutoApprove;
+      if (draft.challengePassApproves != null) body.liveness.challengePassApproves = draft.challengePassApproves;
     }
     if (draft.faceReject != null || draft.facePass != null) {
       body.faceMatch = {};
@@ -903,8 +977,19 @@ function Settings() {
         <p style={{ color: "#6B7280", fontSize: 13, marginTop: 0 }}>
           Blank = platform default. Effective now: liveness {eff.liveness.reject}–{eff.liveness.pass},
           face match {eff.faceMatch.reject}–{eff.faceMatch.pass}. Scores below "reject" are rejected,
-          between the two go to manual review.
+          between the two go to manual review. Liveness auto-approve: a passive score above {eff.liveness.autoApprove}
+          {eff.liveness.challengePassApproves !== false ? " or a passed active challenge" : ""} approves the liveness gate
+          and waives liveness-quality flags (identity, replay and tamper flags still apply).
         </p>
+        <NumField label="Liveness: auto-approve above (1 = off)" value={draft.livenessAutoApprove}
+          onChange={(v) => setDraft({ ...draft, livenessAutoApprove: v })}
+          hint={`${data.thresholds.bounds.liveness.autoApproveMin ?? 0.3}–${data.thresholds.bounds.liveness.autoApproveMax ?? 1}, default ${data.thresholds.defaults.liveness.autoApprove}`} />
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, margin: "4px 0 10px" }}>
+          <input type="checkbox"
+            checked={draft.challengePassApproves ?? eff.liveness.challengePassApproves !== false}
+            onChange={(e) => setDraft({ ...draft, challengePassApproves: e.target.checked })} />
+          A passed active liveness challenge approves the liveness gate
+        </label>
         <NumField label="Liveness: reject below" value={draft.livenessReject}
           onChange={(v) => setDraft({ ...draft, livenessReject: v })} hint={`min ${data.thresholds.bounds.liveness.rejectMin}`} />
         <NumField label="Liveness: pass at or above" value={draft.livenessPass}

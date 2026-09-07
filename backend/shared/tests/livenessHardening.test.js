@@ -2,6 +2,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { decide, resolveThresholds } = require("../src/decisionEngine");
+// STRICT = the liveness auto-approve rule switched off (tenant knobs). The
+// contracts below describe how each signal routes when nothing waives it;
+// the default rule (score > autoApprove OR challenge passed → waive liveness
+// quality codes) is covered by its own tests.
+const STRICT_T = resolveThresholds({ thresholds: { liveness: { autoApprove: 1, challengePassApproves: false } } });
 const { verifyLivenessChallenge, isChallengeFresh, generateLivenessChallenge, computeFrameBinding, verifyFrameBinding, assessExpression } = require("../src/livenessChallenge");
 const challenge = actions => ({ actions, nonce: "test", issuedAt: new Date().toISOString() });
 const frame = (action, score, yaw, i) => ({ action, checksum: String(i), createdAt: new Date(Date.now() + i * 200), captureMode: "auto", liveness: { score, faceCount: 1 }, pose: { yaw, pitch: 0 } });
@@ -15,7 +20,7 @@ test("missing expression evidence requires review and generator excludes unsuppo
   for (const action of ["blink", "open_mouth"]) {
     const r = verifyLivenessChallenge(challenge([action]), [0,1,2].map(i => frame(action, .95, 0, i)), {}, { enforcePose: true });
     assert.equal(r.evidenceInsufficient, true);
-    assert.notEqual(decide({ livenessChallenge: r }).status, "approved");
+    assert.notEqual(decide({ livenessChallenge: r }, STRICT_T).status, "approved");
   }
   for (let i = 0; i < 100; i++) assert.ok(generateLivenessChallenge().actions.every(a => !["blink", "open_mouth", "smile"].includes(a)));
   // Capability-driven: a landmark-capable provider may opt expressions back in
@@ -34,7 +39,7 @@ test("one/two repeated still frames require review", () => {
     const frames = Array.from({length:n}, (_,i) => ({ ...frame("turn_left", .95, 20, i), checksum: "same" }));
     const r = verifyLivenessChallenge(challenge(["turn_left"]), frames, {}, { enforcePose:true });
     assert.equal(r.evidenceInsufficient, true);
-    assert.notEqual(decide({livenessChallenge:r}).status, "approved");
+    assert.notEqual(decide({livenessChallenge:r}, STRICT_T).status, "approved");
   }
 });
 test("disjoint passive and pose evidence does not satisfy a movement", () => {
@@ -52,7 +57,7 @@ test("blink must reopen; static zero mouth geometry cannot pass", () => {
   assert.equal(assessExpression("open_mouth",[expr(.3,0),expr(.3,0),expr(.3,0)]).ok,false);
 });
 test("enforced flash missing, inconclusive or false never approves", () => {
-  for (const ok of [undefined,null,false]) assert.equal(decide({liveness:{score:.95,flash:{enforced:true,ok}}}).status,"manual_review");
+  for (const ok of [undefined,null,false]) assert.equal(decide({liveness:{score:.95,flash:{enforced:true,ok}}}, STRICT_T).status,"manual_review");
 });
 test("v2 binding authenticates session, attempt, capture mode and metadata", () => {
   const context = ["tenant","session","attempt","liveness_frame","auto",{sequence:[1,2,3]}];

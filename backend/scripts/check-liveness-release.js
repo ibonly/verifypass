@@ -5,6 +5,8 @@ const { getDb } = require("../src/lib/db");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { resolveThresholds } = require("@verifypass/shared");
+const { livenessValidation } = require("../src/lib/livenessValidation");
 (async () => {
   assertGeneratedSchema();
   const db = getDb();
@@ -19,6 +21,14 @@ const crypto = require("crypto");
         if (digest !== expected) throw new Error(`Model checksum mismatch: ${name}`);
       }
     }
-    console.log(JSON.stringify({ success: true, release: releaseIdentity(), transactions: true, modelChecksums: "verified", policyValidated: process.env.LIVENESS_VALIDATED_POLICY === releaseIdentity().policyVersion }, null, 2));
+    const provider = (process.env.VP_PROVIDER || "onnx").toLowerCase();
+    const tenants = await db.tenant.findMany({ select: { tenantUid: true, settings: true } });
+    const policies = (tenants.length ? tenants : [{ tenantUid: null, settings: {} }]).map(tenant => ({
+      tenantUid: tenant.tenantUid,
+      ...livenessValidation({ settings: tenant.settings || {}, thresholds: resolveThresholds(tenant.settings || {}, provider), provider })
+    }));
+    const policyValidated = policies.every(policy => policy.validated);
+    console.log(JSON.stringify({ success: policyValidated, release: releaseIdentity(), transactions: true, modelChecksums: "verified", policyValidated, policies }, null, 2));
+    if (!policyValidated) throw new Error("LIVENESS_RELEASE_UNVALIDATED: provide matching LIVENESS_VALIDATION_RECEIPTS with dataset and evaluation references for every effective tenant policy");
   } finally { await db.$disconnect(); }
 })().catch(e => { console.error(e.message); process.exitCode = 1; });

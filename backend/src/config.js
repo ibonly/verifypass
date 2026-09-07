@@ -1,5 +1,7 @@
 "use strict";
 
+const path = require("path");
+
 function requireSecret(name, fallback) {
   const value = process.env[name] || fallback;
   if (process.env.NODE_ENV === "production") {
@@ -44,7 +46,10 @@ module.exports = {
     : (process.env.NODE_ENV || "development") === "production",
   sdkTokenSecret: requireSecret("SDK_TOKEN_SECRET", "dev-only-secret"),
   authTokenSecret: requireSecret("AUTH_TOKEN_SECRET", "dev-only-auth-secret"),
-  evidenceDir: process.env.EVIDENCE_DIR || "./evidence-store",
+  // Always absolute. A relative EVIDENCE_DIR (the .env default) is anchored on
+  // the backend directory, NOT process.cwd(), so `node server.js` from
+  // backend/ and `node scripts/dev-stack.js` from the repo root share one store.
+  evidenceDir: path.resolve(__dirname, "..", process.env.EVIDENCE_DIR || "./evidence-store"),
   hostedBaseUrl: process.env.HOSTED_BASE_URL || "https://verify.verifypass.com",
   // Verification provider the worker runs (mirrors worker.js). The API needs
   // it to issue only challenges the provider can verify: expression actions

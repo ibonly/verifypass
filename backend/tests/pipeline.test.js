@@ -15,6 +15,11 @@ const { createMockDb } = require("./helpers/mockDb");
 const { runVerification } = require("../src/worker/pipeline");
 
 const KEY = crypto.randomBytes(32);
+// STRICT = the liveness auto-approve rule switched off (tenant knobs). The
+// contracts below describe how each signal routes when nothing waives it;
+// the default rule (score > autoApprove OR challenge passed → waive liveness
+// quality codes) is covered by its own tests.
+const STRICT = { thresholds: { liveness: { autoApprove: 1, challengePassApproves: false } } };
 
 function stubProvider(overrides = {}) {
   return {
@@ -285,7 +290,7 @@ test("OCR service missing: degrades to manual_review, not crash", async () => {
 });
 
 test("challenge frames from a PREVIOUS attempt cannot satisfy a reissued challenge", async () => {
-  const { db, session, addEvidence } = await seed();
+  const { db, session, addEvidence } = await seed({ settings: STRICT });
   const now = Date.now();
   // Reissued challenge (as retrySession does): fresh issuedAt = now
   await db.verificationSession.updateMany({
@@ -302,7 +307,7 @@ test("challenge frames from a PREVIOUS attempt cannot satisfy a reissued challen
 });
 
 test("challenge frames uploaded AFTER the reissue verify normally", async () => {
-  const { db, session, addEvidence } = await seed();
+  const { db, session, addEvidence } = await seed({ settings: STRICT });
   const now = Date.now();
   await db.verificationSession.updateMany({
     where: { id: session.id },
@@ -312,6 +317,45 @@ test("challenge frames uploaded AFTER the reissue verify normally", async () => 
 
   const out = await runVerification({ sessionUid: "vps_PIPE1" }, { db, provider: stubProvider(), evidenceKey: KEY });
   assert.equal(out.status, "manual_review", `got ${out.reasonCodes}`);
+});
+
+test("liveness auto-approve (default): a selfie in the old review band approves, and the waiver is persisted end to end", async () => {
+  // Selfie scores 0.75: inside the faceplugin review band (0.70–0.85), which
+  // the old policy routed to manual review. 0.75 > autoApprove 0.6 → approved,
+  // with LIVENESS_BORDERLINE recorded as waived on session, result and webhook.
+  const { db, session } = await seed();
+  const provider = stubProvider();
+  const original = provider.checkLiveness;
+  let n = 0;
+  provider.checkLiveness = async buf => ({ ...await original(buf), ...(n++ === 0 ? { score: 0.75 } : {}) });
+  const out = await runVerification({ sessionUid: session.sessionUid }, { db, provider, evidenceKey: KEY });
+  assert.equal(out.status, "approved", `got ${out.reasonCodes}`);
+  assert.deepEqual(out.reasonCodes, []);
+  const s = await db.verificationSession.findFirst({ where: { id: session.id } });
+  assert.equal(s.status, "approved");
+  assert.ok(s.decisionReason.waivedReasonCodes.includes("LIVENESS_BORDERLINE"), JSON.stringify(s.decisionReason));
+  assert.equal(s.decisionReason.livenessWaiver, "score");
+  const r = db.verificationResult.rows[0];
+  assert.equal(r.livenessScore, 0.75);
+  assert.ok(r.rawResult.decision.waivedReasonCodes.includes("LIVENESS_BORDERLINE"));
+  // webhook: same event name as before, plus who decided and why
+  const hook = db.outbox.rows.find((o) => o.type === "send_webhook");
+  assert.equal(hook.payload.event, "verification.approved");
+  assert.equal(hook.payload.snapshot.decisionSource, "automatic");
+  assert.deepEqual(hook.payload.snapshot.reasonCodes, []);
+  assert.ok(hook.payload.snapshot.waivedReasonCodes.includes("LIVENESS_BORDERLINE"));
+});
+
+test("liveness auto-approve (default): a rejected outcome still sends verification.rejected with its reason codes", async () => {
+  const { db, session } = await seed();
+  const provider = stubProvider();
+  provider.checkLiveness = async () => ({ score: 0.2, faceCount: 1 });
+  const out = await runVerification({ sessionUid: session.sessionUid }, { db, provider, evidenceKey: KEY });
+  assert.equal(out.status, "rejected", `got ${out.reasonCodes}`);
+  const hook = db.outbox.rows.find((o) => o.type === "send_webhook");
+  assert.equal(hook.payload.event, "verification.rejected");
+  assert.equal(hook.payload.snapshot.decisionSource, "automatic");
+  assert.ok(hook.payload.snapshot.reasonCodes.includes("LIVENESS_FAILED"), JSON.stringify(hook.payload.snapshot));
 });
 
 test("tenant thresholds from settings are applied", async () => {
@@ -437,7 +481,7 @@ test("FV-1: one frame relabeled across two challenge actions → rejected DUPLIC
 });
 
 test("FV-1: distinct frame per action verifies normally", async () => {
-  const { db, session, addEvidence } = await seed();
+  const { db, session, addEvidence } = await seed({ settings: STRICT });
   const now = Date.now();
   await db.verificationSession.updateMany({
     where: { id: session.id },
@@ -476,7 +520,7 @@ test("P0 binding: nonce-matching frame with a bad HMAC → LIVENESS_FRAME_BINDIN
 test("P0 binding: correctly bound frame verifies end-to-end", async (t) => {
   const { computeFrameBinding } = require("@verifypass/shared");
   const secret = require("../src/config").sdkTokenSecret;
-  const { db, session, addEvidence } = await seed();
+  const { db, session, addEvidence } = await seed({ settings: STRICT });
   const now = Date.now();
   await db.verificationSession.updateMany({
     where: { id: session.id },
@@ -496,7 +540,7 @@ test("P0 binding: correctly bound frame verifies end-to-end", async (t) => {
 });
 
 test("P0 binding: PRODUCTION ignores unbound liveness frames when a challenge nonce exists", async (t) => {
-  const { db, session, addEvidence } = await seed();
+  const { db, session, addEvidence } = await seed({ settings: STRICT });
   const now = Date.now();
   await db.verificationSession.updateMany({
     where: { id: session.id },
@@ -533,7 +577,7 @@ test("v5 A4/C3: challenge performer must match the selfie; decision liveness use
 });
 
 test("screen-flash: unsigned mosaic cannot satisfy an enforced flash policy", async () => {
-  const { db, session, addEvidence } = await seed({ settings: { challenge: { enforceFlash: true } } });
+  const { db, session, addEvidence } = await seed({ settings: { ...STRICT, challenge: { enforceFlash: true } } });
   await addEvidence("liveness_frame", { label: "flash", challengeNonce: "baseline", meta: { sequence: [[255,0,0],[0,255,0],[0,0,255],[255,255,255]], tile: 96 } });
   const out = await runVerification({ sessionUid: "vps_PIPE1" }, { db, provider: stubProvider(), evidenceKey: KEY });
   assert.equal(out.status, "manual_review");
@@ -574,7 +618,7 @@ test("hardening: identity provider failure reviews instead of approving", async 
 });
 
 test("hardening: good challenge frames cannot replace a failed selfie score", async () => {
-  const { db, session } = await seed();
+  const { db, session } = await seed({ settings: STRICT });
   const provider = stubProvider();
   const original = provider.checkLiveness;
   let n = 0;

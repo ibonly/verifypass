@@ -108,10 +108,7 @@ const HANDLERS = {
   send_webhook: (payload) => sendWebhook(payload, { db: getDeps().db }),
   expire_sessions: async () => {
     const db = getDb();
-    await db.verificationSession.updateMany({
-      where: { status: { in: ["created", "started"] }, expiresAt: { lt: new Date() } },
-      data: { status: "expired" }
-    });
+    await require("./src/services/sessionExpiry").expireSessions(db);
     // Watchdog: sessions stuck in "submitted" (worker died mid-job / job
     // retries exhausted) get a terminal SESSION_TIMEOUT instead of silence.
     const { failStuckSubmitted } = require("./src/worker/watchdog");
@@ -195,6 +192,7 @@ async function tick() {
     lastReclaim = Date.now();
     await require("./src/services/reconcileEvidence").reconcileEvidence(db);
     try {
+      await HANDLERS.expire_sessions();
       const { reclaimStaleJobs } = require("./src/worker/watchdog");
       const r = await reclaimStaleJobs(db);
       if (r.requeued || r.failed) {

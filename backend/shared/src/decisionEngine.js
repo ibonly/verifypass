@@ -33,7 +33,52 @@ function resolveThresholds(tenantSettings = {}, providerName) {
     merged[k].pass = Math.max(Math.min(merged[k].pass, b.passMax), b.rejectMin);
     if (merged[k].reject > merged[k].pass) merged[k].reject = merged[k].pass;
   }
+  // Liveness auto-approve knobs (see DEFAULT_THRESHOLDS for semantics).
+  const lb = bounds.liveness;
+  const aa = merged.liveness.autoApprove;
+  merged.liveness.autoApprove = Number.isFinite(aa)
+    ? Math.min(Math.max(aa, lb.autoApproveMin ?? 0), lb.autoApproveMax ?? 1)
+    : baseDefaults.liveness.autoApprove;
+  merged.liveness.challengePassApproves = merged.liveness.challengePassApproves !== false;
   return merged;
+}
+
+/**
+ * Liveness-QUALITY codes the auto-approve rule may waive. Deliberately NOT
+ * here (they survive the waiver because they are about WHO, about tamper /
+ * replay, or about release governance — not about how live the face looked):
+ *   LIVENESS_IDENTITY_MISMATCH / _BORDERLINE / _UNAVAILABLE (identity continuity),
+ *   LIVENESS_CHALLENGE_DUPLICATE_FRAME (replay), LIVENESS_FRAME_BINDING_FAILED (tamper),
+ *   MULTIPLE_FACES_DURING_CHALLENGE, LIVENESS_POLICY_UNVERIFIED (unvalidated release),
+ *   LIVENESS_FLASH_UNVERIFIED (only ever raised when the tenant ENFORCES flash),
+ *   and every non-liveness code (selfie face count, face match, document, risk).
+ * LIVENESS_DIRECTION_INCONSISTENT / LIVENESS_FLAT_OBJECT are waivable only as
+ * soft review flags; when the tenant enforces them (they arrive as challenge
+ * reject codes) they stay — auto-approve never overrides an opted-in check.
+ */
+const LIVENESS_WAIVABLE = Object.freeze(new Set([
+  "LIVENESS_FAILED", "LIVENESS_BORDERLINE",
+  "LIVENESS_CHALLENGE_FAILED", "LIVENESS_CHALLENGE_INCOMPLETE", "LIVENESS_CHALLENGE_EXPIRED",
+  "LIVENESS_CHALLENGE_SEQUENCE_INVALID",
+  "LIVENESS_MOTION_UNVERIFIED", "LIVENESS_MANUAL_CAPTURE", "LIVENESS_POSE_PROVIDER_UNAVAILABLE",
+  "LIVENESS_POSE_UNAVAILABLE", "LIVENESS_DIRECTION_INCONSISTENT", "LIVENESS_FLAT_OBJECT",
+  "LIVENESS_EVIDENCE_INSUFFICIENT"
+]));
+/** Waivable as soft (review) flags, never as tenant-enforced (reject) codes. */
+const ENFORCEABLE = Object.freeze(new Set(["LIVENESS_DIRECTION_INCONSISTENT", "LIVENESS_FLAT_OBJECT"]));
+
+/**
+ * Product rule (2026-09-07): the liveness gate is satisfied when the passive
+ * score is strictly above thresholds.liveness.autoApprove OR the active
+ * challenge passed. Returns the waiver source or null.
+ */
+function livenessWaiver({ liveness, livenessChallenge }, thresholds) {
+  const t = thresholds.liveness || {};
+  const scoreOk = liveness && Number.isFinite(liveness.score) && liveness.score >= 0 && liveness.score <= 1
+    && Number.isFinite(t.autoApprove) && liveness.score > t.autoApprove;
+  if (scoreOk) return "score";
+  if (t.challengePassApproves !== false && livenessChallenge && livenessChallenge.ok === true) return "challenge";
+  return null;
 }
 
 /**
@@ -164,13 +209,29 @@ function decide(signals, thresholds = DEFAULT_THRESHOLDS) {
     // the verification phase lands, gate on ITS result, not on OCR.
   }
 
-  if (rejects.length) {
-    return { status: "rejected", riskLevel: "high", reasonCodes: rejects.concat(reviews) };
+  // Liveness auto-approve: strip the waivable liveness-quality codes, keep
+  // everything else. The waived codes are RETURNED (not dropped) so the
+  // result row, the session and the webhook can show a reviewer what the
+  // rule overrode.
+  const waiver = livenessWaiver({ liveness, livenessChallenge }, thresholds);
+  const waived = [];
+  const keep = (list, hard) => list.filter((code) => {
+    if (!waiver) return true;
+    if (hard && ENFORCEABLE.has(code)) return true; // tenant-enforced → not waivable
+    if (LIVENESS_WAIVABLE.has(code)) { waived.push(code); return false; }
+    return true;
+  });
+  const hardRejects = keep(rejects, true);
+  const softReviews = keep(reviews, false);
+  const extra = waived.length ? { waivedReasonCodes: waived, livenessWaiver: waiver } : {};
+
+  if (hardRejects.length) {
+    return { status: "rejected", riskLevel: "high", reasonCodes: hardRejects.concat(softReviews), ...extra };
   }
-  if (reviews.length) {
-    return { status: "manual_review", riskLevel: "medium", reasonCodes: reviews };
+  if (softReviews.length) {
+    return { status: "manual_review", riskLevel: "medium", reasonCodes: softReviews, ...extra };
   }
-  return { status: "approved", riskLevel: "low", reasonCodes: [] };
+  return { status: "approved", riskLevel: "low", reasonCodes: [], ...extra };
 }
 
-module.exports = { decide, resolveThresholds };
+module.exports = { decide, resolveThresholds, livenessWaiver, LIVENESS_WAIVABLE };

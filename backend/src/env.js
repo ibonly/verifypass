@@ -14,4 +14,11 @@ try {
   // dotenv not installed (e.g. minimal prod image) — rely on real env vars.
 }
 
+// Anchor for legacy relative evidence storagePaths (see shared/src/storage.js
+// resolveLocal). Defaults to the backend directory; override only when a
+// database was produced by a deployment with a different on-disk layout.
+if (!process.env.EVIDENCE_LOCAL_ROOT) {
+  process.env.EVIDENCE_LOCAL_ROOT = path.resolve(__dirname, "..");
+}
+
 module.exports = {};
