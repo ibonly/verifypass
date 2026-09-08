@@ -46,7 +46,7 @@ function createOnnxProvider({ modelsDir, matchThreshold = 0.6, livenessThreshold
     const file = MODEL_FILES[name];
     const p = path.join(dir, file);
     if (!fs.existsSync(p)) {
-      throw new ProviderError(`ONNX model missing: ${p}. Fetch models first: node scripts/fetch-onnx-models.js`);
+      throw new ProviderError(`ONNX model missing: ${p}. Fetch models first: node scripts/fetch-models.js`);
     }
     const expected = require("../../../scripts/model-manifest.json")[require("path").basename(p)];
     const actual = require("crypto").createHash("sha256").update(require("fs").readFileSync(p)).digest("hex");

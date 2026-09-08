@@ -1,5 +1,12 @@
 # Codebase cleanup analysis — 2026-09-05
 
+> **Update, 2026-09-07:** The 177 quarantined files described below were
+> checksum-verified and permanently deleted at the user's request. Only the
+> local `delete/manifest.json` record remains; restoration from the quarantine
+> is no longer possible. This report preserves the original operation's history.
+> See [production cleanup analysis](PRODUCTION_CLEANUP_2026-09-07.md) for the
+> current inventory, additional removal, exclusions, and validation results.
+
 Moved **177 files (415,949,496 bytes; 396.68 MiB)** into `delete/`, preserving their original relative paths. No application source files were removed. Files remain available for manual deletion or restoration. Moving files does not reclaim disk space until you delete them.
 
 ## Scope and method

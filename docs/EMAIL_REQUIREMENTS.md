@@ -23,7 +23,7 @@ Scope: full codebase — backend API/worker, shared package, dashboard, SDK, ver
 > | C1 review waiting | pipeline `finalize` → manual_review → reviewers |
 > | C2 second confirmation | review `proposed` → other reviewers |
 > | C3 webhook exhausted | dispatcher `exhausted` → tenant admins |
-> | C5 workspace status | `tenantStatusService.setTenantStatus` |
+> | C5 workspace status | Email helper available; no application trigger is wired |
 > | C6 production request | `onboarding/request-production` → ops |
 > | D1 deletion completed | `customers/biometric-data` DELETE → audit ref + confirm |
 >

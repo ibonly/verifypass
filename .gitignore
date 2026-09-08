@@ -8,11 +8,11 @@ coverage/
 evidence-store/
 .evidence-store/
 .dev-credentials.json
-apps/worker/models/
-apps/api/prisma/migrations/dev/
+backend/.worker.pid
+backend/models/*.partial
+/audit/liveness/private/
 .DS_Store
-node_modules/apps/sample-app/public/models/
 
-# Local cleanup quarantine and generated Vite config bundles
+# Local cleanup records and generated Vite config bundles
 /delete/
 **/vite.config.*.timestamp-*.mjs

@@ -4,7 +4,7 @@
 # commit never redeploys the frontend, and vice versa.
 #
 # cPanel target: static dist/ folders uploaded over FTPS to the subdomain
-# document roots (see deploy/cpanel.md). Required repo secrets:
+# document roots (set via the CPANEL_*_DIR repository variables below). Required repo secrets:
 #   CPANEL_FTP_SERVER      e.g. ftp.yourdomain.com
 #   CPANEL_FTP_USERNAME
 #   CPANEL_FTP_PASSWORD

@@ -1,4 +1,4 @@
-Run a # Liveness feature audit — 6 September 2026
+# Liveness feature audit — 6 September 2026
 
 ## Executive assessment
 

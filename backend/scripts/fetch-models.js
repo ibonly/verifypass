@@ -3,7 +3,7 @@
 // Fetch the MIT-licensed Faceplugin ONNX models into backend/models/.
 // These power the server-side ONNX provider (no license/activation, no Docker).
 //
-//   node scripts/fetch-onnx-models.js
+//   node scripts/fetch-models.js
 //
 // Source: https://github.com/Faceplugin-ltd/FaceRecognition-LivenessDetection-Javascript (MIT)
 

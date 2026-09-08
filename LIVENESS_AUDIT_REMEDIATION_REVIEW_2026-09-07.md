@@ -101,7 +101,7 @@ Net: 32 of 35 findings have a landed fix. The remediation also introduced one P1
 
 **L31 — Model accuracy evidence.** *Tooling only.* `evaluate-liveness-dataset.js` requires independently labelled held-out data, reports Wilson intervals, refuses circular labels; `calibrate-thresholds.js` now uses reviewer labels only and marks output preliminary. No dataset exists in the repo; this is expected and remains open by nature.
 
-**L32 — Inference latency and leases.** *Fixed.* Total job budget (`budgetMs`, default 180s, capped 240s) with a late-result guard; provider call memoisation by buffer hash; ONNX detection cache; 15s lease heartbeat in both workers; job completion writes are owner-fenced; `performance` block in `rawResult`. A synthetic detector benchmark exists (`detection-benchmark.json`), not a full-pipeline measurement.
+**L32 — Inference latency and leases.** *Fixed.* Total job budget (`budgetMs`, default 180s, capped 240s) with a late-result guard; provider call memoisation by buffer hash; ONNX detection cache; 15s lease heartbeat in both workers; job completion writes are owner-fenced; `performance` block in `rawResult`. A synthetic detector timing run was done at the time (not retained in the repo); no full-pipeline measurement exists.
 
 **L33 — Browser lifecycle, flashing, accessibility.** *Partly (source).* `nextVideoFrame` waits for a real camera frame before each capture; camera pauses on `hidden`/orientation change; late model loads are disposed; reduced-motion CSS; flash is per-user opt-in with explanatory copy. Device and screen-reader testing still required.
 

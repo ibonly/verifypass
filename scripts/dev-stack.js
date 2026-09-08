@@ -16,8 +16,8 @@
 //      (Without them, verify jobs fail closed — everything else still works.)
 //
 // Then, in two more terminals (point the SPAs at this API):
-//   VP_API_BASE=http://localhost:3000 npm run dev -w frontend/dashboard
-//   VP_API_BASE=http://localhost:3000 npm run dev -w frontend/verify-page
+//   VP_API_BASE=http://localhost:3000 npm run dev --prefix frontend/dashboard
+//   VP_API_BASE=http://localhost:3000 npm run dev --prefix frontend/verify-page
 
 const fs = require("fs");
 const path = require("path");
@@ -112,8 +112,8 @@ async function main() {
  Reviewer user   ${creds.reviewerEmail} / ${creds.password}
 
  SPAs (two more terminals):
-   VP_API_BASE=http://localhost:${PORT} npm run dev -w frontend/dashboard
-   VP_API_BASE=http://localhost:${PORT} npm run dev -w frontend/verify-page
+   VP_API_BASE=http://localhost:${PORT} npm run dev --prefix frontend/dashboard
+   VP_API_BASE=http://localhost:${PORT} npm run dev --prefix frontend/verify-page
 
  Create a session:
    curl -s http://localhost:${PORT}/v1/verification-sessions \\
