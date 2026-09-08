@@ -10,6 +10,7 @@ const faceDetectMath = require("./faceDetectMath");
 exports.VerifyPassClient = client.VerifyPassClient;
 exports.VerifyPassApiError = client.VerifyPassApiError;
 exports.parseSdkToken = client.parseSdkToken;
+exports.readPublicConfig = require("./config").readPublicConfig;
 exports.createFlow = flow.createFlow;
 exports.needsDocumentBack = flow.needsDocumentBack;
 exports.STEP_SEQUENCES = flow.STEP_SEQUENCES;

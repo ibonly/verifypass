@@ -1,6 +1,6 @@
 import path from "path";
 import { fileURLToPath } from "url";
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -8,7 +8,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Sample webcam test app. Point it at your running API and paste a secret key
 // from the dev stack. Camera capture requires a secure context — localhost is
 // treated as secure by browsers, so `vite dev` on http://localhost works.
-export default defineConfig({
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, __dirname, ["VITE_VP_", "VP_API_BASE", "VP_API_PROXY_TARGET"]);
+  return {
   plugins: [react()],
   resolve: {
     dedupe: ["react", "react-dom"],
@@ -21,10 +23,9 @@ export default defineConfig({
     host: "0.0.0.0",
     port: 5175,
     strictPort: true,
-    allowedHosts: ["p8wp9m49-5175.use.devtunnels.ms"],
     proxy: {
       "/v1": {
-        target: process.env.VP_API_PROXY_TARGET || "http://localhost:3000",
+        target: env.VP_API_PROXY_TARGET || "http://localhost:3000",
         changeOrigin: false,
         xfwd: true
       }
@@ -41,8 +42,7 @@ export default defineConfig({
     }
   },
   define: {
-    __VP_API_BASE__: JSON.stringify(process.env.VP_API_BASE || ""),
-    // Optional convenience for local testing only — never ship a secret key to a browser.
-    __VP_SECRET_KEY__: JSON.stringify(process.env.VP_SECRET_KEY || "")
+    __VP_API_BASE__: JSON.stringify(env.VITE_VP_API_BASE || env.VP_API_BASE || "")
   }
+  };
 });

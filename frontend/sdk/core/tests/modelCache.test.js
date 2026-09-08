@@ -186,3 +186,30 @@ test("pinned digests reject corrupted cached or downloaded bytes", async () => {
   const changed = require("crypto").createHash("sha256").update(new Uint8Array([4,5,6])).digest("hex");
   await assert.rejects(fetchWithCache("https://models.test/pinned.onnx", { sha256:changed, cachesObj, fetchFn: async () => new Response(bytes) }), /checksum mismatch/);
 });
+
+test("model downloads reject oversized bodies and advertised lengths", async () => {
+  for (const response of [new Response(new Uint8Array(5)), new Response(new Uint8Array(1), { headers: { "content-length": "5" } })]) {
+    await assert.rejects(fetchWithCache("https://models.test/model.onnx", { cachesObj: null, maxBytes: 4, fetchFn: async () => response }), /size limit/);
+  }
+});
+
+test("model load aborts stalled fetch and omits browser credentials", async () => {
+  await assert.rejects(fetchWithCache("https://models.test/model.onnx", {
+    cachesObj: null, timeoutMs: 10,
+    fetchFn: async (url, options) => {
+      assert.equal(options.credentials, "omit");
+      assert.equal(options.referrerPolicy, "no-referrer");
+      return new Promise((resolve, reject) => options.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+    }
+  }), /aborted/);
+});
+
+test("corrupt cache eviction failure does not block network recovery", async () => {
+  let fetched = false;
+  const result = await fetchWithCache("https://models.test/model.onnx", {
+    cachesObj: { open: async () => ({ match: async () => new Response("", { status: 500 }), delete: async () => { throw new Error("Cache unavailable"); } }) },
+    fetchFn: async () => { fetched = true; return new Response(new Uint8Array([1, 2, 3])); }
+  });
+  assert.equal(fetched, true);
+  assert.equal(result.byteLength, 3);
+});

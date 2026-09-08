@@ -128,7 +128,7 @@ test("reissueChallenge posts the excluded actions; submit carries capture + tele
 
 test("waitForResult polls until terminal status", async () => {
   const fetch = mockFetch((n) =>
-    n < 3 ? { body: { status: "submitted" } } : { body: { status: "approved", sessionId: "vps_1" } }
+    n < 3 ? { body: { success: true, status: "submitted" } } : { body: { success: true, status: "approved", sessionId: "vps_1" } }
   );
   const client = new VerifyPassClient({ ...BASE, fetchImpl: fetch });
   const ticks = [];
@@ -139,7 +139,7 @@ test("waitForResult polls until terminal status", async () => {
 });
 
 test("waitForResult times out with SESSION_EXPIRED", async () => {
-  const fetch = mockFetch(() => ({ body: { status: "submitted" } }));
+  const fetch = mockFetch(() => ({ body: { success: true, status: "submitted" } }));
   const client = new VerifyPassClient({ ...BASE, fetchImpl: fetch });
   await assert.rejects(
     () => client.waitForResult({ intervalMs: 1, timeoutMs: 5 }),

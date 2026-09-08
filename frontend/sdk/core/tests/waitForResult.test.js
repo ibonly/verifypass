@@ -11,7 +11,7 @@ const { VerifyPassClient, VerifyPassApiError } = require("../src/client");
 
 function clientWith(fetchImpl) {
   return new VerifyPassClient({
-    baseUrl: "http://api.test",
+    baseUrl: "https://api.test",
     sessionId: "vps_TEST",
     sdkToken: "sdk_legacy_token",
     fetchImpl
@@ -62,4 +62,20 @@ test("persistent network failure surfaces the REAL error at the deadline", async
     () => c.waitForResult({ intervalMs: 1, timeoutMs: 30 }),
     /Failed to fetch/
   );
+});
+
+test("poll deadline aborts an in-flight status request", { timeout: 1000 }, async () => {
+  let aborted = false;
+  const client = clientWith(async (url, { signal }) => new Promise((resolve, reject) => {
+    signal.addEventListener("abort", () => { aborted = true; reject(new Error("request aborted")); }, { once: true });
+  }));
+  await assert.rejects(client.waitForResult({ intervalMs: 1, timeoutMs: 20 }), /request aborted/);
+  assert.equal(aborted, true);
+});
+
+test("observer errors propagate without retrying a successful API request", async () => {
+  let calls = 0;
+  const client = clientWith(async () => { calls++; return ok({ success: true, status: "approved" }); });
+  await assert.rejects(client.waitForResult({ onTick() { throw new Error("Observer failed"); } }), /Observer failed/);
+  assert.equal(calls, 1);
 });

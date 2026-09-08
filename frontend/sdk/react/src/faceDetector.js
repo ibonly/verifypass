@@ -28,7 +28,7 @@ function loadOrt() {
       ort.env.wasm.wasmPaths = { wasm: ortWasmUrl };
       // B4: two WASM threads on capable devices (needs cross-origin isolation
       // for SharedArrayBuffer; ORT falls back to 1 thread silently otherwise)
-      try { ort.env.wasm.numThreads = (typeof navigator !== "undefined" && navigator.hardwareConcurrency > 2) ? 2 : 1; } catch (_) { /* noop */ }
+      try { ort.env.wasm.numThreads = (globalThis.crossOriginIsolated && typeof navigator !== "undefined" && navigator.hardwareConcurrency > 2) ? 2 : 1; } catch (_) { /* noop */ }
       return ort;
     }).catch(err => { ortPromise = null; throw err; });
   }
@@ -54,9 +54,10 @@ export async function createFaceDetector(modelUrl, opts = {}) {
   const framing = opts.framing || {};
   const [ort, modelBuffer, lmBuffer] = await Promise.all([
     loadOrt(),
-    typeof modelUrl === "string" ? fetchWithCache(modelUrl) : modelUrl,
-    landmarkUrl ? (typeof landmarkUrl === "string" ? fetchWithCache(landmarkUrl).catch(() => null) : landmarkUrl) : null
+    typeof modelUrl === "string" ? fetchWithCache(modelUrl, { signal: opts.signal }) : modelUrl,
+    landmarkUrl ? (typeof landmarkUrl === "string" ? fetchWithCache(landmarkUrl, { signal: opts.signal }).catch(() => null) : landmarkUrl) : null
   ]);
+  if (opts.signal?.aborted) throw new Error("Model load cancelled");
   let session;
   try { session = await ort.InferenceSession.create(modelBuffer, { executionProviders: ["wasm"] }); }
   catch (error) { if (typeof modelUrl === "string") await evictModel(modelUrl); throw error; }
@@ -67,11 +68,27 @@ export async function createFaceDetector(modelUrl, opts = {}) {
     try { lmSession = await ort.InferenceSession.create(lmBuffer, { executionProviders: ["wasm"] }); } catch (_) { if (typeof landmarkUrl === "string") await evictModel(landmarkUrl); lmSession = null; }
   }
   const [W, H] = DETECT_CONFIG.inputSize;
+  const inputBuffer = new Float32Array(3 * W * H);
+  let disposed = false;
+  let running = false;
+  let released = false;
+
+  function releaseSessions() {
+    if (released || running) return;
+    released = true;
+    for (const current of [session, lmSession]) {
+      try { Promise.resolve(current?.release?.()).catch(() => {}); } catch (_) {}
+    }
+  }
+
+  function disposeTensors(tensors) {
+    for (const tensor of new Set(tensors)) tensor?.dispose?.();
+  }
 
   function preprocess(imageData) {
     const { data } = imageData; // W*H RGBA
     const plane = W * H;
-    const out = new Float32Array(3 * plane);
+    const out = inputBuffer;
     for (let i = 0; i < plane; i++) {
       out[i] = (data[i * 4] - 127) / 128;
       out[plane + i] = (data[i * 4 + 1] - 127) / 128;
@@ -86,19 +103,32 @@ export async function createFaceDetector(modelUrl, opts = {}) {
     if (!prep) return null;
     const S = LANDMARK_INPUT;
     const tensor = new ort.Tensor("float32", prep.input, [1, 1, S, S]);
-    const out = await lmSession.run({ [lmSession.inputNames[0]]: tensor });
-    const t = out[lmSession.outputNames[0]];
-    return { raw: t.data, rect: prep.rect };
+    let out;
+    try {
+      out = await lmSession.run({ [lmSession.inputNames[0]]: tensor });
+      const result = out[lmSession.outputNames[0]];
+      return { raw: result.data.slice(), rect: prep.rect };
+    } finally {
+      disposeTensors([tensor, ...Object.values(out || {})]);
+    }
   }
 
   return {
     hasLandmarks: !!lmSession,
     /** @param {ImageData} imageData exactly WxH → framing assessment (+ pose) */
     async detect(imageData) {
+      if (disposed) throw new Error("Face detector disposed");
+      if (running) throw new Error("Face detector is already running");
       if (!imageData) return assessFraming(null, framing);
+      if (imageData.width !== W || imageData.height !== H || imageData.data.length !== W * H * 4) {
+        throw new Error("Unexpected face detector input dimensions");
+      }
       const input = preprocess(imageData);
       const tensor = new ort.Tensor("float32", input, [1, 3, H, W]);
-      const out = await session.run({ [session.inputNames[0]]: tensor });
+      let out;
+      running = true;
+      try {
+      out = await session.run({ [session.inputNames[0]]: tensor });
       let boxesT = null, scoresT = null;
       for (const name of session.outputNames) {
         const o = out[name];
@@ -121,10 +151,15 @@ export async function createFaceDetector(modelUrl, opts = {}) {
         } catch (_) { pose = null; expr = null; }
       }
       return { ...assessFraming(box, framing), box, pose, expr };
+      } finally {
+        disposeTensors([tensor, ...Object.values(out || {})]);
+        running = false;
+        if (disposed) releaseSessions();
+      }
     },
     dispose() {
-      try { Promise.resolve(session.release?.()).catch(() => {}); } catch (_) { /* noop */ }
-      try { Promise.resolve(lmSession?.release?.()).catch(() => {}); } catch (_) { /* noop */ }
+      disposed = true;
+      releaseSessions();
     }
   };
 }

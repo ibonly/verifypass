@@ -1,6 +1,7 @@
 "use strict";
 
 const { TERMINAL_STATUSES } = require("./flow");
+const { validateApiBase, validatePublicKey } = require("./config");
 
 class VerifyPassApiError extends Error {
   constructor(code, message, http) {
@@ -25,11 +26,12 @@ function decodeBase64Url(s) {
  * baseUrl null and rely on an explicit option.
  */
 function parseSdkToken(token) {
+  if (typeof token !== "string" || token.length > 4096) return { baseUrl: null };
   const m = /^sdk_v1_([A-Za-z0-9_-]+)$/.exec(String(token || ""));
   if (!m) return { baseUrl: null };
   try {
     const json = JSON.parse(decodeBase64Url(m[1]));
-    const u = typeof json.u === "string" && /^https?:\/\//.test(json.u) ? json.u.replace(/\/$/, "") : null;
+    const u = validateApiBase(json.u);
     return { baseUrl: u };
   } catch (_) {
     return { baseUrl: null };
@@ -53,16 +55,17 @@ class VerifyPassClient {
    */
   constructor({ baseUrl, publicKey, sessionId, sdkToken, fetchImpl }) {
     // publicKey is optional: the hosted page authenticates with sdkToken only.
-    if (!sessionId || !sdkToken) {
+    if (typeof sessionId !== "string" || !/^[A-Za-z0-9_-]{1,256}$/.test(sessionId)
+      || typeof sdkToken !== "string" || !sdkToken || sdkToken.length > 4096 || /[\s\x00-\x1f\x7f]/.test(sdkToken)) {
       throw new Error("VerifyPassClient requires sessionId and sdkToken");
     }
     const resolved = baseUrl || parseSdkToken(sdkToken).baseUrl;
     if (!resolved) {
       throw new Error("VerifyPassClient: token does not embed an API origin — pass baseUrl explicitly");
     }
-    this.baseUrl = resolved.replace(/\/$/, "");
+    this.baseUrl = validateApiBase(resolved);
     this.controller = new AbortController();
-    this.publicKey = publicKey;
+    this.publicKey = validatePublicKey(publicKey);
     this.sessionId = sessionId;
     this.sdkToken = sdkToken;
     this.fetch = fetchImpl || (typeof fetch !== "undefined" ? fetch.bind(globalThis) : null);
@@ -78,25 +81,35 @@ class VerifyPassClient {
   }
 
   dispose() { this.controller.abort(); }
-  async _request(path, body) {
+  async _request(path, body, timeoutMs = body ? 30000 : 15000) {
+    if (this.controller.signal.aborted) throw new Error("Verification cancelled");
     const controller = new AbortController();
     const abort = () => controller.abort();
     const parent = this.controller.signal;
     if (parent.aborted) abort();
     parent.addEventListener("abort", abort, { once: true });
-    const timer = setTimeout(abort, body ? 30000 : 15000);
+    const timer = setTimeout(abort, timeoutMs);
     try {
       const res = await this.fetch(`${this.baseUrl}${path}`, {
+        redirect: "error",
+        credentials: "omit",
+        cache: "no-store",
+        referrerPolicy: "no-referrer",
         signal: controller.signal,
         headers: this._headers(body ? { "Content-Type": "application/json" } : {}),
         ...(body ? { method: "POST", body: JSON.stringify({ ...body, ...(this.attemptId ? { attemptId: this.attemptId } : {}) }) } : {})
       });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok || json.success === false) {
-        const err = json.error || {};
+      const json = await res.json().catch(() => null);
+      if (parent.aborted) throw new Error("Verification cancelled");
+      if (controller.signal.aborted) throw new VerifyPassApiError("REQUEST_TIMEOUT", "Verification request timed out", 408);
+      if (!res.ok || json?.success === false) {
+        const err = json?.error || {};
         const error = new VerifyPassApiError(err.code || "INTERNAL_ERROR", err.message || `HTTP ${res.status}`, res.status);
-        error.correlationId = json.correlationId || null;
+        error.correlationId = json?.correlationId || null;
         throw error;
+      }
+      if (!json || typeof json !== "object" || Array.isArray(json) || json.success !== true) {
+        throw new VerifyPassApiError("INVALID_RESPONSE", "Invalid verification API response", 502);
       }
       return json;
     } finally { clearTimeout(timer); parent.removeEventListener("abort", abort); }
@@ -180,6 +193,9 @@ class VerifyPassClient {
       sdkToken: this.sdkToken
     });
     this.attemptId = data.attemptId; this.flashSequence = data.livenessChallenge?.flashSequence;
+    this._captureSignals = null;
+    this._captureTelemetry = null;
+    this.challengeDeadlines = null;
     return data;
   }
 
@@ -218,8 +234,8 @@ class VerifyPassClient {
     });
   }
 
-  getStatus() {
-    return this._get(`/v1/verification-sessions/${this.sessionId}/status`);
+  getStatus({ timeoutMs = 15000 } = {}) {
+    return this._request(`/v1/verification-sessions/${this.sessionId}/status`, undefined, timeoutMs);
   }
 
   /**
@@ -233,15 +249,19 @@ class VerifyPassClient {
    * bad token, revoked key, unknown session) abort immediately.
    */
   async waitForResult({ intervalMs = 2500, timeoutMs = 120000, onTick } = {}) {
+    if (!Number.isFinite(intervalMs) || intervalMs <= 0 || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new Error("Polling interval and timeout must be positive finite numbers");
+    }
     const deadline = Date.now() + timeoutMs;
     let lastError = null;
     for (;;) {
       if (this.controller.signal.aborted) throw new Error("Verification cancelled");
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw lastError || new VerifyPassApiError("SESSION_EXPIRED", "Timed out waiting for result", 408);
+      let status;
       try {
-        const status = await this.getStatus();
+        status = await this.getStatus({ timeoutMs: Math.min(15000, remaining) });
         lastError = null;
-        if (onTick) onTick(status);
-        if (TERMINAL_STATUSES.includes(status.status)) return status;
       } catch (err) {
         const definitive = err instanceof VerifyPassApiError
           && typeof err.http === "number"
@@ -250,7 +270,11 @@ class VerifyPassClient {
         if (definitive) throw err;
         lastError = err; // transient — keep polling until the deadline
       }
-      if (Date.now() > deadline) {
+      if (status) {
+        if (onTick) onTick(status);
+        if (TERMINAL_STATUSES.includes(status.status)) return status;
+      }
+      if (Date.now() >= deadline) {
         throw lastError || new VerifyPassApiError("SESSION_EXPIRED", "Timed out waiting for result", 408);
       }
       await new Promise((resolve, reject) => {

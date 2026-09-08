@@ -18,14 +18,46 @@ const DEFAULT_CACHE_NAME = "verifypass-models-policy-v2";
  */
 async function fetchWithCache(url, options = {}) {
   const { cacheName = DEFAULT_CACHE_NAME, forceRefresh = false,
-    fetchFn = globalThis.fetch, cachesObj = globalThis.caches } = options;
+    fetchFn = globalThis.fetch, cachesObj = globalThis.caches, signal,
+    timeoutMs = 15000, maxBytes = 32 * 1024 * 1024 } = options;
+  if (signal?.aborted) throw new Error("Model load cancelled");
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || !Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+    throw new Error("Invalid model download limits");
+  }
   const manifest = require("./modelManifest.json");
   const name = String(url).split("?")[0].split("/").pop();
   const expected = options.sha256 || manifest[name];
   async function verified(response) {
     if (!response?.ok) throw new Error(`Failed to fetch model (status: ${response?.status})`);
-    if (response.headers?.get("content-type")?.includes("text/html")) throw new Error("Model endpoint returned HTML");
-    const bytes = await response.arrayBuffer();
+    if (response.headers?.get("content-type")?.toLowerCase().includes("text/html")) throw new Error("Model endpoint returned HTML");
+    if (Number(response.headers?.get("content-length")) > maxBytes) throw new Error("Model exceeds size limit");
+    let bytes;
+    if (response.body?.getReader) {
+      const reader = response.body.getReader();
+      const chunks = [];
+      let size = 0;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.byteLength;
+          if (size > maxBytes) {
+            reader.cancel().catch(() => {});
+            throw new Error("Model exceeds size limit");
+          }
+          chunks.push(value);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      const output = new Uint8Array(size);
+      let offset = 0;
+      for (const chunk of chunks) { output.set(chunk, offset); offset += chunk.byteLength; }
+      bytes = output.buffer;
+    } else {
+      bytes = await response.arrayBuffer();
+    }
+    if (bytes.byteLength > maxBytes) throw new Error("Model exceeds size limit");
     if (!bytes.byteLength) throw new Error("Empty model");
     if (expected) {
       const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
@@ -41,14 +73,26 @@ async function fetchWithCache(url, options = {}) {
     const cached = await cache.match(url).catch(() => null);
     if (cached) {
       try { return await verified(cached); }
-      catch (_) { await cache.delete?.(url); }
+      catch (_) { try { await cache.delete?.(url); } catch (_) {} }
     }
   }
-  const response = await fetchFn(url);
-  const clone = response?.clone?.();
-  const bytes = await verified(response);
-  if (cache && clone) { try { await cache.put(url, clone); } catch (_) { /* quota */ } }
-  return bytes;
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) abort();
+  const timer = setTimeout(abort, timeoutMs);
+  try {
+    const response = await fetchFn(url, { signal: controller.signal, credentials: "omit", referrerPolicy: "no-referrer" });
+    const bytes = await verified(response);
+    if (controller.signal.aborted) throw new Error("Model load cancelled or timed out");
+    if (cache && typeof Response !== "undefined") {
+      try { await cache.put(url, new Response(bytes)); } catch (_) {}
+    }
+    return bytes;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
+  }
 }
 
 /**

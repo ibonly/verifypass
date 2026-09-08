@@ -10,7 +10,7 @@
     "@verifypass/sdk-core": "file:../core"
   },
   "devDependencies": {
-    "esbuild": "^0.21.0"
+    "esbuild": "^0.25.12"
   },
   "license": "UNLICENSED"
 }

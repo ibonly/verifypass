@@ -254,7 +254,9 @@ async function runScreenFlash(video, box, setColor, sequence, signal) {
 }
 
 export function VerificationWidget(props) {
-  return <div data-vp-widget><style>{"@media (prefers-reduced-motion: reduce) { [data-vp-widget] * { animation: none !important; transition: none !important; } }"}</style><VerificationWidgetSession key={`${props.sessionId}:${props.sdkToken}`} {...props} /></div>;
+  const { baseUrl, publicKey } = useVerifyPass();
+  const sessionKey = JSON.stringify([props.sessionId, props.sdkToken, baseUrl, publicKey]);
+  return <div data-vp-widget><style>{"@media (prefers-reduced-motion: reduce) { [data-vp-widget] * { animation: none !important; transition: none !important; } }"}</style><VerificationWidgetSession key={sessionKey} {...props} /></div>;
 }
 function VerificationWidgetSession({
   sessionId,
@@ -342,15 +344,17 @@ function VerificationWidgetSession({
   // init: create client, fetch the server-issued challenge, build the flow
   useEffect(() => {
     let cancelled = false;
-    const client = new VerifyPassClient({ baseUrl, publicKey, sessionId, sdkToken });
-    clientRef.current = client;
+    let client;
     let off = () => {};
     (async () => {
       let verificationType = "ID_AND_FACE";
       let challengeActions = [];
       let documentTypes = [];
       try {
+        client = new VerifyPassClient({ baseUrl, publicKey, sessionId, sdkToken });
+        clientRef.current = client;
         const c = await client.getChallenge();
+        if (cancelled) return;
         verificationType = c.verificationType || "ID_AND_FACE";
         challengeActions = Array.isArray(c.livenessActions) ? c.livenessActions : [];
         documentTypes = Array.isArray(c.documentTypes) ? c.documentTypes : [];
@@ -372,7 +376,14 @@ function VerificationWidgetSession({
       actionsRef.current = challengeActions;
       livenessFrameCountsRef.current = {}; // fresh challenge → fresh budgets
       setActions(challengeActions);
-      const flow = createFlow(verificationType, { documentBack: needsDocumentBack(documentTypes) });
+      let flow;
+      try {
+        flow = createFlow(verificationType, { documentBack: needsDocumentBack(documentTypes) });
+      } catch (err) {
+        setInitError("Unsupported verification workflow");
+        onErrorRef.current?.(err);
+        return;
+      }
       flowRef.current = flow;
       setFlowState(flow.state());
       off = flow.onChange((s) => {
@@ -380,7 +391,7 @@ function VerificationWidgetSession({
         if (onStepChangeRef.current) onStepChangeRef.current(s.step);
       });
     })();
-    return () => { cancelled = true; client.dispose(); off(); };
+    return () => { cancelled = true; client?.dispose(); off(); };
   }, [baseUrl, publicKey, sessionId, sdkToken, initEpoch]);
 
   // camera lifecycle keyed on facingMode (not step) so same-camera transitions
@@ -398,8 +409,9 @@ function VerificationWidgetSession({
     const video = videoRef.current;
     if (!video) return undefined;
     let cancelled = false;
+    const cameraController = new AbortController();
     setCameraReady(false);
-    startCamera(video, { facingMode: captureFacing })
+    startCamera(video, { facingMode: captureFacing, signal: cameraController.signal })
       .then((stream) => {
         // If this effect was torn down before getUserMedia resolved, stop the
         // freshly acquired stream so the camera doesn't stay on (leak) and don't
@@ -418,12 +430,13 @@ function VerificationWidgetSession({
         setCameraReady(true);
       })
       .catch((err) => {
-        if (cancelled) return;
+        if (cancelled || cameraController.signal.aborted) return;
         flowRef.current.fail({ code: "CAMERA_ERROR", message: err.message });
         if (onErrorRef.current) onErrorRef.current(err);
       });
     const pauseCamera = () => {
       if (cancelled) return;
+      cameraController.abort();
       stopCamera(video);
       setCameraReady(false); setCameraPaused(true);
       livenessFrontalRef.current = null;
@@ -432,7 +445,7 @@ function VerificationWidgetSession({
     const onVis = () => { if (document.hidden) pauseCamera(); };
     document.addEventListener("visibilitychange", onVis);
     window.addEventListener("orientationchange", pauseCamera);
-    return () => { cancelled = true; document.removeEventListener("visibilitychange", onVis); window.removeEventListener("orientationchange", pauseCamera); stopCamera(video); setCameraReady(false); };
+    return () => { cancelled = true; cameraController.abort(); document.removeEventListener("visibilitychange", onVis); window.removeEventListener("orientationchange", pauseCamera); stopCamera(video); setCameraReady(false); };
   }, [captureFacing, consented, cameraEpoch]);
 
   // if there are no challenge actions, don't linger on the liveness step
@@ -511,7 +524,7 @@ function VerificationWidgetSession({
     // calling capture() every frame while the user stays in position, spamming
     // uploads that can only fail again. The on-screen Retry (flow.retry())
     // clears the error and re-arms capture.
-    if (flow.state().error) return;
+    if (!flow || flow.state().error) return;
     capturingRef.current = true;
     const client = clientRef.current;
     const step = flow.state().step;
@@ -617,6 +630,7 @@ function VerificationWidgetSession({
             if (mosaic) await client.uploadFlash(mosaic.base64, mosaic.sequence, mosaic.tile);
           } catch (_) { /* record-first: ignore */ } finally { setFlashColor(null); }
         }
+        if (client.controller.signal.aborted) return false;
         flow.advance(); // → processing
         client.setCaptureTelemetry(buildTelemetry());
         await client.submit();
@@ -626,6 +640,7 @@ function VerificationWidgetSession({
         if (onCompleteRef.current) onCompleteRef.current(result);
       }
     } catch (err) {
+      if (client.controller.signal.aborted) return false;
       flow.fail(err);
       if (onErrorRef.current) onErrorRef.current(err);
     } finally {
@@ -643,7 +658,8 @@ function VerificationWidgetSession({
   const retryVerification = useCallback(async () => {
     const client = clientRef.current;
     const flow = flowRef.current;
-    if (!client || !flow || busy) return;
+    if (!client || !flow || busy || capturingRef.current) return;
+    capturingRef.current = true;
     setBusy(true);
     setFeedback(null);
     try {
@@ -656,6 +672,7 @@ function VerificationWidgetSession({
       livenessFrontalRef.current = null;    // new attempt → fresh frontal reference (user may have moved)
       livenessRefSamplesRef.current = [];
       livenessStabRef.current = null;
+      telemetryRef.current = { actions: [], detectMs: null, landmarkMs: null, modelLoadMs: null, startedAt: 0 };
       setActions(acts);
       actionIdxRef.current = 0;
       setActionIdx(0);
@@ -666,12 +683,14 @@ function VerificationWidgetSession({
       });
       flow.reset();
     } catch (err) {
+      if (client.controller.signal.aborted) return;
       if (err && err.code === "RETRY_LIMIT_REACHED") {
         setAttemptInfo((s) => ({ ...s, exhausted: true }));
       }
       setFeedback(err.message || String(err));
     } finally {
       setBusy(false);
+      capturingRef.current = false;
     }
   }, [busy]);
 
@@ -682,6 +701,10 @@ function VerificationWidgetSession({
     const file = e.target.files && e.target.files[0];
     e.target.value = ""; // allow picking the same file again
     if (!file || capturingRef.current) return;
+    const flow = flowRef.current;
+    const client = clientRef.current;
+    const step = flow?.state().step;
+    if (!client || client.controller.signal.aborted || !isDocumentStep(step)) return;
     capturingRef.current = true;
     setBusy(true);
     setFeedback(null);
@@ -693,12 +716,12 @@ function VerificationWidgetSession({
         reader.onerror = () => reject(new Error("Could not read the selected file."));
         reader.readAsDataURL(file);
       });
-      if (!/^data:image\/(jpeg|jpg|png|webp)/i.test(base64)) {
+      if (client.controller.signal.aborted) return;
+      if (!/^data:image\/(jpeg|jpg|png|webp);base64,/i.test(base64)) {
         throw new Error("Choose a JPEG or PNG photo of your ID.");
       }
-      const flow = flowRef.current;
-      const client = clientRef.current;
-      await client.uploadDocument(base64, "front");
+      await client.uploadDocument(base64, step === "document_back" ? "back" : "front");
+      if (client.controller.signal.aborted) return;
       flow.advance();
       if (flow.state().step === "processing") {
         client.setCaptureTelemetry(buildTelemetry());
@@ -709,6 +732,7 @@ function VerificationWidgetSession({
         if (onCompleteRef.current) onCompleteRef.current(result);
       }
     } catch (err) {
+      if (client.controller.signal.aborted) return;
       setFeedback(err.message || String(err));
     } finally {
       setBusy(false);
@@ -726,18 +750,19 @@ function VerificationWidgetSession({
     }
     let disposed = false;
     let det = null;
+    const modelController = new AbortController();
     detectorRef.current = null;
     setDetectorStatus("loading");
     let timedOut = false;
     let timeoutId;
     const timeout = new Promise((_, reject) => {
-      timeoutId = window.setTimeout(() => { timedOut = true; reject(new Error("Face model load timed out")); }, 12000);
+      timeoutId = window.setTimeout(() => { timedOut = true; modelController.abort(); reject(new Error("Face model load timed out")); }, 12000);
     });
     // Framing: minRatio relaxed 0.34 → 0.24. Replay of real sessions showed the
     // median face width at a normal laptop distance is ≈0.34 of the frame, so
     // half of all well-positioned frames read "Move closer". 0.24 still keeps
     // a face large enough for the server's liveness/face-match crops.
-    const detectorOpts = { landmarkUrl: landmarkModelUrl, framing: { minRatio: 0.24, centerTol: 0.13 } };
+    const detectorOpts = { landmarkUrl: landmarkModelUrl, framing: { minRatio: 0.24, centerTol: 0.13 }, signal: modelController.signal };
     const loadStart = performance.now();
     Promise.race([createFaceDetector(faceModelUrl, detectorOpts).then(d => { if (disposed || timedOut) { d.dispose?.(); throw new Error("Model load cancelled"); } return d; }), timeout])
       .then((d) => {
@@ -749,11 +774,12 @@ function VerificationWidgetSession({
         setDetectorStatus("ready");
       })
       .catch(() => {
+        clearTimeout(timeoutId);
         if (disposed) return;
         detectorRef.current = null;
         setDetectorStatus("failed");
       });
-    return () => { disposed = true; clearTimeout(timeoutId); detectorRef.current = null; if (det && det.dispose) det.dispose(); };
+    return () => { disposed = true; modelController.abort(); clearTimeout(timeoutId); detectorRef.current = null; if (det && det.dispose) det.dispose(); };
   }, [faceModelUrl, landmarkModelUrl]);
 
   // Auto-capture loop. When the face model is loaded (face/liveness steps), the
@@ -1300,7 +1326,8 @@ function VerificationWidgetSession({
     return () => { cancelled = true; cancelAnimationFrame(raf); setGreen(false); framingRef.current = null; };
   }, [cameraReady, flowState?.step, actionIdx, challengeEpoch, faceModelUrl, detectorStatus]);
 
-  if (!flowState) return null;
+  if (initError) return <div role="alert"><p>{initError}</p><button onClick={() => { setInitError(null); setInitEpoch(e => e + 1); }}>Retry loading verification</button></div>;
+  if (!flowState) return <p role="status">Loading verification…</p>;
   const { step, steps, stepIndex, error, result } = flowState;
   const copy = STEP_COPY[step];
   const primary = theme.primaryColor || "#6D28D9";
@@ -1329,8 +1356,6 @@ function VerificationWidgetSession({
   const pillDisplay = showGuide ? (GUIDE_COPY[framingGuide] || "Position your face") : pillText;
   const ringColor = green ? "#059669" : "#E5E7EB";
 
-  if (initError) return <div role="alert"><p>{initError}</p><button onClick={() => { setInitError(null); setInitEpoch(e => e + 1); }}>Retry loading verification</button></div>;
-  if (!flowState) return <p role="status">Loading verification…</p>;
   if (!consented) {
     return (
       <div style={{ maxWidth: 420, margin: "0 auto", fontFamily: "system-ui, sans-serif" }}>

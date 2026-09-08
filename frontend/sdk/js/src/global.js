@@ -4,12 +4,25 @@
 // Consent, camera capture, document backs, challenge guidance and retries
 // therefore share one implementation.
 const { VerifyPassClient } = require("@verifypass/sdk-core");
+const instances = new WeakMap();
 function init(opts = {}) {
   const { container, sessionId, sdkToken, publicKey, baseUrl, onComplete, onError } = opts;
   const root = typeof container === "string" ? document.querySelector(container) : container;
   if (!root) throw new Error("VerifyPass.init: container not found");
   const client = new VerifyPassClient({ sessionId, sdkToken, publicKey, baseUrl });
+  instances.get(root)?.destroy();
   let disposed = false;
+  const instance = {
+    destroy() {
+      disposed = true;
+      client.dispose();
+      if (instances.get(root) === instance) {
+        instances.delete(root);
+        root.replaceChildren();
+      }
+    }
+  };
+  instances.set(root, instance);
   const loading = document.createElement("p");
   loading.setAttribute("role", "status");
   loading.textContent = "Loading verification…";
@@ -20,6 +33,7 @@ function init(opts = {}) {
       if (disposed) return;
       const url = new URL(challenge.hostedBaseUrl);
       if (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))) throw new Error("Hosted verification requires HTTPS");
+      if (url.username || url.password || url.search || url.hash || /[\s\\]/.test(challenge.hostedBaseUrl)) throw new Error("Invalid hosted verification URL");
       url.pathname = `${url.pathname.replace(/\/$/, "")}/session/${encodeURIComponent(sessionId)}`;
       url.hash = `t=${encodeURIComponent(sdkToken)}`;
       const frame = document.createElement("iframe");
@@ -38,6 +52,7 @@ function init(opts = {}) {
       onError?.(error);
     }
   })();
-  return { ready, destroy() { disposed = true; client.dispose(); root.replaceChildren(); } };
+  instance.ready = ready;
+  return instance;
 }
 module.exports = { init };

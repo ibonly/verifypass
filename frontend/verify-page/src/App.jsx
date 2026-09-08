@@ -74,7 +74,7 @@ export default function App() {
     // which made the liveness step auto-capture on motion-settle (any action
     // "completed" when the user held still). The widget now fails closed
     // without a detector, and the models are served from /models/.
-    <VerifyPassProvider publicKey={null} baseUrl={__VP_API_BASE__} faceModelUrl="/models/fr_detect.onnx">
+    <VerifyPassProvider publicKey={null} baseUrl={__VP_API_BASE__ || undefined} faceModelUrl={import.meta.env.VITE_VP_FACE_MODEL_URL || "/models/fr_detect.onnx"}>
       <VerificationWidget
         sessionId={sessionId}
         sdkToken={sdkToken}

@@ -11,16 +11,14 @@ import { VerifyPassProvider, VerificationWidget } from "@verifypass/react";
 // baseUrl. This app takes the secret key at runtime purely for local testing.
 
 const CONFIGURED_API_BASE = typeof __VP_API_BASE__ !== "undefined" ? __VP_API_BASE__ : "";
-const PREFILL_SECRET = typeof __VP_SECRET_KEY__ !== "undefined" ? __VP_SECRET_KEY__ : "";
 
 function inferApiBase() {
   if (typeof window === "undefined") return "http://localhost:3000";
 
   const { hostname } = window.location;
-  if (hostname === "p8wp9m49-5175.use.devtunnels.ms") return window.location.origin;
   if (CONFIGURED_API_BASE) return CONFIGURED_API_BASE.replace(/\/$/, "");
   if (hostname === "localhost" || hostname === "127.0.0.1") return "http://localhost:3000";
-  return "http://localhost:3000";
+  return window.location.origin;
 }
 
 const API_BASE = inferApiBase();
@@ -31,7 +29,7 @@ const PRIMARY = "#6D28D9";
 const RETRYABLE_STATUSES = ["rejected", "manual_review", "failed"];
 
 export default function App() {
-  const [secretKey, setSecretKey] = useState(PREFILL_SECRET);
+  const [secretKey, setSecretKey] = useState("");
   const [customerRef, setCustomerRef] = useState("");
   const [verificationType, setVerificationType] = useState("ID_AND_FACE");
   const [session, setSession] = useState(null);
@@ -171,7 +169,7 @@ export default function App() {
               <br />
               Widget API is using the secure same-origin proxy.
             </div>
-            <VerifyPassProvider publicKey={null} baseUrl={widgetBaseUrl} faceModelUrl="/models/fr_detect.onnx">
+            <VerifyPassProvider publicKey={null} baseUrl={widgetBaseUrl} faceModelUrl={import.meta.env.VITE_VP_FACE_MODEL_URL || "/models/fr_detect.onnx"}>
               <VerificationWidget
                 sessionId={session.sessionId}
                 sdkToken={session.sdkToken}

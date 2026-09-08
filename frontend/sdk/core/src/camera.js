@@ -3,8 +3,9 @@
 // Thin camera wrapper (browser-only; kept minimal so everything above it is
 // testable in Node). UI layers own the <video> element.
 
-async function startCamera(videoEl, { facingMode = "user", width = 1280, height = 720 } = {}) {
-  if (!navigator?.mediaDevices?.getUserMedia) {
+async function startCamera(videoEl, { facingMode = "user", width = 1280, height = 720, signal, timeoutMs = 8000 } = {}) {
+  if (signal?.aborted) throw new Error("Capture cancelled");
+  if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
     const err = new Error("Camera not supported in this browser");
     err.code = "CAMERA_UNSUPPORTED";
     throw err;
@@ -19,7 +20,7 @@ async function startCamera(videoEl, { facingMode = "user", width = 1280, height 
     // A requested facingMode may not exist (e.g. "environment" on a
     // front-camera-only laptop). Retry once without the facing constraint so the
     // flow still works with whatever camera is available.
-    if (err && (err.name === "OverconstrainedError" || err.name === "NotFoundError")) {
+    if (!signal?.aborted && err && (err.name === "OverconstrainedError" || err.name === "NotFoundError")) {
       stream = await navigator.mediaDevices.getUserMedia({
         video: { width: { ideal: width }, height: { ideal: height } },
         audio: false
@@ -28,29 +29,37 @@ async function startCamera(videoEl, { facingMode = "user", width = 1280, height 
       throw err;
     }
   }
+  if (signal?.aborted) {
+    stream.getTracks().forEach(track => track.stop());
+    throw new Error("Capture cancelled");
+  }
   videoEl.srcObject = stream;
   // Wait until the stream has real dimensions — videoWidth/Height are 0 until
   // metadata loads, and capturing before then throws "source width is 0".
   try {
-    await videoEl.play();
-    await waitForVideoReady(videoEl);
+    await waitForVideoReady(videoEl, timeoutMs, signal);
   } catch (err) {
     // Ready wait failed: release the stream so we don't leak the camera.
     stream.getTracks().forEach((t) => t.stop());
-    videoEl.srcObject = null;
+    if (videoEl.srcObject === stream) videoEl.srcObject = null;
     throw err;
   }
   return stream;
 }
 
 /** Resolve once the video reports non-zero dimensions; reject if it never does. */
-function waitForVideoReady(videoEl, timeoutMs = 8000) {
-  if (videoEl.videoWidth > 0 && videoEl.videoHeight > 0) return Promise.resolve();
+function waitForVideoReady(videoEl, timeoutMs = 8000, signal) {
   return new Promise((resolve, reject) => {
     let settled = false;
+    let playing = false;
+    let timer;
+    let poll;
     const cleanup = () => {
+      clearTimeout(timer);
+      clearInterval(poll);
       videoEl.removeEventListener("loadedmetadata", check);
       videoEl.removeEventListener("loadeddata", check);
+      signal?.removeEventListener("abort", abort);
     };
     const finish = () => {
       if (settled) return;
@@ -58,26 +67,23 @@ function waitForVideoReady(videoEl, timeoutMs = 8000) {
       cleanup();
       resolve();
     };
-    const fail = () => {
+    const fail = (error) => {
       if (settled) return;
       settled = true;
       cleanup();
-      const err = new Error("Camera did not start — no video signal. Please try again.");
+      const err = error || new Error("Camera did not start — no video signal. Please try again.");
       err.code = "CAMERA_NOT_READY";
       reject(err);
     };
-    const check = () => { if (videoEl.videoWidth > 0 && videoEl.videoHeight > 0) finish(); };
+    const check = () => { if (playing && videoEl.videoWidth > 0 && videoEl.videoHeight > 0) finish(); };
+    const abort = () => fail(new Error("Capture cancelled"));
     videoEl.addEventListener("loadedmetadata", check);
     videoEl.addEventListener("loadeddata", check);
-    // poll as a fallback for browsers that fire events inconsistently
-    const started = Date.now();
-    const poll = () => {
-      if (settled) return;
-      if (videoEl.videoWidth > 0 && videoEl.videoHeight > 0) return finish();
-      if (Date.now() - started > timeoutMs) return fail();
-      requestAnimationFrame(poll);
-    };
-    requestAnimationFrame(poll);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) return abort();
+    timer = setTimeout(() => fail(), timeoutMs);
+    poll = setInterval(check, 50);
+    Promise.resolve().then(() => videoEl.play()).then(() => { playing = true; check(); }, fail);
   });
 }
 

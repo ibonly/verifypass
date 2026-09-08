@@ -4,6 +4,8 @@ node_modules/
 !.env.example
 dist/
 coverage/
+playwright-report/
+test-results/
 *.log
 evidence-store/
 .evidence-store/

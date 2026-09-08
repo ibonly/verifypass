@@ -1,9 +1,0 @@
-{
-  "scope": "32 generated noise images; detector/no-face path only, NOT full biometric pipeline or accuracy benchmark",
-  "images": 32,
-  "coldMs": 106.082125,
-  "medianMs": 6.428875000000005,
-  "p95Ms": 8.519959,
-  "totalMs": 311.58095599999984,
-  "rssBytes": 186105856
-}
