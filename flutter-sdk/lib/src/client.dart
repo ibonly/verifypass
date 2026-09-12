@@ -162,4 +162,54 @@ class VerifyPassClient {
 
     return VerificationResult.fromJson(body);
   }
+
+  /// Reopens a terminal-but-retryable session for another attempt,
+  /// generating a new attemptId and reissuing the liveness challenge.
+  Future<VerificationSession> retrySession({
+    required String sessionId,
+    required String sdkToken,
+    String? attemptId,
+  }) async {
+    final uri =
+        Uri.parse('$_normalizedApiBase/v1/verification-sessions/$sessionId/retry');
+    final response = await http.post(
+      uri,
+      headers: {
+        'X-VP-SDK-Token': sdkToken,
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({
+        'sdkToken': sdkToken,
+        'attemptId': ?attemptId,
+      }),
+    );
+
+    final Map<String, dynamic> body;
+    try {
+      body = jsonDecode(response.body) as Map<String, dynamic>;
+    } catch (_) {
+      throw VerifyPassException(
+        'Server returned invalid JSON response',
+        statusCode: response.statusCode,
+      );
+    }
+
+    if (response.statusCode >= 400 || body['error'] != null) {
+      final error = body['error'] as Map<String, dynamic>?;
+      throw VerifyPassException(
+        error?['message']?.toString() ?? 'Retry failed',
+        code: error?['code']?.toString(),
+        statusCode: response.statusCode,
+      );
+    }
+
+    return VerificationSession(
+      sessionId: sessionId,
+      sdkToken: sdkToken,
+      attemptId: body['attemptId'] as String?,
+      verificationType: 'ID_AND_FACE',
+      hostedBaseUrl: null,
+      raw: body,
+    );
+  }
 }

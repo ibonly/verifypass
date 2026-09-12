@@ -221,6 +221,13 @@ function DevDetails({ details }) {
       <div><b>status</b> {details.status} · <b>risk</b> {details.riskLevel || "-"} · <b>liveness</b> {details.liveness ? `${details.liveness.status} (${details.liveness.score ?? "-"})` : "n/a"}
         {details.faceMatch ? <> · <b>faceMatch</b> {details.faceMatch.status} ({details.faceMatch.similarityScore ?? "-"})</> : null}</div>
       <div style={{ marginTop: 4 }}><b>reasonCodes</b> {codes.length ? codes.join(", ") : "(none)"}</div>
+      {details.liveness && (
+        <div style={{ marginTop: 4, color: details.liveness.score > 0.6 && (details.liveness.selfieScore ?? details.liveness.score) > 0.6 ? "#34D399" : "#FBBF24" }}>
+          <b>60% rule:</b> {details.liveness.score > 0.6 && (details.liveness.selfieScore ?? details.liveness.score) > 0.6
+            ? "Auto-approved (>60% confidence & frontal score)"
+            : "Retry prompted (confidence or frontal score ≤60%)"}
+        </div>
+      )}
       {lc && (
         <div style={{ marginTop: 4 }}>
           <b>challenge</b> {lc.ok ? "ok" : "FAILED"} {lc.reasonCodes?.length ? `(${lc.reasonCodes.join(", ")})` : ""}

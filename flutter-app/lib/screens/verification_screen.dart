@@ -75,6 +75,7 @@ class _VerificationScreenState extends State<VerificationScreen> {
           sessionId: widget.session.sessionId,
           sdkToken: widget.session.sdkToken,
           apiBaseUrl: widget.apiBaseUrl,
+          hostedBaseUrl: widget.hostedBaseUrl,
           secretKey: widget.secretKey,
           preliminaryStatus: status,
         ),

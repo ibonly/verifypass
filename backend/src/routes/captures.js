@@ -162,13 +162,28 @@ router.get("/:sessionId/status", ...sdkAuth, async (req, res, next) => {
     // full set via the secret-key result endpoint.
     const terminal = ["approved", "rejected", "manual_review", "failed", "expired"].includes(session.status);
     const codes = terminal ? (session.decisionReason?.reasonCodes || []).filter((c) => USER_SAFE_REASON_CODES.has(c)) : [];
+    let liveness = null;
+    if (terminal) {
+      try {
+        const r = await req.scopedDb.verificationResults.findBySessionId(session.id);
+        if (r) {
+          const lScore = r.livenessScore != null ? Number(r.livenessScore) : null;
+          const sScore = r.rawResult?.liveness?.passiveAggregate?.selfieScore ?? (r.livenessScore != null ? Number(r.livenessScore) : null);
+          liveness = {
+            score: lScore,
+            selfieScore: sScore != null ? Number(sScore) : null
+          };
+        }
+      } catch (_) {}
+    }
     res.json({
       success: true,
       sessionId: session.sessionUid,
       status: session.status,
       attemptId: session.attemptId || null,
       release: require("../lib/release").releaseIdentity(),
-      ...(terminal ? { decision: { status: session.status, reasonCodes: codes } } : {})
+      ...(terminal ? { decision: { status: session.status, reasonCodes: codes } } : {}),
+      ...(liveness ? { liveness } : {})
     });
   } catch (err) {
     next(err);

@@ -143,6 +143,7 @@ class _HomeScreenState extends State<HomeScreen> {
             sessionId: session.sessionId,
             sdkToken: session.sdkToken,
             apiBaseUrl: apiBase,
+            hostedBaseUrl: hostedBase,
             secretKey: secretKey,
             preliminaryStatus: outcome.status,
           ),

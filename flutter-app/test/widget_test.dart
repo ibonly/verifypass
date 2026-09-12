@@ -79,7 +79,51 @@ void main() {
       expect(result.ocrConfidence, 0.98);
       expect(result.extractedData?['fullName'], 'John Doe');
       expect(result.livenessScore, 0.95);
+      expect(result.selfieScore, 0.92);
       expect(result.faceMatchScore, 0.94);
+      expect(result.meetsSixtyPercentThreshold, isTrue);
+      expect(result.shouldPromptRetry, isFalse);
+    });
+
+    test('VerificationResult enforces >60% auto-approve and <=60% retry', () {
+      final autoApprove = VerificationResult(
+        success: true,
+        sessionId: 'vps_pass',
+        status: 'manual_review',
+        reasonCodes: ['LIVENESS_BORDERLINE'],
+        livenessScore: 0.65,
+        selfieScore: 0.70,
+        raw: {},
+      );
+      expect(autoApprove.meetsSixtyPercentThreshold, isTrue);
+      expect(autoApprove.shouldPromptRetry, isFalse);
+      expect(autoApprove.effectiveStatus, 'approved');
+
+      final needsRetryLiveness = VerificationResult(
+        success: true,
+        sessionId: 'vps_fail_1',
+        status: 'approved', // even if raw status was approved, score below 60% prompts retry
+        reasonCodes: [],
+        livenessScore: 0.58,
+        selfieScore: 0.75,
+        raw: {},
+      );
+      expect(needsRetryLiveness.meetsSixtyPercentThreshold, isFalse);
+      expect(needsRetryLiveness.shouldPromptRetry, isTrue);
+      expect(needsRetryLiveness.effectiveStatus, 'retry_required');
+
+      final needsRetrySelfie = VerificationResult(
+        success: true,
+        sessionId: 'vps_fail_2',
+        status: 'manual_review',
+        reasonCodes: [],
+        livenessScore: 0.85,
+        selfieScore: 0.52,
+        raw: {},
+      );
+      expect(needsRetrySelfie.meetsSixtyPercentThreshold, isFalse);
+      expect(needsRetrySelfie.shouldPromptRetry, isTrue);
+      expect(needsRetrySelfie.effectiveStatus, 'retry_required');
     });
   });
 

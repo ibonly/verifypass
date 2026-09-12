@@ -76,6 +76,8 @@ class VerificationStatusResponse {
   final String status;
   final String? attemptId;
   final List<String> reasonCodes;
+  final double? livenessScore;
+  final double? selfieScore;
   final Map<String, dynamic> raw;
 
   VerificationStatusResponse({
@@ -84,6 +86,8 @@ class VerificationStatusResponse {
     required this.status,
     this.attemptId,
     required this.reasonCodes,
+    this.livenessScore,
+    this.selfieScore,
     required this.raw,
   });
 
@@ -93,12 +97,20 @@ class VerificationStatusResponse {
         ? (decision['reasonCodes'] as List).map((e) => e.toString()).toList()
         : <String>[];
 
+    final liveness = json['liveness'] as Map<String, dynamic>?;
+    final lScore = (liveness?['score'] as num?)?.toDouble() ??
+        (json['livenessScore'] as num?)?.toDouble();
+    final sScore = (liveness?['selfieScore'] as num?)?.toDouble() ??
+        (json['selfieScore'] as num?)?.toDouble();
+
     return VerificationStatusResponse(
       success: json['success'] == true,
       sessionId: json['sessionId'] as String? ?? '',
       status: json['status'] as String? ?? 'unknown',
       attemptId: json['attemptId'] as String?,
       reasonCodes: reasonCodesList,
+      livenessScore: lScore,
+      selfieScore: sScore,
       raw: json,
     );
   }
@@ -107,9 +119,33 @@ class VerificationStatusResponse {
       ['approved', 'rejected', 'manual_review', 'failed', 'expired', 'cancelled']
           .contains(status);
 
-  bool get isApproved => status == 'approved';
-  bool get isManualReview => status == 'manual_review';
-  bool get isRejected => status == 'rejected';
+  /// Returns true if both liveness confidence and selfie frontal score
+  /// are strictly greater than 60% (0.60).
+  bool get meetsSixtyPercentThreshold =>
+      livenessScore != null &&
+      selfieScore != null &&
+      livenessScore! > 0.60 &&
+      selfieScore! > 0.60;
+
+  /// Returns true if either liveness confidence or selfie frontal score
+  /// is less than or equal to 60% (0.60), prompting a retry.
+  bool get shouldPromptRetry =>
+      (livenessScore != null && livenessScore! <= 0.60) ||
+      (selfieScore != null && selfieScore! <= 0.60);
+
+  /// Effective status considering the 60% auto-approval threshold rule:
+  /// - Automatically 'approved' if both liveness confidence and selfie frontal score > 60%.
+  /// - 'retry_required' if either score <= 60%.
+  /// - Otherwise falls back to raw backend status.
+  String get effectiveStatus {
+    if (meetsSixtyPercentThreshold) return 'approved';
+    if (shouldPromptRetry) return 'retry_required';
+    return status;
+  }
+
+  bool get isApproved => effectiveStatus == 'approved';
+  bool get isManualReview => effectiveStatus == 'manual_review';
+  bool get isRejected => effectiveStatus == 'rejected';
   bool get isFailed => status == 'failed';
   bool get isExpired => status == 'expired';
   bool get isCancelled => status == 'cancelled';
@@ -201,7 +237,31 @@ class VerificationResult {
     );
   }
 
-  bool get isApproved => status == 'approved';
-  bool get isManualReview => status == 'manual_review';
-  bool get isRejected => status == 'rejected';
+  /// Returns true if both liveness confidence and selfie frontal score
+  /// are strictly greater than 60% (0.60).
+  bool get meetsSixtyPercentThreshold =>
+      livenessScore != null &&
+      selfieScore != null &&
+      livenessScore! > 0.60 &&
+      selfieScore! > 0.60;
+
+  /// Returns true if either liveness confidence or selfie frontal score
+  /// is less than or equal to 60% (0.60), prompting a retry.
+  bool get shouldPromptRetry =>
+      (livenessScore != null && livenessScore! <= 0.60) ||
+      (selfieScore != null && selfieScore! <= 0.60);
+
+  /// Effective status considering the 60% auto-approval threshold rule:
+  /// - Automatically 'approved' if both liveness confidence and selfie frontal score > 60%.
+  /// - 'retry_required' if either score <= 60%.
+  /// - Otherwise falls back to raw backend status.
+  String get effectiveStatus {
+    if (meetsSixtyPercentThreshold) return 'approved';
+    if (shouldPromptRetry) return 'retry_required';
+    return status;
+  }
+
+  bool get isApproved => effectiveStatus == 'approved';
+  bool get isManualReview => effectiveStatus == 'manual_review';
+  bool get isRejected => effectiveStatus == 'rejected';
 }

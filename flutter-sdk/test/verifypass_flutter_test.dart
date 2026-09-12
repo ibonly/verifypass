@@ -104,6 +104,51 @@ void main() {
       expect(result.livenessScore, 0.97);
       expect(result.faceMatchScore, 0.95);
     });
+
+    test('evaluates >60% auto-approval and <=60% retry rule correctly', () {
+      // Both scores > 60% -> auto-approve
+      final autoApproveResult = VerificationResult(
+        success: true,
+        sessionId: 'vps_1',
+        status: 'manual_review',
+        reasonCodes: ['LIVENESS_BORDERLINE'],
+        livenessScore: 0.85,
+        selfieScore: 0.72,
+        raw: {},
+      );
+      expect(autoApproveResult.meetsSixtyPercentThreshold, isTrue);
+      expect(autoApproveResult.shouldPromptRetry, isFalse);
+      expect(autoApproveResult.effectiveStatus, 'approved');
+      expect(autoApproveResult.isApproved, isTrue);
+
+      // Liveness score <= 60% -> prompt retry
+      final lowLivenessResult = VerificationResult(
+        success: true,
+        sessionId: 'vps_2',
+        status: 'manual_review',
+        reasonCodes: ['LIVENESS_FAILED'],
+        livenessScore: 0.55,
+        selfieScore: 0.80,
+        raw: {},
+      );
+      expect(lowLivenessResult.meetsSixtyPercentThreshold, isFalse);
+      expect(lowLivenessResult.shouldPromptRetry, isTrue);
+      expect(lowLivenessResult.effectiveStatus, 'retry_required');
+
+      // Selfie score <= 60% -> prompt retry
+      final lowSelfieResult = VerificationResult(
+        success: true,
+        sessionId: 'vps_3',
+        status: 'rejected',
+        reasonCodes: ['LIVENESS_FAILED'],
+        livenessScore: 0.75,
+        selfieScore: 0.58,
+        raw: {},
+      );
+      expect(lowSelfieResult.meetsSixtyPercentThreshold, isFalse);
+      expect(lowSelfieResult.shouldPromptRetry, isTrue);
+      expect(lowSelfieResult.effectiveStatus, 'retry_required');
+    });
   });
 
   group('VerificationType', () {
