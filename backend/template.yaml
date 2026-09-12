@@ -6,7 +6,35 @@ Description: >
   async-invokes the worker after each enqueue ("kick"); EventBridge drains
   every minute as the guarantee and runs the maintenance crons.
 
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@2
+  com.aws.cloudformation.Context:
+    ref:
+      - at: deploy/README.md
+        has: Runtime secrets, retained evidence, worker time budget and release recovery constraints.
+
 Parameters:
+  RuntimeSecretArn:
+    Type: String
+    AllowedPattern: 'arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+'
+    Description: Existing Secrets Manager JSON secret; see deploy/README.md for required keys.
+  RuntimeSecretVersion:
+    Type: String
+    AllowedPattern: '[A-Za-z0-9-]{32,64}'
+    Description: Immutable secret version ID, including matching liveness validation receipts.
+  BuildCommit:
+    Type: String
+    AllowedPattern: '[a-f0-9]{40}'
+  CorsOrigins:
+    Type: String
+    MinLength: 1
+  DashboardUrl:
+    Type: String
+    AllowedPattern: 'https://[^\s/?#]+/?'
+  EmailApiUrl:
+    Type: String
+    AllowedPattern: 'https://[^\s/?#]+/?'
   ApiReservedConcurrency:
     Type: Number
     Default: 0
@@ -14,26 +42,13 @@ Parameters:
       Max concurrent API containers (0 = unreserved). Each warm container holds
       a Prisma connection pool; cap this OR set maxPoolSize in DatabaseUrl so
       Lambda bursts cannot exhaust the Atlas connection limit.
-  DatabaseUrl:
-    Type: String
-    NoEcho: true
-    Description: mongodb+srv://user:pass@cluster.mongodb.net/verifypass (Atlas; TLS built in) — append &maxPoolSize=5 so Lambda concurrency can't exhaust the Atlas connection cap
   ApiPublicUrl:
     Type: String
+    AllowedPattern: 'https://[^\s/?#]+/?'
     Description: Public https origin of the API (embedded in SDK tokens). Set to the Function URL or your custom domain.
-  SdkTokenSecret:
-    Type: String
-    NoEcho: true
-  AuthTokenSecret:
-    Type: String
-    NoEcho: true
-  EvidenceEncryptionKey:
-    Type: String
-    NoEcho: true
-    Description: 64 hex chars (AES-256 key for evidence at rest)
   HostedBaseUrl:
     Type: String
-    Default: https://verify.verifypass.com
+    AllowedPattern: 'https://[^\s/?#]+/?'
   ProviderModelVersion:
     Type: String
     Default: onnx-2026-07
@@ -50,9 +65,16 @@ Globals:
         EVIDENCE_BACKEND: s3
         S3_BUCKET: !Ref EvidenceBucket
         S3_REGION: !Ref AWS::Region
-        DATABASE_URL: !Ref DatabaseUrl
-        SDK_TOKEN_SECRET: !Ref SdkTokenSecret
-        EVIDENCE_ENCRYPTION_KEY: !Ref EvidenceEncryptionKey
+        DATABASE_URL: !Sub '{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:DATABASE_URL::${RuntimeSecretVersion}}}'
+        SDK_TOKEN_SECRET: !Sub '{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:SDK_TOKEN_SECRET::${RuntimeSecretVersion}}}'
+        EVIDENCE_ENCRYPTION_KEY: !Sub '{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:EVIDENCE_ENCRYPTION_KEY::${RuntimeSecretVersion}}}'
+        LIVENESS_VALIDATION_RECEIPTS: !Sub '{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:LIVENESS_VALIDATION_RECEIPTS::${RuntimeSecretVersion}}}'
+        BUILD_COMMIT: !Ref BuildCommit
+        VP_PROVIDER: onnx
+        PROVIDER_MODEL_VERSION: !Ref ProviderModelVersion
+        DASHBOARD_URL: !Ref DashboardUrl
+        EMAIL_API_URL: !Ref EmailApiUrl
+        EMAIL_API_KEY: !Sub '{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:EMAIL_API_KEY::${RuntimeSecretVersion}}}'
 
 Conditions:
   HasApiReservedConcurrency: !Not [!Equals [!Ref ApiReservedConcurrency, 0]]
@@ -62,6 +84,8 @@ Resources:
   # bucket-level SSE + private access are defense in depth.
   EvidenceBucket:
     Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       BucketEncryption:
         ServerSideEncryptionConfiguration:
@@ -75,6 +99,25 @@ Resources:
       VersioningConfiguration:
         Status: Enabled
 
+  EvidenceBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Prevent plaintext transport of biometric evidence.
+        must: [Deny non-TLS access without making the bucket public.]
+    Properties:
+      Bucket: !Ref EvidenceBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource: [!GetAtt EvidenceBucket.Arn, !Sub '${EvidenceBucket.Arn}/*']
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
   WorkerFunction:
     Type: AWS::Serverless::Function
     Metadata:
@@ -84,7 +127,7 @@ Resources:
     Properties:
       PackageType: Image
       MemorySize: 3008        # Lambda CPU scales with memory — ONNX needs it
-      Timeout: 120
+      Timeout: 300
       Environment:
         Variables:
           VP_PROVIDER: onnx
@@ -125,8 +168,9 @@ Resources:
       Environment:
         Variables:
           API_PUBLIC_URL: !Ref ApiPublicUrl
-          AUTH_TOKEN_SECRET: !Ref AuthTokenSecret
+          AUTH_TOKEN_SECRET: !Sub '{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:AUTH_TOKEN_SECRET::${RuntimeSecretVersion}}}'
           HOSTED_BASE_URL: !Ref HostedBaseUrl
+          CORS_ORIGINS: !Ref CorsOrigins
           WORKER_LAMBDA_ARN: !GetAtt WorkerFunction.Arn
       Policies:
         - S3CrudPolicy:
@@ -142,3 +186,5 @@ Outputs:
     Value: !Ref EvidenceBucket
   WorkerFunctionArn:
     Value: !GetAtt WorkerFunction.Arn
+  ApiFunctionArn:
+    Value: !GetAtt ApiFunction.Arn

@@ -84,7 +84,7 @@ function buildDeps() {
 // tick semantics (optimistic claim, retry backoff, maxAttempts), but in a
 // bounded loop that exits well before the function timeout.
 // ---------------------------------------------------------------------------
-async function drainDbQueue(deps, { maxJobs = 25, budgetMs = 90_000, now = Date.now } = {}) {
+async function drainDbQueue(deps, { maxJobs = 1, budgetMs = 90_000, now = Date.now } = {}) {
   const db = deps.db;
   const owner = require("crypto").randomUUID();
   const { reclaimStaleJobs } = require("./src/worker/watchdog");
@@ -191,6 +191,19 @@ async function runJob(job, deps) {
  */
 function buildHandler({ deps, execute, enqueue, now = Date.now } = {}) {
   return async function handler(event) {
+    if (event?.type === "health" && !execute) {
+      const { assertGeneratedSchema, releaseIdentity, modelHashes } = require("./src/lib/release");
+      assertGeneratedSchema();
+      const db = deps?.db || getDb();
+      await db.$runCommandRaw({ ping: 1 });
+      await db.outbox.findMany({ take: 1, select: { id: true } });
+      const fs = require("fs"), path = require("path"), crypto = require("crypto");
+      for (const [name, expected] of Object.entries(modelHashes)) {
+        const bytes = fs.readFileSync(path.join(config.onnx.modelsDir || path.join(__dirname, "models"), name));
+        if (crypto.createHash("sha256").update(bytes).digest("hex") !== expected) throw new Error("Model checksum mismatch");
+      }
+      return { ok: true, release: releaseIdentity() };
+    }
     // deps are only materialized when no executor was injected — tests pass
     // a fake `execute` and must not touch Prisma/AWS at all
     const exec = execute || ((job) => runJob(job, deps || buildDeps()));

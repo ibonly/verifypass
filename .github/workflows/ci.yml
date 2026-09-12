@@ -1,57 +1,74 @@
-# CI — folder-local monorepo (no root workspace). Each area installs and
-# tests independently.
-
 name: CI
-
 on:
-  push:
-    branches: [main]
   pull_request:
-
+  workflow_call:
+    inputs:
+      api_url:
+        type: string
+        default: https://api.example.com
+permissions:
+  contents: read
 jobs:
   backend:
     runs-on: ubuntu-latest
-    defaults: { run: { working-directory: backend } }
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 20 }
-      - run: npm install
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - run: npm run prisma:generate
       - run: npm test
-      - name: Validate Prisma schema
-        run: DATABASE_URL="mongodb://localhost:27017/verifypass" npx prisma validate --schema prisma/schema.prisma
-
-  sdk:
+      - run: npm run prisma:validate
+      - name: Deployment contracts
+        run: node --test ../deploy/tests/*.test.cjs
+  frontend:
     runs-on: ubuntu-latest
-    defaults: { run: { working-directory: frontend/sdk/core } }
+    timeout-minutes: 20
+    env:
+      VP_API_BASE: ${{ inputs.api_url || 'https://api.example.com' }}
+      VITE_VP_API_BASE: ${{ inputs.api_url || 'https://api.example.com' }}
+      VITE_VP_FACE_MODEL_URL: /models/fr_detect.onnx
+      VITE_VP_LANDMARK_MODEL_URL: /models/fr_landmark.onnx
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 20 }
-      - run: npm install
-      - run: npm test
-
-  frontend-builds:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - run: node --test frontend/sdk/core/tests/*.test.js
+      - run: npm ci --prefix frontend/sdk/react
+      - run: npm ci --prefix frontend/sdk/js && npm run build --prefix frontend/sdk/js
+      - run: npm ci --prefix frontend/dashboard && npm test --prefix frontend/dashboard && npm run build --prefix frontend/dashboard
+      - run: npm ci --prefix frontend/verify-page
+      - run: frontend/verify-page/node_modules/.bin/playwright install --with-deps chromium
+      - run: npm run test:sdk --prefix frontend/verify-page
+      - run: npm run build --prefix frontend/verify-page
+      - run: npm ci --prefix sample-app && npm run build --prefix sample-app
+      - name: Test mailer
+        run: |
+          php email-api/test/self-test.php
+          php email-api/test/security-test.php
+      - name: Package immutable cPanel release
+        run: node deploy/package.cjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cpanel-${{ github.sha }}
+          path: release.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+  infrastructure:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 20 }
-      - name: Install and test SDK core
-        working-directory: frontend/sdk/core
-        run: npm install && npm test
-      - name: Install SDK react
-        working-directory: frontend/sdk/react
-        run: npm install
-      - name: Build SDK JS standalone bundle
-        working-directory: frontend/sdk/js
-        run: npm install && npm run build
-      - name: Build dashboard
-        working-directory: frontend/dashboard
-        run: npm install && npm test && npm run build
-      - name: Build verify-page
-        working-directory: frontend/verify-page
-        run: npm install && npm run build
-      - name: Build sample-app
-        working-directory: sample-app
-        run: npm install && npm run build
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Validate workflows and infrastructure
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          "$(go env GOPATH)/bin/actionlint"
+          pipx run --spec cfn-lint==1.56.0 cfn-lint backend/template.yaml

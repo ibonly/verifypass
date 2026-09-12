@@ -7,6 +7,7 @@
 const { decide, resolveThresholds, decryptBuffer, resolveEvidenceKey, verifyLivenessChallenge, verifyFrameBinding, storage } = require("@verifypass/shared");
 const { computeRiskSignals } = require("./riskSignals");
 const { livenessValidation } = require("../lib/livenessValidation");
+const workerConfig = require("./config");
 
 // Stamped into every rawResult + logged at worker startup. When a decision
 // looks impossible, this settles WHICH code produced it — Node caches modules
@@ -109,7 +110,7 @@ async function runVerificationInternal(payload, { db, provider, evidenceKey, env
     const digest = require("crypto").createHash("sha256").update(plain).digest("hex");
     if (file.checksum && file.checksum !== digest) throw new Error("EVIDENCE_CHECKSUM_MISMATCH");
     if (session.attemptId && !file.checksum) throw new Error("EVIDENCE_CHECKSUM_MISSING");
-    if (session.attemptId && !verifyFrameBinding(require("../config").sdkTokenSecret, {
+    if (session.attemptId && !verifyFrameBinding(workerConfig.sdkTokenSecret, {
       challengeNonce: file.challengeNonce, action: file.label || file.fileType, checksum: file.checksum, bindingHmac: file.bindingHmac,
       context: [session.tenantId, session.id, file.attemptId, file.fileType, file.captureMode || null, file.meta || null]
     })) throw new Error("EVIDENCE_BINDING_MISMATCH");
@@ -218,7 +219,7 @@ async function runVerificationInternal(payload, { db, provider, evidenceKey, env
     const issuedAt = session.livenessChallenge.issuedAt
       ? new Date(session.livenessChallenge.issuedAt).getTime() - 5000
       : 0;
-    const bindingSecret = require("../config").sdkTokenSecret;
+    const bindingSecret = workerConfig.sdkTokenSecret;
     // Frames whose nonce MATCHES the current challenge but whose HMAC fails
     // are evidence of tampering (relabeled action, swapped body, forged row)
     // — counted and surfaced as LIVENESS_FRAME_BINDING_FAILED below, never
@@ -418,7 +419,7 @@ async function runVerificationInternal(payload, { db, provider, evidenceKey, env
   if (liveness && flashMosaics.length) {
     const nonce = session.livenessChallenge && session.livenessChallenge.nonce;
     const current = flashMosaics
-      .filter((m) => m.challengeNonce === nonce && verifyFrameBinding(require("../config").sdkTokenSecret, { challengeNonce: m.challengeNonce, action: m.label, checksum: m.checksum, bindingHmac: m.bindingHmac, context: session.attemptId ? [session.tenantId, session.id, m.attemptId, m.fileType, m.captureMode || null, m.meta || null] : undefined }))
+      .filter((m) => m.challengeNonce === nonce && verifyFrameBinding(workerConfig.sdkTokenSecret, { challengeNonce: m.challengeNonce, action: m.label, checksum: m.checksum, bindingHmac: m.bindingHmac, context: session.attemptId ? [session.tenantId, session.id, m.attemptId, m.fileType, m.captureMode || null, m.meta || null] : undefined }))
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
     const expectedSequence = session.livenessChallenge?.flashSequence;
     if (current && current.meta && Array.isArray(expectedSequence) && JSON.stringify(current.meta.sequence) === JSON.stringify(expectedSequence)) {

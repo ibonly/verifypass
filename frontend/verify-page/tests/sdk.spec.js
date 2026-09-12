@@ -46,6 +46,18 @@ test("manual ID uploads preserve front and back and submit once", async ({ page 
   expect(submissions).toBe(1);
 });
 
+test("manual uploads exceeding the Lambda-safe limit are rejected before transport", async ({ page }) => {
+  await mockApi(page);
+  let uploads = 0;
+  await page.route("**/document", route => { uploads++; return route.fulfill({ json: { success: true } }); });
+  await page.addInitScript(() => { navigator.mediaDevices.getUserMedia = async () => { throw new DOMException("Synthetic camera unavailable", "NotAllowedError"); }; });
+  await page.goto("/session/vps_browser#t=sdk_browser");
+  await consent(page);
+  await page.locator('input[type="file"]').setInputFiles({ name: "large.png", mimeType: "image/png", buffer: Buffer.alloc(3 * 1024 * 1024 + 1) });
+  await expect(page.getByText(/Image is larger than 3MB/)).toBeVisible();
+  expect(uploads).toBe(0);
+});
+
 test("public env config supports explicit overrides and session changes cancel late cameras", async ({ page }) => {
   await mockApi(page);
   await page.goto("/");

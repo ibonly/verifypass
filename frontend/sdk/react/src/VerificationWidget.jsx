@@ -709,7 +709,7 @@ function VerificationWidgetSession({
     setBusy(true);
     setFeedback(null);
     try {
-      if (file.size > 8 * 1024 * 1024) throw new Error("Image is larger than 8MB — choose a smaller photo.");
+      if (file.size > 3 * 1024 * 1024) throw new Error("Image is larger than 3MB — choose a smaller photo.");
       const base64 = await new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(String(reader.result));

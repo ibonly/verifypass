@@ -6,6 +6,8 @@ dist/
 coverage/
 playwright-report/
 test-results/
+/release.tar.gz
+/artifact/
 *.log
 evidence-store/
 .evidence-store/

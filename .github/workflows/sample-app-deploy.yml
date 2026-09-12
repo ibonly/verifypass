@@ -1,42 +1,25 @@
-# Deploy the SAMPLE-APP (integration demo) to cPanel. Path-filtered.
-#
-# Secrets: shares the cPanel FTP credentials with frontend-deploy.
-# Optional var: CPANEL_SAMPLE_DIR (default public_html/sample).
-
-name: sample-app-deploy
-
+name: sample-app-demo-build
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - "sample-app/**"
-      - "frontend/sdk/**"
-      - ".github/workflows/sample-app-deploy.yml"
-
-concurrency: sample-app-deploy
-
+permissions:
+  contents: read
 jobs:
-  build-and-deploy:
+  demo:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: production
+    timeout-minutes: 10
+    environment: demo
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 20 }
-
-      - name: Build sample-app
-        working-directory: sample-app
-        env:
-          VP_API_BASE: ${{ secrets.VP_API_BASE }}
-        run: npm install && npm run build
-
-      - name: Upload to cPanel (FTPS)
-        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          server: ${{ secrets.CPANEL_FTP_SERVER }}
-          username: ${{ secrets.CPANEL_FTP_USERNAME }}
-          password: ${{ secrets.CPANEL_FTP_PASSWORD }}
-          protocol: ftps
-          local-dir: sample-app/dist/
-          server-dir: ${{ vars.CPANEL_SAMPLE_DIR || 'public_html/sample/' }}
+          node-version: 22
+      - run: npm ci --prefix frontend/sdk/react
+      - run: npm ci --prefix sample-app && npm run build --prefix sample-app
+        env:
+          VITE_VP_API_BASE: ${{ vars.DEMO_API_URL }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: restricted-demo-${{ github.sha }}
+          path: sample-app/dist/
+          retention-days: 7

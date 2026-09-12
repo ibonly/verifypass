@@ -1,14 +1,14 @@
 # Lambda container image for the VerifyPass API.
 # Build from the backend/ folder: docker build -f Dockerfile.api -t verifypass-api .
 
-FROM public.ecr.aws/lambda/nodejs:20
+FROM public.ecr.aws/lambda/nodejs:22@sha256:b9dd86c58dc96886e635d317aaef3b80984630afb7850b97b2e19d043d122042
 
 COPY . ${LAMBDA_TASK_ROOT}/
 
 RUN cd ${LAMBDA_TASK_ROOT} && \
-    npm install --omit=dev && \
-    npm install --no-save serverless-http @aws-sdk/client-s3 @aws-sdk/client-lambda && \
-    npx prisma generate --schema prisma/schema.prisma
+    npm ci && \
+    ./node_modules/.bin/prisma generate --schema prisma/schema.prisma && \
+    npm prune --omit=dev
 
 # Runtime env (set on the function): DATABASE_URL, API_PUBLIC_URL (https),
 # SDK_TOKEN_SECRET, AUTH_TOKEN_SECRET, EVIDENCE_ENCRYPTION_KEY,

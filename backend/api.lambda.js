@@ -10,8 +10,8 @@
 //   Lambda invocations cap request bodies at ~6MB (Function URLs and API
 //   Gateway both inherit it). Uploads are base64 JSON, so the effective
 //   binary image cap on this topology is ~4MB. Camera captures are far
-//   smaller (~0.1–1MB JPEG); the 8MB manual-file cap only fits when the API
-//   runs on a server. If larger uploads matter on Lambda, move uploads to
+//   smaller (~0.1–1MB JPEG); the widget limits manual files to 3MB to leave
+//   room for the invocation envelope. For larger Lambda uploads, move to
 //   presigned S3 PUTs.
 //
 // Warm state (Prisma pool, tesseract, config) lives in module scope and

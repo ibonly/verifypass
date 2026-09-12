@@ -1,0 +1,27 @@
+name: Production release
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: production-release
+  cancel-in-progress: false
+jobs:
+  checks:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci.yml
+    with:
+      api_url: ${{ vars.API_PUBLIC_URL }}
+  backend:
+    needs: checks
+    uses: ./.github/workflows/backend-deploy.yml
+    permissions:
+      contents: read
+      id-token: write
+    secrets: inherit
+  frontend:
+    needs: backend
+    uses: ./.github/workflows/frontend-deploy.yml
+    secrets: inherit

@@ -1,101 +1,43 @@
-# Deploy the BACKEND (one service: Lambda API + Lambda worker, db queue) to AWS with SAM.
-#
-# Trigger: manual (workflow_dispatch) — deliberate for a KYC product; switch
-# to `push: tags: ["v*"]` once you trust the pipeline.
-#
-# Auth: GitHub OIDC → an IAM role (no long-lived AWS keys in secrets).
-# Required repo secrets:
-#   AWS_DEPLOY_ROLE_ARN   IAM role trusting this repo via OIDC
-#   DATABASE_URL          mongodb+srv://... (Atlas; replica set required)
-#   API_PUBLIC_URL        https origin the SDK tokens embed
-#   SDK_TOKEN_SECRET, AUTH_TOKEN_SECRET, EVIDENCE_ENCRYPTION_KEY
-# Optional: AWS_REGION (default us-east-1), HOSTED_BASE_URL
-
 name: backend-deploy
-
 on:
-  workflow_dispatch:
-    # push-trigger is deliberate opt-in for a KYC product; uncomment when trusted:
-    # push:
-    #   branches: [main]
-    #   paths: ["backend/**", ".github/workflows/backend-deploy.yml"]
-    inputs:
-      stack_name:
-        description: CloudFormation stack name
-        default: verifypass
-        required: true
-
+  workflow_call:
 permissions:
-  id-token: write   # OIDC federation
   contents: read
-
-concurrency: deploy-aws   # never two deploys racing a shared stack
-
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 20 }
-      - name: Backend tests
-        working-directory: backend
-        run: |
-          npm install
-          npm test
-
   deploy:
-    needs: test   # never ship a red build
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     environment: production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      STACK_NAME: ${{ vars.AWS_STACK_NAME }}
+      RUNTIME_SECRET_ARN: ${{ vars.AWS_RUNTIME_SECRET_ARN }}
+      RUNTIME_SECRET_VERSION: ${{ vars.AWS_RUNTIME_SECRET_VERSION }}
+      API_PUBLIC_URL: ${{ vars.API_PUBLIC_URL }}
+      HOSTED_BASE_URL: ${{ vars.HOSTED_BASE_URL }}
+      DASHBOARD_URL: ${{ vars.DASHBOARD_URL }}
+      EMAIL_API_URL: ${{ vars.EMAIL_API_URL }}
+      CORS_ORIGINS: ${{ vars.CORS_ORIGINS }}
+      PROVIDER_MODEL_VERSION: ${{ vars.PROVIDER_MODEL_VERSION }}
+      SCHEMA_CHANGE_APPROVED: ${{ vars.SCHEMA_CHANGE_APPROVED }}
+      BUILD_COMMIT: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with: { node-version: 20 }
-
-      - name: Fetch ONNX models (baked into the worker image)
-        working-directory: backend
-        run: |
-          npm install
-          node scripts/fetch-models.js
-
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - run: node deploy/config.cjs
+      - run: npm ci --prefix backend && npm run prisma:generate --prefix backend
+      - run: node backend/scripts/fetch-models.js
+      - name: Install SAM before acquiring deployment credentials
+        run: pipx install aws-sam-cli==1.145.2
+      - uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
-
-      - uses: aws-actions/setup-sam@v2
-        with: { use-installer: true }
-
-      - name: SAM build (container images for both functions)
-        run: sam build --use-container=false -t backend/template.yaml
-
-      - name: SAM deploy
-        run: |
-          sam deploy \
-            --stack-name "${{ inputs.stack_name }}" \
-            --resolve-s3 \
-            --resolve-image-repos \
-            --no-confirm-changeset \
-            --no-fail-on-empty-changeset \
-            --capabilities CAPABILITY_IAM \
-            --parameter-overrides \
-              DatabaseUrl="${{ secrets.DATABASE_URL }}" \
-              ApiPublicUrl="${{ secrets.API_PUBLIC_URL }}" \
-              SdkTokenSecret="${{ secrets.SDK_TOKEN_SECRET }}" \
-              AuthTokenSecret="${{ secrets.AUTH_TOKEN_SECRET }}" \
-              EvidenceEncryptionKey="${{ secrets.EVIDENCE_ENCRYPTION_KEY }}" \
-              HostedBaseUrl="${{ secrets.HOSTED_BASE_URL || 'https://verify.verifypass.com' }}"
-
-      - name: Sync database schema (MongoDB — collections + indexes)
-        run: |
-          DATABASE_URL="${{ secrets.DATABASE_URL }}" \
-            npx prisma db push --schema backend/prisma/schema.prisma --skip-generate
-
-      - name: Smoke check
-        run: |
-          URL=$(aws cloudformation describe-stacks --stack-name "${{ inputs.stack_name }}" \
-            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text)
-          echo "API deployed at $URL"
-          curl -fsS "${URL%/}/health" && echo " — health OK"
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Validate, synchronize compatible schema, and deploy
+        run: node deploy/aws.cjs

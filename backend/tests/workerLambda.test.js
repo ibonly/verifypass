@@ -143,6 +143,14 @@ test("drain: respects the maxJobs bound (leaves the rest for the next invocation
   assert.equal((await db.jobQueue.findMany({ where: { status: "pending" } })).length, 3);
 });
 
+test("Lambda default drain leaves time for a full verification before hard timeout", async () => {
+  const db = createMockDb();
+  await seedDrain(db, { jobs: 3 });
+  const out = await drainDbQueue({ db });
+  assert.equal(out.processed, 1);
+  assert.equal((await db.jobQueue.findMany({ where: { status: "pending" } })).length, 2);
+});
+
 test("drain: reclaims a stale 'running' orphan first, then processes it", async () => {
   const db = createMockDb();
   const tenant = await seedDrain(db, { jobs: 0 });
