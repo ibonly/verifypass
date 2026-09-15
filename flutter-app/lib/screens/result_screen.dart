@@ -156,20 +156,23 @@ class _ResultScreenState extends State<ResultScreen> {
     final bool isScoreBelowSixty = (livenessScore != null && livenessScore <= 0.60) ||
         (selfieScore != null && selfieScore <= 0.60);
 
-    final bool shouldPromptRetry = isScoreBelowSixty ||
-        rawStatus == 'rejected' ||
-        rawStatus == 'manual_review' ||
-        rawStatus == 'failed' ||
-        rawStatus == 'retry_required';
-
     final String displayStatus = meetsSixtyPercent
         ? 'approved'
         : (isScoreBelowSixty ? 'retry_required' : rawStatus);
 
+    final bool isApproved = displayStatus == 'approved';
+
+    final bool shouldPromptRetry = !isApproved &&
+        (isScoreBelowSixty ||
+            rawStatus == 'rejected' ||
+            rawStatus == 'manual_review' ||
+            rawStatus == 'failed' ||
+            rawStatus == 'retry_required');
+
     final theme = _statusTheme(
       displayStatus,
       isAutoApproved: meetsSixtyPercent,
-      isScoreRetry: isScoreBelowSixty,
+      isScoreRetry: isScoreBelowSixty && !isApproved,
     );
 
     return Scaffold(
@@ -500,8 +503,8 @@ class _ResultScreenState extends State<ResultScreen> {
                         const SizedBox(height: 18),
                       ],
 
-                      // Reason codes (if any)
-                      if (_hasReasonCodes) ...[
+                      // Reason codes (only shown when not approved to prevent contradicting approved outcome)
+                      if (!isApproved && _hasReasonCodes) ...[
                         _buildCard(
                           title: 'Reason Codes',
                           icon: Icons.label_outline,
