@@ -182,3 +182,38 @@ test("outbox webhook snapshots survive retries and redelivery reuses the event I
   assert.equal(body.status,"rejected");assert.equal(body.attemptId,"old");
   assert.equal(db.webhookDelivery.rows[0].eventUid,"evt_fixed");
 });
+
+test("passed verification with minimalPayload sends serviceId and all selfieIds only", async () => {
+  const db = createMockDb();
+  const { tenant, session } = await seed(db);
+  const fetch = mockFetch(() => ({ status: 200 }));
+  const selfieIds = ["60d5ec1234567890abcdef01", "60d5ec1234567890abcdef02", "60d5ec1234567890abcdef03"];
+  const payload = {
+    tenantId: tenant.id,
+    sessionUid: session.sessionUid,
+    event: "verification.approved",
+    eventUid: "evt_passed_minimal",
+    snapshot: {
+      serviceId: session.sessionUid,
+      selfieId: selfieIds[0],
+      selfieIds,
+      minimalPayload: true,
+      status: "approved"
+    }
+  };
+
+  const out = await sendWebhook(payload, { db, fetchImpl: fetch, validateTarget: async () => {} });
+  assert.equal(out.delivered, true);
+  assert.equal(fetch.calls.length, 1);
+
+  const body = JSON.parse(fetch.calls[0].opts.body);
+  assert.equal(body.serviceId, session.sessionUid);
+  assert.deepEqual(body.selfieIds, selfieIds);
+  assert.equal(body.selfieId, selfieIds[0]);
+  // Verify detailed fields are excluded from minimal testing payload
+  assert.equal(body.riskLevel, undefined);
+  assert.equal(body.customerReference, undefined);
+  assert.equal(body.attempt, undefined);
+  assert.equal(body.reasonCodes, undefined);
+});
+

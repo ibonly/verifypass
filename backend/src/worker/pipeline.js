@@ -101,6 +101,9 @@ async function runVerificationInternal(payload, { db, provider, evidenceKey, env
   // fence) but are NOT challenge frames — split them off here.
   const flashMosaics = evidence.filter((e) => e.fileType === "liveness_frame" && e.label === "flash");
   const livenessFrames = evidence.filter((e) => e.fileType === "liveness_frame" && e.label !== "flash");
+  const allSelfieFiles = evidence.filter((e) => e.fileType === "selfie" || e.fileType === "liveness_frame");
+  const selfieIds = allSelfieFiles.map((e) => String(e.id));
+  const selfieId = selfie ? String(selfie.id) : (selfieIds[0] || null);
   const consumedEvidenceIds = new Set();
 
   async function loadDecrypted(file) {
@@ -555,12 +558,12 @@ async function runVerificationInternal(payload, { db, provider, evidenceKey, env
     }
   };
 
-  const committed = await finalize(db, session, { decision, resultRow, dispatch, assertActive });
+  const committed = await finalize(db, session, { decision, resultRow, dispatch, assertActive, selfieId, selfieIds });
   if (!committed) return { skipped: true, reason: "superseded attempt or completed session" };
   return { status: decision.status, reasonCodes: decision.reasonCodes };
 }
 
-async function finalize(db, session, { decision, resultRow, dispatch, assertActive }) {
+async function finalize(db, session, { decision, resultRow, dispatch, assertActive, selfieId, selfieIds }) {
   const send = dispatch || dbEnqueue(db);
   // Optimistic compare-and-set: claim the session FIRST to prevent duplicate
   // results if the worker dies between result-create and session-update (M2).
@@ -574,7 +577,29 @@ async function finalize(db, session, { decision, resultRow, dispatch, assertActi
     if (!claimed.count) return false;
     await tx.verificationResult.create({ data: { sessionId: session.id, attemptId: session.attemptId || null, ...resultRow, rawResult: JSON.parse(JSON.stringify({ ...resultRow.rawResult, decision: { status: decision.status, riskLevel: decision.riskLevel, reasonCodes: decision.reasonCodes, ...(decision.waivedReasonCodes?.length ? { waivedReasonCodes: decision.waivedReasonCodes, livenessWaiver: decision.livenessWaiver || null } : {}) } })) } });
     await tx.auditLog.create({ data: { tenantId: session.tenantId, sessionId: session.id, actorType: "system", action: "verification.decided", metadata: { attemptId: session.attemptId || null, status: decision.status, reasonCodes: decision.reasonCodes }, riskEvent: decision.riskLevel !== "low" } });
-    await addOutbox(tx, "send_webhook", { tenantId: String(session.tenantId), sessionUid: session.sessionUid, attemptId: session.attemptId || null, event: `verification.${decision.status}`, eventUid: `evt_${require("crypto").randomBytes(12).toString("hex")}`, snapshot: { customerReference: session.customerReference || null, status: decision.status, riskLevel: decision.riskLevel, decisionSource: "automatic", reasonCodes: decision.reasonCodes || [], ...(decision.waivedReasonCodes?.length ? { waivedReasonCodes: decision.waivedReasonCodes } : {}), attempt: session.attemptNumber || 1, attemptId: session.attemptId || null, createdAt: session.createdAt ? new Date(session.createdAt).toISOString() : null, completedAt: decision.status === "manual_review" ? null : new Date().toISOString() } });
+    await addOutbox(tx, "send_webhook", {
+      tenantId: String(session.tenantId),
+      sessionUid: session.sessionUid,
+      attemptId: session.attemptId || null,
+      event: `verification.${decision.status}`,
+      eventUid: `evt_${require("crypto").randomBytes(12).toString("hex")}`,
+      snapshot: {
+        customerReference: session.customerReference || null,
+        status: decision.status,
+        riskLevel: decision.riskLevel,
+        decisionSource: "automatic",
+        reasonCodes: decision.reasonCodes || [],
+        ...(decision.waivedReasonCodes?.length ? { waivedReasonCodes: decision.waivedReasonCodes } : {}),
+        attempt: session.attemptNumber || 1,
+        attemptId: session.attemptId || null,
+        createdAt: session.createdAt ? new Date(session.createdAt).toISOString() : null,
+        completedAt: decision.status === "manual_review" ? null : new Date().toISOString(),
+        serviceId: session.sessionUid,
+        selfieId: selfieId || null,
+        selfieIds: selfieIds || [],
+        minimalPayload: decision.status === "approved"
+      }
+    });
     assertActive?.();
     return true;
   });

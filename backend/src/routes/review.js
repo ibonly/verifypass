@@ -153,6 +153,15 @@ router.post("/:sessionId/decision", reviewers, requireTenant, tenantScope, async
         status: decision,
         completedAt: new Date()
       });
+      let selfieIds = [];
+      let selfieId = null;
+      if (decision === "approved") {
+        const evidence = await req.scopedDb.evidence.listForSession(session.id);
+        const allSelfies = evidence.filter((e) => e.fileType === "selfie" || e.fileType === "liveness_frame");
+        selfieIds = allSelfies.map((e) => String(e.id));
+        const selfie = evidence.filter((e) => e.fileType === "selfie").sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
+        selfieId = selfie ? String(selfie.id) : (selfieIds[0] || null);
+      }
       // verification.approved / verification.rejected — same event names as
       // the automatic path so consumers handle both identically; the
       // snapshot says a human decided and carries the original reason codes.
@@ -168,7 +177,11 @@ router.post("/:sessionId/decision", reviewers, requireTenant, tenantScope, async
           reasonCodes: session.decisionReason?.reasonCodes || [],
           attempt: session.attemptNumber || 1,
           attemptId: session.attemptId || null,
-          completedAt: new Date().toISOString()
+          completedAt: new Date().toISOString(),
+          serviceId: session.sessionUid,
+          selfieId,
+          selfieIds,
+          minimalPayload: decision === "approved"
         }
       });
     }

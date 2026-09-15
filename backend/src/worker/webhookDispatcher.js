@@ -195,19 +195,33 @@ async function createDelivery({ tenantId, sessionUid, event, eventUid: suppliedE
     attempt = retries.length + 1;
   }
 
-  // Payload per PRD §9.11
-  const body = {
-    event,
-    tenantId: tenant.tenantUid,
-    sessionId: sessionUid,
-    customerReference: session?.customerReference || null,
-    status: session?.status || null,
-    riskLevel: session?.riskLevel || null,
-    attempt,
-    createdAt: session?.createdAt ? new Date(session.createdAt).toISOString() : null,
-    completedAt: session?.completedAt ? new Date(session.completedAt).toISOString() : null,
-    ...(snapshot || {})
-  };
+  // When minimalPayload is set on passed verification, send service id and all selfie ids only.
+  // Additional details will be added later once tested per consumer requirements.
+  let body;
+  if (snapshot?.minimalPayload && (event === "verification.approved" || snapshot?.status === "approved")) {
+    body = {
+      serviceId: snapshot.serviceId || sessionUid,
+      service_id: snapshot.serviceId || sessionUid,
+      sessionId: sessionUid,
+      selfieId: snapshot.selfieId || (snapshot.selfieIds && snapshot.selfieIds[0]) || null,
+      selfieIds: snapshot.selfieIds || [],
+      selfie_ids: snapshot.selfieIds || []
+    };
+  } else {
+    // Payload per PRD §9.11
+    body = {
+      event,
+      tenantId: tenant.tenantUid,
+      sessionId: sessionUid,
+      customerReference: session?.customerReference || null,
+      status: session?.status || null,
+      riskLevel: session?.riskLevel || null,
+      attempt,
+      createdAt: session?.createdAt ? new Date(session.createdAt).toISOString() : null,
+      completedAt: session?.completedAt ? new Date(session.completedAt).toISOString() : null,
+      ...(snapshot || {})
+    };
+  }
 
   return db.webhookDelivery.create({
     data: {
