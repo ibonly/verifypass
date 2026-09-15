@@ -20,3 +20,15 @@ backend/models/*.partial
 # Local cleanup records and generated Vite config bundles
 /delete/
 **/vite.config.*.timestamp-*.mjs
+
+# IDE and editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Flutter and Dart build artifacts
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+build/

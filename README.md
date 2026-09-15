@@ -13,7 +13,11 @@ backend/       ONE service: Express API + verification worker (AWS Lambda)
 frontend/      cPanel static builds
   dashboard/   tenant + admin dashboard      verify-page/  hosted verification flow
   sdk/         core / react / js — the client SDKs (file: deps)
-sample-app/    integration demo (cPanel)
+flutter-sdk/   Official Flutter SDK for mobile apps (WebView + status polling)
+flutter-app/   Sample mobile application integrating VerifyPass Flutter SDK
+email-api/     PHP HMAC-authenticated mailer (21 transactional templates)
+deploy/        AWS SAM + cPanel atomic deployment automation and contract tests
+sample-app/    Web integration demo (cPanel)
 scripts/       dev-stack (local MongoDB + API + worker)
 ```
 
@@ -36,8 +40,13 @@ npm start                                # OR node scripts/start-all.js (API + w
 
 ## Tests
 
-`cd backend && npm test` (API + worker + shared) · `cd frontend/sdk/core && npm test`
-
+```bash
+npm test                  # backend + SDK core + dashboard + deploy contract tests
+npm run test:deploy       # deploy contract and packaging integrity tests
+npm run test:email        # PHP email-api security and template tests + Node triggers
+npm run test:playwright   # Playwright desktop and mobile hosted verification tests
+npm run test:flutter      # Flutter SDK and mobile app test suites
+```
 ## Liveness release checklist
 
 The active-liveness policy (`backend/src/lib/release.js` → `policyVersion`) is
@@ -124,20 +133,22 @@ or overwritten automatically.
   (`HOSTED_BASE_URL/session/<id>#t=<token>`) in an iframe; it requires the
   hosted page to be deployed over HTTPS and has no standalone capture mode.
 
-## Deploy
+## Production Deployment
 
-- **Backend → AWS Lambda**: `.github/workflows/backend-deploy.yml` (SAM, OIDC).
-  Manual trigger; secrets: AWS_DEPLOY_ROLE_ARN, DATABASE_URL, API_PUBLIC_URL,
-  SDK_TOKEN_SECRET, AUTH_TOKEN_SECRET, EVIDENCE_ENCRYPTION_KEY.
-- **Frontend + sample-app → cPanel**: path-filtered FTPS workflows;
-  secrets: CPANEL_FTP_SERVER/USERNAME/PASSWORD, VP_API_BASE.
+Production deployment is fully automated through `.github/workflows/release.yml` on push to `main` (or via manual workflow dispatch):
 
-## Dashboard onboarding
+1. **Pre-flight & CI Verification**: Backend tests, SDK core/react/js tests, dashboard tests, Playwright browser checks, PHP mailer security tests, SAM template lint, and deployment contract tests.
+2. **Backend (AWS Lambda + SAM)**: Digests and builds Node 22 container images for API and worker functions, checks runtime secrets against pinned AWS Secrets Manager versions, applies backward-compatible MongoDB migrations, and validates tenant policy receipts.
+3. **Frontend & Mailer (cPanel)**: Packages immutable release artifacts via `deploy/package.cjs`, stages files over host-key-verified SSH/SCP, links shared PHP configuration, and performs atomic symlink switches with automatic rollback on smoke check failures.
+
+For complete release contract details, configuration variables, and recovery procedures, see [deploy/README.md](deploy/README.md).
+
+## Dashboard Onboarding & Email Platform
 
 Open the dashboard and choose **Create a workspace** to register a sandbox business and its administrator. Existing administrators can open **Get started**. The workflow covers business/integration details, MFA, test credentials, result delivery, retention/review policies, a first verification, and a final readiness checklist.
 
-Saved progress is tenant-scoped and survives refresh/sign-in. Completing setup does not activate production. For test links to work, run the backend worker and hosted verification app, and configure `API_PUBLIC_URL` and `HOSTED_BASE_URL` for that deployment. Sandbox checks still process submitted images.
+Saved progress is tenant-scoped and survives refresh/sign-in. Completing setup does not activate production. For test links to work, run the backend worker and hosted verification app, and configure `API_PUBLIC_URL` and `HOSTED_BASE_URL` for that deployment.
 
-Email ownership verification, email-based password recovery, team invitations, and production approval are not implemented; existing administration is required for those operations. See [dashboard analysis and onboarding workflow](DASHBOARD_ONBOARDING_ANALYSIS.md) for API details, validation and remaining gaps, and [email requirements and gap analysis](docs/EMAIL_REQUIREMENTS.md) for the complete email catalogue (21 message types, content specs, and the missing mail platform, token service, and endpoints required to send them).
+Transactional emails are powered by `email-api/`, a standalone PHP service providing 21 HMAC-authenticated email templates (workspace invitations, email verifications, password resets, review escalations, security notices, and weekly digests). Configuration and setup instructions can be found in `email-api/config.example.php`.
 
 Dashboard client tests: `npm test --prefix frontend/dashboard` (also included in root `npm test`).
