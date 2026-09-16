@@ -25,10 +25,8 @@ function validateProfile(body = {}) {
 }
 
 function validateWebhookUrl(value) {
-  let u;
-  try { u = new URL(value); } catch (_) { invalid("Enter a valid HTTPS webhook URL"); }
-  if (u.protocol !== "https:" || u.username || u.password || u.hash) invalid("Webhook URL must use HTTPS without credentials or a fragment");
-  return u.href;
+  try { return require("../lib/webhookTarget").parseWebhookUrl(value).href; }
+  catch (err) { invalid(err.message); }
 }
 
 async function onboardingStatus(tenant, user) {

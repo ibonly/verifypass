@@ -84,16 +84,16 @@ function buildDeps() {
 // tick semantics (optimistic claim, retry backoff, maxAttempts), but in a
 // bounded loop that exits well before the function timeout.
 // ---------------------------------------------------------------------------
-async function drainDbQueue(deps, { maxJobs = 1, budgetMs = 90_000, now = Date.now } = {}) {
+async function drainDbQueue(deps, { maxJobs = 1, maxWebhookJobs = 10, webhookBudgetMs = 60_000, budgetMs = 90_000, now = Date.now } = {}) {
   const db = deps.db;
   const owner = require("crypto").randomUUID();
   const { reclaimStaleJobs } = require("./src/worker/watchdog");
 
   // Same optimistic claim the polling worker uses (inlined — requiring
   // ./index would load the ONNX provider at import time).
-  async function claim() {
+  async function claim(webhooksOnly = false) {
     const candidate = await db.jobQueue.findFirst({
-      where: { status: "pending", runAfter: { lte: new Date(now()) } },
+      where: { status: "pending", runAfter: { lte: new Date(now()) }, ...(webhooksOnly ? { type: "send_webhook" } : {}) },
       orderBy: { id: "asc" }
     });
     if (!candidate) return null;
@@ -110,9 +110,22 @@ async function drainDbQueue(deps, { maxJobs = 1, budgetMs = 90_000, now = Date.n
   const started = now();
   let processed = 0;
   let failed = 0;
-  while (processed + failed < maxJobs && now() - started < budgetMs) {
-    const job = await claim();
+  // Preserve the expensive-job limit. After it is reached, drain only
+  // webhooks, with enough time for DNS + HTTP + persistence before stopping.
+  let webhookJobs = 0;
+  let webhookStarted = null;
+  while (true) {
+    const remaining = deps.remainingTimeMs ? deps.remainingTimeMs() : Infinity;
+    const webhooksOnly = processed + failed >= maxJobs || remaining < 250_000;
+    if (!webhooksOnly && now() - started >= budgetMs) break;
+    if (webhooksOnly) {
+      webhookStarted ??= now();
+      if (webhookJobs >= maxWebhookJobs || webhookBudgetMs - (now() - webhookStarted) < 20_000) break;
+    }
+    if (remaining < 25_000) break;
+    const job = await claim(webhooksOnly);
     if (!job) break; // queue drained
+    if (webhooksOnly) webhookJobs++;
     const heartbeat = setInterval(() => db.jobQueue.updateMany({ where: { id: job.id, status: "running", lockedBy: owner }, data: { lockedAt: new Date() } }).catch(() => {}), 15000);
     try {
       await runJob({ type: job.type, payload: job.payload }, deps);
@@ -146,7 +159,7 @@ async function runJob(job, deps) {
     case "run_verification":
       return runVerification(job.payload, deps);
     case "send_webhook":
-      return sendWebhook(job.payload, { db: deps.db, enqueueJob: deps.enqueueJob });
+      return sendWebhook(job.payload, { db: deps.db, enqueueJob: deps.enqueueJob, fetchImpl: deps.fetchImpl, validateTarget: deps.validateTarget });
     case "expire_sessions": {
       await require("./src/services/reconcileEvidence").reconcileEvidence(deps.db);
       await deps.db.verificationSession.updateMany({
@@ -190,7 +203,7 @@ async function runJob(job, deps) {
  * Build the handler with injectable deps/executor (unit tests use fakes).
  */
 function buildHandler({ deps, execute, enqueue, now = Date.now } = {}) {
-  return async function handler(event) {
+  return async function handler(event, context) {
     if (event?.type === "health" && !execute) {
       const { assertGeneratedSchema, releaseIdentity, modelHashes } = require("./src/lib/release");
       assertGeneratedSchema();
@@ -206,7 +219,10 @@ function buildHandler({ deps, execute, enqueue, now = Date.now } = {}) {
     }
     // deps are only materialized when no executor was injected — tests pass
     // a fake `execute` and must not touch Prisma/AWS at all
-    const exec = execute || ((job) => runJob(job, deps || buildDeps()));
+    const exec = execute || ((job) => runJob(job, {
+      ...(deps || buildDeps()),
+      ...(context?.getRemainingTimeInMillis ? { remainingTimeMs: () => context.getRemainingTimeInMillis() } : {})
+    }));
     const requeue = enqueue || sqsEnqueue;
 
     // Direct invoke (EventBridge Scheduler crons)

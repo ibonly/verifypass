@@ -1178,6 +1178,22 @@ function Webhooks({ canManage }) {
   const [configUrl, setConfigUrl] = useState("");
   const [configMsg, setConfigMsg] = useState(null);
   const [retrying, setRetrying] = useState(null);
+  const [testing, setTesting] = useState(false);
+  const [testMsg, setTestMsg] = useState(null);
+
+  async function testWebhook() {
+    setTesting(true);
+    setTestMsg(null);
+    try {
+      const result = await api("/v1/onboarding/webhooks/test", { method: "POST", body: {} });
+      setTestMsg(`Test queued (${result.eventId}). Refresh the delivery log to check the outcome.`);
+      reload();
+    } catch (err) {
+      setTestMsg(err.message);
+    } finally {
+      setTesting(false);
+    }
+  }
   const [filterStatus, setFilterStatus] = useState("");
 
   async function saveWebhookUrl(e) {
@@ -1213,6 +1229,10 @@ function Webhooks({ canManage }) {
 
       {/* Current webhook URL */}
       <Card title="Webhook endpoint">
+        {data?.tenant && <p style={{ fontSize: 13 }}>
+          Workspace: <strong>{data.tenant.companyName}</strong> (<code>{data.tenant.tenantUid}</code>).
+          This endpoint receives only verifications created with this workspace’s API keys.
+        </p>}
         {data?.webhookUrl ? (
           <div style={{ marginBottom: 12, fontSize: 13 }}>
             <span style={{ color: "#6B7280" }}>Current URL: </span>
@@ -1248,6 +1268,14 @@ function Webhooks({ canManage }) {
           Verify <code>X-Verifypass-Signature</code> using HMAC-SHA256 over <code>timestamp.rawBody</code>, with the timestamp from <code>X-Verifypass-Timestamp</code>. Reject stale timestamps.
         </p>
       </Card>
+
+      {canManage && <div style={{ marginBottom: 16 }}>
+        <button className="vp-secondary" disabled={testing || !data?.webhookUrl} onClick={testWebhook}>
+          {testing ? "Queuing test…" : "Send test webhook"}
+        </button>
+        {testMsg && <p role="status">{testMsg}</p>}
+        <p className="vp-muted">Saving configures future events. Send a test after installing the signing secret on your server. Tests use the event name webhook.test.</p>
+      </div>}
 
       {/* Delivery log */}
       <Card title={`Delivery log ${data ? `(${data.deliveries.length} total)` : ""}`}>

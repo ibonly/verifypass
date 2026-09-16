@@ -59,36 +59,53 @@ const DEMO_PASSWORD = "demo-password-123";
 
 async function ensureUser(db, { tenantId, email, role }) {
   const existing = await db.user.findFirst({ where: { email } });
-  if (existing) return existing;
+  if (existing) {
+    if (existing.tenantId !== tenantId || existing.role !== role || existing.status !== "active") {
+      throw new Error(`Demo account ${email} does not match the selected workspace and role; refusing to move an existing user`);
+    }
+    return existing;
+  }
   return createUser({ tenantId, email, password: DEMO_PASSWORD, role });
 }
 
-async function setupInHouse({ log = () => {} } = {}) {
+async function setupInHouse({ log = () => {}, credentialFile = CRED_FILE } = {}) {
   const db = getDb();
-
-  // Reuse persisted credentials if the tenant still exists.
-  if (fs.existsSync(CRED_FILE)) {
-    const saved = JSON.parse(fs.readFileSync(CRED_FILE, "utf8"));
-    const tenant = await db.tenant.findFirst({ where: { tenantUid: saved.tenantUid } });
-    if (tenant) {
-      await ensureUser(db, { tenantId: tenant.id, email: ADMIN_EMAIL, role: "tenant_admin" });
-      await ensureUser(db, { tenantId: tenant.id, email: REVIEWER_EMAIL, role: "compliance_reviewer" });
-      log("Reusing existing in-house tenant from .dev-credentials.json");
-      return saved;
-    }
-  }
-
-  const tenant = await db.tenant.create({
+  const saved = fs.existsSync(credentialFile) ? JSON.parse(fs.readFileSync(credentialFile, "utf8")) : null;
+  const admin = await db.user.findFirst({ where: { email: ADMIN_EMAIL } });
+  // The dashboard login determines the demo workspace. A lost/recreated
+  // credential file must not create keys for a different tenant while reusing
+  // the old login (which would save webhooks in the wrong workspace).
+  let tenant = admin
+    ? await db.tenant.findFirst({ where: { id: admin.tenantId } })
+    : saved ? await db.tenant.findFirst({ where: { tenantUid: saved.tenantUid } }) : null;
+  if (admin && !tenant) throw new Error("Existing demo administrator has no workspace; repair the account before running setup");
+  if (!tenant) tenant = await db.tenant.create({
     data: { tenantUid: uid("tnt"), companyName: DEMO_COMPANY, status: "active", settings: {} }
   });
-  const pub = await issueKey(tenant.id, "public", false);
-  const sec = await issueKey(tenant.id, "secret", false);
+  if (["suspended", "disabled"].includes(tenant.status)) throw new Error("Demo workspace is unavailable");
   await ensureUser(db, { tenantId: tenant.id, email: ADMIN_EMAIL, role: "tenant_admin" });
   await ensureUser(db, { tenantId: tenant.id, email: REVIEWER_EMAIL, role: "compliance_reviewer" });
 
+  // Check the keys themselves too: cached metadata alone cannot establish
+  // which tenant an API request will actually use.
+  if (saved?.tenantUid === tenant.tenantUid) {
+    const { resolveKey } = require("../backend/src/services/apiKeyService");
+    try {
+      const pub = await resolveKey(saved.publicKey, "public");
+      const sec = await resolveKey(saved.secretKey, "secret");
+      if (pub.tenant.id === tenant.id && sec.tenant.id === tenant.id && !pub.isLive && !sec.isLive) {
+        log("Reusing in-house credentials for the demo administrator's workspace");
+        return saved;
+      }
+    } catch (_) { /* revoked, expired or stale cached keys — replace cache */ }
+  }
+  if (saved) log("Repairing demo API credentials to match the demo administrator's workspace");
+  const pub = await issueKey(tenant.id, "public", false);
+  const sec = await issueKey(tenant.id, "secret", false);
+
   const creds = {
     tenantUid: tenant.tenantUid,
-    companyName: DEMO_COMPANY,
+    companyName: tenant.companyName,
     publicKey: pub.key,
     secretKey: sec.key,
     adminEmail: ADMIN_EMAIL,
@@ -96,8 +113,8 @@ async function setupInHouse({ log = () => {} } = {}) {
     password: DEMO_PASSWORD,
     createdAt: new Date().toISOString()
   };
-  fs.writeFileSync(CRED_FILE, JSON.stringify(creds, null, 2), { mode: 0o600 });
-  log(`Created in-house tenant; credentials saved to ${CRED_FILE}`);
+  fs.writeFileSync(credentialFile, JSON.stringify(creds, null, 2), { mode: 0o600 });
+  log(`In-house credentials saved to ${credentialFile}`);
   return creds;
 }
 

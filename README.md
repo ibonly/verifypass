@@ -106,6 +106,12 @@ their matching worker before switching producers; do not rewrite queued policy
 versions to bypass compatibility checks. Existing results are never rejudged
 or overwritten automatically.
 
+## Webhook diagnostics
+
+See [Webhook analysis and repair](WEBHOOK_ANALYSIS.md) for the delivery architecture,
+confirmed defects, implemented fixes, receiver contract, test evidence and rollout steps.
+The dashboard Webhooks page includes **Send test webhook** to verify a saved endpoint.
+
 ## SDK / API contract notes (policy v2)
 
 - **`attemptId` is required** on every session mutation (`/document`, `/face`,

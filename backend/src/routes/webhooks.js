@@ -18,16 +18,8 @@ router.use(requireApiKey("secret"), tenantScope);
 // PUT /v1/webhooks/config {url} — sets URL, rotates signing secret (returned once)
 router.put("/config", async (req, res, next) => {
   try {
-    const { url } = req.body || {};
-    let parsed;
-    try {
-      parsed = new URL(url);
-    } catch (_) {
-      throw new AppError("VALIDATION_ERROR", "url is not a valid URL");
-    }
-    if (parsed.protocol !== "https:" && process.env.NODE_ENV === "production") {
-      throw new AppError("VALIDATION_ERROR", "webhook url must be https");
-    }
+    const url = require("../services/onboardingService").validateWebhookUrl(req.body?.url);
+    res.setHeader("Cache-Control", "no-store");
     const secret = `whsec_${crypto.randomBytes(24).toString("base64url")}`;
     await getDb().tenant.updateMany({
       where: { id: req.tenant.id },

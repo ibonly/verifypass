@@ -22,7 +22,7 @@ test("profile/domain and webhook validation reject malformed configuration", () 
   assert.deepEqual(validateProfile(profile), profile);
   for (const bad of [{ ...profile, companyName: "" }, { ...profile, contactEmail: "bad" }, { ...profile, integration: "react" }, { ...profile, allowedDomains: ["https://example.com"] }, { ...profile, verificationType: "anything" }]) assert.throws(() => validateProfile(bad));
   assert.equal(validateWebhookUrl("https://example.com/webhook"), "https://example.com/webhook");
-  for (const url of ["http://example.com", "javascript:alert(1)", "https://user:pass@example.com", "https://example.com/#secret"]) assert.throws(() => validateWebhookUrl(url));
+  for (const url of ["http://example.com", "javascript:alert(1)", "https://user:pass@example.com", "https://example.com/#secret", "https://example.com:8443/hook", "https://127.0.0.1", "https://10.0.0.1", "https://[::1]"]) assert.throws(() => validateWebhookUrl(url));
 });
 test("full onboarding persists progress, requires real test outcome, and leaves tenant sandbox", async t => {
   const { db, tenant, call } = await setup(t);
@@ -126,4 +126,97 @@ test("MFA setup handles invalid secrets and completion reads actual enrollment",
   await call("post", "/v1/auth/mfa/confirm").send({ secret: enrolled.body.secret, totp: totpAt(enrolled.body.secret, Math.floor(Date.now() / 1000)) }).expect(200);
   const status = await call("get", "/v1/onboarding").expect(200);
   assert.equal(status.body.steps.security, true); assert.equal(status.body.mfaEnrolled, true);
+});
+
+test("admin config → queued test → real HTTP receiver → visible signed delivery", async t => {
+  const { db, tenant, call } = await setup(t);
+  const http = require("node:http");
+  const { once } = require("node:events");
+  const { verifyWebhookSignature } = require("@verifypass/shared");
+  const { drainDbQueue } = require("../worker.lambda");
+  const received = [];
+  const server = http.createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    received.push({ body, headers: req.headers, method: req.method });
+    res.writeHead(204); res.end();
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  await call("post", "/v1/onboarding/webhooks/test").send({}).expect(400);
+  const config = await call("put", "/v1/onboarding/webhook").send({ url: "https://receiver.example/hook" }).expect(200);
+  const queued = await call("post", "/v1/onboarding/webhooks/test").set("X-Tenant-Id", "forged").send({ tenantId: "forged" }).expect(202);
+  assert.equal(db.webhookDelivery.rows[0].tenantId, tenant.id);
+  assert.equal(db.webhookDelivery.rows[0].status, "pending");
+  // Only transport destination/DNS are substituted; HTTP, HMAC, queue,
+  // dispatcher, authenticated routes and delivery persistence all execute.
+  const deps = {
+    db, provider: {}, validateTarget: async () => {},
+    fetchImpl: (url, opts) => {
+      assert.equal(url, "https://receiver.example/hook");
+      return fetch(`http://127.0.0.1:${server.address().port}/hook`, opts);
+    }
+  };
+  await drainDbQueue(deps);
+  assert.equal(received.length, 1);
+  assert.equal(received[0].method, "POST");
+  assert.equal(verifyWebhookSignature(received[0].body, received[0].headers, config.body.secret), true);
+  assert.equal(JSON.parse(received[0].body).event, "webhook.test");
+  assert.equal(JSON.parse(received[0].body).eventId, queued.body.eventId);
+  const log = await call("get", "/v1/dashboard/webhook-deliveries").expect(200);
+  assert.deepEqual(log.body.tenant, { tenantUid: tenant.tenantUid, companyName: tenant.companyName });
+  assert.equal(log.body.deliveries[0].status, "delivered");
+  assert.equal(log.body.deliveries[0].lastStatusCode, 204);
+  assert.equal(JSON.stringify(log.body).includes(config.body.secret), false);
+  await call("post", `/v1/onboarding/webhooks/${queued.body.eventId}/retry`).send({}).expect(400);
+
+  // Actual verification finalization must dispatch its generated webhook in
+  // the same default drain invocation (no next-minute cron required).
+  await db.verificationSession.create({ data: {
+    tenantId: tenant.id, sessionUid: "vps_admin_delivery", status: "submitted", verificationType: "FACE_ONLY"
+  } });
+  await db.jobQueue.create({ data: {
+    type: "run_verification", payload: { sessionUid: "vps_admin_delivery" },
+    status: "pending", runAfter: new Date(0), maxAttempts: 5, attempts: 0
+  } });
+  const drained = await drainDbQueue(deps);
+  assert.equal(drained.failed, 0);
+  assert.equal(drained.processed, 2);
+  assert.equal(received.length, 2);
+  assert.equal(JSON.parse(received[1].body).event, "verification.failed");
+  assert.equal(JSON.parse(received[1].body).sessionId, "vps_admin_delivery");
+  assert.equal(verifyWebhookSignature(received[1].body, received[1].headers, config.body.secret), true);
+});
+
+test("test webhook requires admin and transactionally preserves queue-outage recovery", async t => {
+  const { db, tenant, call } = await setup(t);
+  const { queueWebhookTest } = require("../src/services/webhookTest");
+  await call("put", "/v1/onboarding/webhook").send({ url: "https://receiver.example/hook" }).expect(200);
+  const developer = await db.user.create({ data: { tenantId: tenant.id, role: "developer", status: "active" } });
+  await request(app).post("/v1/onboarding/webhooks/test").set("Authorization", `Bearer ${signToken({ userId: developer.id, role: developer.role })}`).send({}).expect(403);
+  const queued = await queueWebhookTest(tenant, { db, enqueue: async () => { throw new Error("queue unavailable"); } });
+  assert.equal(db.webhookDelivery.rows[0].eventUid, queued.eventId);
+  assert.equal(db.outbox.rows[0].status, "pending");
+  const { flushOutbox } = require("../src/services/outbox");
+  await flushOutbox(db, async (type, payload) => db.jobQueue.create({ data: { type, payload } }));
+  assert.equal(db.outbox.rows[0].status, "sent");
+  assert.equal(db.jobQueue.rows[0].payload.deliveryId, db.webhookDelivery.rows[0].id);
+  db.outbox.create = async () => { throw new Error("database unavailable"); };
+  await assert.rejects(queueWebhookTest(tenant, { db, enqueue: async () => {} }), /database unavailable/);
+  assert.equal(db.webhookDelivery.rows.length, 1, "no orphan delivery when outbox creation rolls back");
+});
+
+test("admin and secret-key API reject the same unsupported webhook URLs", async t => {
+  const { tenant, call } = await setup(t);
+  const key = await call("post", "/v1/settings/api-keys").send({ keyType: "secret", isLive: false }).expect(201);
+  const secretApi = () => request(app).put("/v1/webhooks/config").set("Authorization", `Bearer ${key.body.key}`);
+  for (const url of ["http://example.com/hook", "https://example.com:8443/hook", "https://user:pass@example.com/hook", "https://127.0.0.1/hook"]) {
+    await call("put", "/v1/onboarding/webhook").send({ url }).expect(400);
+    await secretApi().send({ url }).expect(400);
+  }
+  assert.equal(tenant.webhookUrl, undefined);
+  const saved = await secretApi().send({ url: "https://example.com:443/hook" }).expect(200);
+  assert.equal(saved.body.url, "https://example.com/hook");
+  assert.equal(saved.headers["cache-control"], "no-store");
 });

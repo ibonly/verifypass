@@ -66,18 +66,37 @@ const { setupInHouse } = require("./setup-inhouse");
 async function main() {
   const db = getDb();
 
-  // Fail fast if the database is unreachable — this stack is DB-backed.
-  try {
+  async function pingDb() {
     if (typeof db.$runCommandRaw === "function") {
       await db.$runCommandRaw({ ping: 1 });
     } else {
       await db.tenant.findFirst();
     }
-  } catch (err) {
+  }
+
+  let dbOk = false;
+  try {
+    await pingDb();
+    dbOk = true;
+  } catch (_) {
+    const mongoScript = path.join(__dirname, "start-mongo.sh");
+    if (fs.existsSync(mongoScript) && process.platform !== "win32") {
+      console.log("[dev-stack] MongoDB not responding. Attempting to start replica set via scripts/start-mongo.sh...");
+      try {
+        const { execSync } = require("child_process");
+        execSync(`bash "${mongoScript}"`, { stdio: "inherit" });
+        await pingDb();
+        dbOk = true;
+      } catch (startErr) {
+        console.warn(`[dev-stack] Auto-start script failed: ${startErr.message}`);
+      }
+    }
+  }
+
+  if (!dbOk) {
     console.error("\n[dev-stack] Cannot reach MongoDB via DATABASE_URL.");
-    console.error("            Check .env DATABASE_URL and that mongod runs as a replica set (--replSet rs0),");
-    console.error("            then apply the schema:  npm run prisma:push --prefix backend\n");
-    console.error(err.message);
+    console.error("            Start MongoDB as a replica set: npm run mongo:start");
+    console.error("            Then apply schema if needed: npm run prisma:push\n");
     process.exit(1);
   }
 

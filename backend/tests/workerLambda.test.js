@@ -94,6 +94,7 @@ async function seedDrain(db, { jobs = 1, type = "send_webhook" } = {}) {
   // tenant WITHOUT webhook config → send_webhook returns {skipped} = success
   const tenant = await db.tenant.create({ data: { tenantUid: "tnt_dr", companyName: "D", status: "active" } });
   for (let i = 0; i < jobs; i++) {
+    if (type === "run_verification") await db.verificationSession.create({ data: { sessionUid: `vps_${i}`, tenantId: tenant.id, status: "approved" } });
     await db.jobQueue.create({
       data: {
         type, payload: { tenantId: String(tenant.id), sessionUid: `vps_${i}`, event: "verification.approved" },
@@ -138,15 +139,15 @@ test("drain: failing job goes back to pending with backoff; exhausted → failed
 test("drain: respects the maxJobs bound (leaves the rest for the next invocation)", async () => {
   const db = createMockDb();
   await seedDrain(db, { jobs: 5 });
-  const out = await drainDbQueue({ db }, { maxJobs: 2 });
+  const out = await drainDbQueue({ db }, { maxJobs: 2, maxWebhookJobs: 0 });
   assert.equal(out.processed, 2);
   assert.equal((await db.jobQueue.findMany({ where: { status: "pending" } })).length, 3);
 });
 
 test("Lambda default drain leaves time for a full verification before hard timeout", async () => {
   const db = createMockDb();
-  await seedDrain(db, { jobs: 3 });
-  const out = await drainDbQueue({ db });
+  await seedDrain(db, { jobs: 3, type: "run_verification" });
+  const out = await drainDbQueue({ db, provider: {} });
   assert.equal(out.processed, 1);
   assert.equal((await db.jobQueue.findMany({ where: { status: "pending" } })).length, 2);
 });
@@ -163,4 +164,55 @@ test("drain: reclaims a stale 'running' orphan first, then processes it", async 
   });
   const out = await drainDbQueue({ db }, { maxJobs: 10 });
   assert.equal(out.processed, 1, "orphaned running job was requeued and drained in one pass");
+});
+
+test("default drain sends a bounded webhook tail without starting a second verification", async () => {
+  const db = createMockDb();
+  const tenant = await seedDrain(db, { jobs: 2, type: "run_verification" });
+  for (let i = 0; i < 15; i++) await db.jobQueue.create({ data: {
+    type: "send_webhook", payload: { tenantId: tenant.id, event: "verification.approved" },
+    status: "pending", runAfter: new Date(0), maxAttempts: 5, attempts: 0
+  } });
+  const out = await drainDbQueue({ db, provider: {} });
+  assert.equal(out.processed, 11);
+  assert.equal(db.jobQueue.rows.filter(j => j.type === "run_verification" && j.status === "pending").length, 1);
+  assert.equal(db.jobQueue.rows.filter(j => j.type === "send_webhook" && j.status === "pending").length, 5);
+});
+
+test("webhook tail stops when Lambda has insufficient time remaining", async () => {
+  const db = createMockDb();
+  await seedDrain(db, { jobs: 3 });
+  let reads = 0;
+  const out = await drainDbQueue({ db, remainingTimeMs: () => ++reads === 1 ? 300_000 : 24_000 });
+  assert.equal(out.processed, 1);
+  assert.equal(db.jobQueue.rows.filter(j => j.status === "pending").length, 2);
+});
+
+test("webhook tail has its own bounded budget after a long primary job", async () => {
+  const db = createMockDb();
+  const tenant = await seedDrain(db, { jobs: 2 });
+  tenant.webhookUrl = "https://receiver.example/hook";
+  tenant.webhookSecret = "whsec_test";
+  let time = Date.now();
+  let sent = 0;
+  const out = await drainDbQueue({
+    db, validateTarget: async () => {}, fetchImpl: async () => {
+      if (++sent === 1) time += 180_000;
+      return { status: 204 };
+    }
+  }, { now: () => time });
+  assert.equal(out.processed, 2, "a long primary job must not skip its webhook tail");
+  assert.equal(sent, 2);
+});
+
+test("short remaining runtime still drains webhooks while leaving verification queued", async () => {
+  const db = createMockDb();
+  const tenant = await seedDrain(db, { jobs: 1, type: "run_verification" });
+  await db.jobQueue.create({ data: {
+    type: "send_webhook", payload: { tenantId: tenant.id }, status: "pending", runAfter: new Date(0), maxAttempts: 5, attempts: 0
+  } });
+  const out = await drainDbQueue({ db, remainingTimeMs: () => 60_000 });
+  assert.equal(out.processed, 1);
+  assert.equal(db.jobQueue.rows[0].status, "pending");
+  assert.equal(db.jobQueue.rows[1].status, "done");
 });

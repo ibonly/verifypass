@@ -65,6 +65,11 @@ router.put("/webhook", route(async (req, res) => {
   notifyWebhookChanged({ ...req.tenant, webhookUrl: url }, req.user.email);
   res.json({ success: true, url, secret });
 }));
+router.post("/webhooks/test", route(async (req, res) => {
+  const result = await require("../services/webhookTest").queueWebhookTest(req.tenant, { db: getDb(), enqueue });
+  await log(req, "webhook.test_queued", { eventId: result.eventId });
+  res.status(202).json(result);
+}));
 router.post("/webhooks/:eventId/retry", route(async (req, res) => {
   const delivery = await req.scopedDb.webhookDeliveries.findByUid(req.params.eventId);
   if (!delivery) throw new AppError("NOT_FOUND", "Delivery not found");

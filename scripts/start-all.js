@@ -137,18 +137,38 @@ async function main() {
   [PORT, DASHBOARD_PORT, VERIFY_PORT, SAMPLE_PORT].forEach(freePort);
 
   // 1. Check MongoDB connectivity
-  try {
+  async function pingDb() {
     if (typeof db.$runCommandRaw === "function") {
       await db.$runCommandRaw({ ping: 1 });
     } else {
       await db.tenant.findFirst();
     }
+  }
+
+  let dbOk = false;
+  try {
+    await pingDb();
+    dbOk = true;
+  } catch (_) {
+    const mongoScript = path.join(__dirname, "start-mongo.sh");
+    if (fs.existsSync(mongoScript) && process.platform !== "win32") {
+      console.log(`${prefixes.system} MongoDB not responding. Attempting to start replica set via scripts/start-mongo.sh...`);
+      try {
+        execSync(`bash "${mongoScript}"`, { stdio: "inherit" });
+        await pingDb();
+        dbOk = true;
+      } catch (startErr) {
+        console.warn(`${prefixes.system} Auto-start script failed: ${startErr.message}`);
+      }
+    }
+  }
+
+  if (dbOk) {
     console.log(`${prefixes.system} Connected to MongoDB successfully.`);
-  } catch (err) {
+  } else {
     console.error(`\n${prefixes.system} ${colors.yellow}Cannot reach MongoDB via DATABASE_URL.${colors.reset}`);
-    console.error(`         Check .env DATABASE_URL and that mongod runs as a replica set (--replSet rs0),`);
-    console.error(`         then apply schema: (cd backend && npm run prisma:push)\n`);
-    console.error(`         Error: ${err.message}\n`);
+    console.error(`         Start MongoDB as a replica set: npm run mongo:start`);
+    console.error(`         Then apply schema if needed: npm run prisma:push\n`);
     process.exit(1);
   }
 

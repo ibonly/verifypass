@@ -211,6 +211,7 @@ router.get("/webhook-deliveries", anyUser, requireTenant, tenantScope, async (re
     const tenant = await getDb().tenant.findFirst({ where: { id: req.tenant.id } });
     res.json({
       success: true,
+      tenant: { tenantUid: req.tenant.tenantUid, companyName: req.tenant.companyName },
       webhookUrl: tenant?.webhookUrl || null,
       deliveries: deliveries.map((d) => ({
         eventId: d.eventUid,

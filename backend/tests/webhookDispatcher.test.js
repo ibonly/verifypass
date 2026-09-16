@@ -217,3 +217,52 @@ test("passed verification with minimalPayload sends serviceId and all selfieIds 
   assert.equal(body.reasonCodes, undefined);
 });
 
+
+test("temporary DNS failure retries and later delivers the same event", async () => {
+  const db = createMockDb();
+  const { tenant } = await seed(db);
+  const { validateWebhookTarget } = require("../src/lib/webhookTarget");
+  const fetch = mockFetch(() => ({ status: 204 }));
+  const out = await sendWebhook({ tenantId: tenant.id, sessionUid: "vps_WH1", event: "verification.approved" }, {
+    db, fetchImpl: fetch,
+    validateTarget: url => validateWebhookTarget(url, { resolve4: async () => { throw new Error("EAI_AGAIN"); } })
+  });
+  assert.equal(out.exhausted, false);
+  assert.equal(fetch.calls.length, 0);
+  assert.equal(db.jobQueue.rows.length, 1);
+  assert.match(db.webhookDelivery.rows[0].lastError, /could not resolve/);
+  const retry = await sendWebhook(db.jobQueue.rows[0].payload, {
+    db, fetchImpl: fetch,
+    validateTarget: url => validateWebhookTarget(url, { resolve4: async () => ["93.184.216.34"] })
+  });
+  assert.equal(retry.delivered, true);
+  assert.equal(db.webhookDelivery.rows.length, 1);
+  assert.equal(fetch.calls[0].opts.redirect, "error");
+});
+
+test("private targets are blocked permanently, with no HTTP call or retry", async () => {
+  const db = createMockDb();
+  const { tenant } = await seed(db);
+  const { validateWebhookTarget } = require("../src/lib/webhookTarget");
+  const fetch = mockFetch(() => ({ status: 200 }));
+  const out = await sendWebhook({ tenantId: tenant.id, sessionUid: "vps_WH1", event: "verification.rejected" }, {
+    db, fetchImpl: fetch,
+    validateTarget: url => validateWebhookTarget(url, { resolve4: async () => ["93.184.216.34", "127.0.0.1"] })
+  });
+  assert.equal(out.blocked, true);
+  assert.equal(fetch.calls.length, 0);
+  assert.equal(db.jobQueue.rows.length, 0);
+  assert.equal(db.webhookDelivery.rows[0].nextAttemptAt, null);
+});
+
+test("all five advertised delays are used, including the final 12-hour retry", async () => {
+  const db = createMockDb();
+  const { tenant } = await seed(db);
+  const now = new Date("2026-09-15T12:00:00Z");
+  const deps = { db, now: () => now, fetchImpl: mockFetch(() => ({ status: 503 })), validateTarget: async () => {} };
+  await sendWebhook({ tenantId: tenant.id, sessionUid: "vps_WH1", event: "verification.approved" }, deps);
+  for (let i = 1; i < 6; i++) await sendWebhook({ deliveryId: db.webhookDelivery.rows[0].id }, deps);
+  assert.deepEqual(db.jobQueue.rows.map(j => (j.runAfter - now) / 1000), [60, 300, 1800, 7200, 43200]);
+  assert.equal(db.webhookDelivery.rows[0].attempts, 6);
+  assert.equal(db.webhookDelivery.rows[0].status, "exhausted");
+});
