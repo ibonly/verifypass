@@ -1170,7 +1170,8 @@ const DELIVERY_STATUS_COLORS = {
   delivered: STATUS_COLORS.approved,
   pending: STATUS_COLORS.manual_review,
   failed: STATUS_COLORS.rejected,
-  exhausted: STATUS_COLORS.rejected
+  exhausted: STATUS_COLORS.rejected,
+  skipped: "#6B7280"
 };
 
 function Webhooks({ canManage }) {
@@ -1287,6 +1288,7 @@ function Webhooks({ canManage }) {
             <option value="pending">Pending</option>
             <option value="failed">Failed</option>
             <option value="exhausted">Exhausted</option>
+            <option value="skipped">Skipped</option>
           </select>
           <button onClick={reload} style={{ padding: "6px 12px", borderRadius: 6, border: "1px solid #D1D5DB", background: "#fff", fontSize: 13, cursor: "pointer" }}>
             ↻ Refresh

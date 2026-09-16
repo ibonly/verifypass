@@ -113,7 +113,7 @@ test("spoof: rejected with LIVENESS_FAILED, risk audit logged", async () => {
   assert.equal(audits[0].riskEvent, true);
 
   const jobs = await db.jobQueue.findMany({ where: { type: "send_webhook" } });
-  assert.equal(jobs[0].payload.event, "verification.rejected");
+  assert.equal(jobs.length, 0);
 });
 
 test("borderline match: manual_review, no completedAt", async () => {
@@ -123,6 +123,7 @@ test("borderline match: manual_review, no completedAt", async () => {
     { db, provider: stubProvider({ faceMatch: { score: 0.7 } }), evidenceKey: KEY }
   );
   assert.equal(out.status, "manual_review");
+  assert.equal(db.outbox.rows.filter(o => o.type === "send_webhook").length, 0);
 
   const s = await db.verificationSession.findFirst({ where: { id: session.id } });
   assert.equal(s.completedAt, null);
@@ -350,16 +351,14 @@ test("liveness auto-approve (default): a selfie in the old review band approves,
   assert.ok(hook.payload.snapshot.waivedReasonCodes.includes("LIVENESS_BORDERLINE"));
 });
 
-test("liveness auto-approve (default): a rejected outcome still sends verification.rejected with its reason codes", async () => {
+test("rejected outcomes persist the decision without enqueueing a webhook", async () => {
   const { db, session } = await seed();
   const provider = stubProvider();
   provider.checkLiveness = async () => ({ score: 0.2, faceCount: 1 });
   const out = await runVerification({ sessionUid: session.sessionUid }, { db, provider, evidenceKey: KEY });
   assert.equal(out.status, "rejected", `got ${out.reasonCodes}`);
   const hook = db.outbox.rows.find((o) => o.type === "send_webhook");
-  assert.equal(hook.payload.event, "verification.rejected");
-  assert.equal(hook.payload.snapshot.decisionSource, "automatic");
-  assert.ok(hook.payload.snapshot.reasonCodes.includes("LIVENESS_FAILED"), JSON.stringify(hook.payload.snapshot));
+  assert.equal(hook, undefined);
 });
 
 test("tenant thresholds from settings are applied", async () => {
@@ -687,4 +686,96 @@ test("hardening: an in-flight legacy worker cannot overwrite a retry submitted d
   assert.equal((await work).skipped,true);
   assert.equal(session.status,"submitted");
   assert.equal(db.verificationResult.rows.length,0);
+});
+
+test("60-percent boundary: pipeline decision → outbox → signed selfie webhook → HTTP receiver", async t => {
+  const http = require("node:http");
+  const { once } = require("node:events");
+  const { decryptBuffer, verifyWebhookSignature } = require("@verifypass/shared");
+  const { saveEvidence } = require("../src/services/evidenceStore");
+  const { sendWebhook } = require("../src/worker/webhookDispatcher");
+  const received = [];
+  const server = http.createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    received.push({ body, headers: req.headers });
+    res.writeHead(204); res.end();
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => new Promise(resolve => server.close(resolve)));
+
+  const cases = [
+    { label: "59.99% without challenge override", score: 0.5999, approved: false },
+    { label: "exactly 60% without challenge override", score: 0.6, approved: false },
+    { label: "60.0001%", score: 0.600001, approved: true },
+    { label: "61%", score: 0.61, approved: true },
+    { label: "60.0001% with default challenge rule", score: 0.600001, challengePassApproves: true, approved: true },
+    { label: "exactly 60% with passing challenge override", score: 0.6, challengePassApproves: true, approved: true },
+    { label: "99% approved but tenant has no endpoint", score: 0.99, configured: false, approved: true },
+    { label: "75%", score: 0.75, approved: true },
+    { label: "99.69%", score: 0.9969, approved: true },
+    { label: "100%", score: 1, approved: true },
+    { label: "99% but identity unavailable", score: 0.99, identity: null, approved: false },
+    { label: "99% but identity mismatch", score: 0.99, identity: 0.1, approved: false },
+    { label: "75% but tenant requires >80%", score: 0.75, threshold: 0.8, approved: false },
+    { label: "low selfie and high frames cannot satisfy score-only rule", score: 0.3579, approved: false },
+    // Existing product policy also allows a passing active challenge.
+    { label: "35.79% with passing challenge override", score: 0.3579, challengePassApproves: true, approved: true },
+  ];
+  for (const c of cases) await t.test(c.label, async () => {
+    const { db, tenant, session } = await seed({ type: "FACE_ONLY", withId: false,
+      settings: { thresholds: { liveness: { autoApprove: c.threshold ?? 0.6, challengePassApproves: c.challengePassApproves === true } } }
+    });
+    const dir = path.dirname(db.evidenceFile.rows[0].storagePath);
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    tenant.webhookUrl = "https://receiver.example/hook";
+    tenant.webhookSecret = "whsec_boundary_test";
+    const provider = stubProvider({ faceMatch: { score: Object.hasOwn(c, "identity") ? c.identity : 0.9 } });
+    const original = provider.checkLiveness;
+    let n = 0;
+    provider.checkLiveness = async buf => ({ ...await original(buf), ...(n++ === 0 ? { score: c.score } : {}) });
+    const out = await runVerification({ sessionUid: session.sessionUid }, { db, provider, evidenceKey: KEY });
+    assert.equal(out.status === "approved", c.approved, JSON.stringify(out));
+    assert.equal(db.verificationResult.rows[0].livenessScore, c.score);
+    const hooks = db.jobQueue.rows.filter(j => j.type === "send_webhook");
+    assert.equal(hooks.length, c.approved ? 1 : 0);
+    assert.equal(db.outbox.rows.filter(o => o.type === "send_webhook").length, c.approved ? 1 : 0);
+    if (!c.approved) return;
+    if (c.configured === false) {
+      tenant.webhookUrl = null;
+      const before = received.length;
+      const skipped = await sendWebhook(hooks[0].payload, { db,
+        fetchImpl: async () => { throw new Error("must not attempt HTTP without configuration"); } });
+      assert.equal(skipped.skipped, true);
+      assert.equal(db.webhookDelivery.rows.length, 0);
+      assert.equal(received.length, before);
+      return;
+    }
+
+    // Synthetic fixture bytes only. Re-encrypt under the storage service's
+    // normal key so the real dispatcher can read/decrypt them without mocks.
+    const selfie = db.evidenceFile.rows.find(e => e.fileType === "selfie");
+    const plain = decryptBuffer(await fs.readFile(selfie.storagePath), KEY);
+    const stored = await saveEvidence({ tenantUid: tenant.tenantUid, sessionUid: session.sessionUid,
+      fileType: "selfie", buffer: plain, baseDir: dir });
+    Object.assign(selfie, stored);
+    const before = received.length;
+    const deps = { db, validateTarget: async () => {},
+      fetchImpl: (_url, opts) => fetch(`http://127.0.0.1:${server.address().port}/hook`, opts) };
+    const sent = await sendWebhook(hooks[0].payload, deps);
+    assert.equal(sent.delivered, true);
+    assert.equal(received.length, before + 1);
+    const request = received[before];
+    assert.equal(verifyWebhookSignature(request.body, request.headers, tenant.webhookSecret), true);
+    const body = JSON.parse(request.body);
+    assert.deepEqual(Object.keys(body).sort(), ["createdAt", "event", "selfieBase64", "sessionId", "status"]);
+    assert.equal(body.event, "verification.approved");
+    assert.equal(body.status, "approved");
+    assert.equal(body.sessionId, session.sessionUid);
+    assert.deepEqual(Buffer.from(body.selfieBase64, "base64"), plain);
+    assert.equal(db.webhookDelivery.rows[0].lastStatusCode, 204);
+    await sendWebhook(hooks[0].payload, deps);
+    assert.equal(received.length, before + 1, "outbox redelivery must not POST the approved event twice");
+  });
 });

@@ -32,8 +32,7 @@ test("stuck submitted with NO queued job → failed with SESSION_TIMEOUT + webho
   assert.ok(after.completedAt, "terminal answer, not silence");
 
   const jobs = await db.jobQueue.findMany({ where: { type: "send_webhook" } });
-  assert.equal(jobs.length, 1);
-  assert.equal(jobs[0].payload.event, "verification.failed");
+  assert.equal(jobs.length, 0);
 
   const audits = await db.auditLog.findMany({ where: { action: "session.timeout" } });
   assert.equal(audits.length, 1);

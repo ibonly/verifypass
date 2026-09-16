@@ -157,15 +157,14 @@ router.post("/:sessionId/decision", reviewers, requireTenant, tenantScope, async
       let selfieId = null;
       if (decision === "approved") {
         const evidence = await req.scopedDb.evidence.listForSession(session.id);
-        const allSelfies = evidence.filter((e) => e.fileType === "selfie" || e.fileType === "liveness_frame");
+        const allSelfies = evidence.filter((e) => (!session.attemptId || e.attemptId === session.attemptId) && (e.fileType === "selfie" || e.fileType === "liveness_frame"));
         selfieIds = allSelfies.map((e) => String(e.id));
-        const selfie = evidence.filter((e) => e.fileType === "selfie").sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
+        const selfie = allSelfies.filter((e) => e.fileType === "selfie").sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
         selfieId = selfie ? String(selfie.id) : (selfieIds[0] || null);
       }
-      // verification.approved / verification.rejected — same event names as
-      // the automatic path so consumers handle both identically; the
-      // snapshot says a human decided and carries the original reason codes.
-      await enqueue("send_webhook", {
+      // Only approvals notify the receiver, matching the automatic path.
+      // Keep the decision snapshot bound to this review attempt.
+      if (decision === "approved") await enqueue("send_webhook", {
         tenantId: String(req.tenant.id),
         sessionUid: session.sessionUid,
         attemptId: session.attemptId || null,

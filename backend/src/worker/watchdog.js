@@ -11,7 +11,7 @@
 //
 // Rule: submitted for longer than staleMinutes AND no pending/running
 // run_verification job for it → fail with SESSION_TIMEOUT and notify via
-// webhook. If a job is still queued, it's backlog, not death — leave it.
+// result. If a job is still queued, it's backlog, not death — leave it.
 
 // A job lock older than this is DEAD — the worker that claimed it crashed or
 // was restarted mid-job (very common in dev). 5 min is far beyond any
@@ -80,7 +80,6 @@ async function failStuckSubmitted(db, { staleMinutes = 30, now = new Date(), enq
       if (!updated.count) return false;
       await tx.verificationResult.create({ data: { sessionId: s.id, attemptId: s.attemptId || null, livenessStatus: s.verificationType === "ID_ONLY" ? null : "failed", rawResult: { reasonCodes: ["SESSION_TIMEOUT"], release: require("../lib/release").releaseIdentity() } } });
       await tx.auditLog.create({ data: { tenantId: s.tenantId, sessionId: s.id, actorType: "system", action: "session.timeout", metadata: { staleMinutes, submittedAt: s.submittedAt || s.updatedAt }, riskEvent: false } });
-      await require("../services/outbox").addOutbox(tx, "send_webhook", { tenantId: String(s.tenantId), sessionUid: s.sessionUid, attemptId: s.attemptId || null, event: "verification.failed", eventUid: `evt_${require("crypto").randomBytes(12).toString("hex")}`, snapshot: { status: "failed", riskLevel: "high", attempt: s.attemptNumber || 1, completedAt: now.toISOString() } });
       return true;
     });
     if (!committed) continue;

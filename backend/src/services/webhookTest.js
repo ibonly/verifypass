@@ -15,7 +15,7 @@ async function queueWebhookTest(tenant, { db, enqueue }) {
   await transaction(db, async tx => {
     const delivery = await tx.webhookDelivery.create({ data: {
       eventUid, tenantId: tenant.id, event: "webhook.test",
-      payload: { event: "webhook.test", eventId: eventUid, tenantId: tenant.tenantUid, test: true, createdAt: new Date().toISOString() },
+      payload: { event: "webhook.test", sessionId: null, status: "test", createdAt: new Date().toISOString(), selfieBase64: null },
       url: tenant.webhookUrl, status: "pending", attempts: 0, nextAttemptAt: new Date()
     } });
     await addOutbox(tx, "send_webhook", { deliveryId: delivery.id });

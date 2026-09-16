@@ -185,6 +185,8 @@ test("maker-checker: same user proposing twice overwrites their first proposal",
     .set("Authorization", `Bearer ${tokenFor(a)}`)
     .send({ decision: "approved" });
   assert.equal(r1.body.status, "pending_second_approval");
+  // Avoid tied millisecond timestamps in the in-memory fixture.
+  db.manualReviewNote.rows[0].createdAt = new Date(0);
   assert.equal(r1.body.proposedDecision, "approved");
 
   // A changes mind to rejected — this is a different decision, so it re-proposes
@@ -201,4 +203,19 @@ test("maker-checker: same user proposing twice overwrites their first proposal",
     .set("Authorization", `Bearer ${tokenFor(b)}`)
     .send({ decision: "rejected" });
   assert.equal(r3.body.status, "rejected");
+});
+
+test("manual review emits a webhook only for approval", httpOpts, async t => {
+  const db = createMockDb(); setDb(db); t.after(() => setDb(null));
+  const tenant = await db.tenant.create({ data: { tenantUid: "tnt_review_hooks", status: "active", settings: {} } });
+  const user = await db.user.create({ data: { tenantId: tenant.id, role: "compliance_reviewer", status: "active" } });
+  const token = signToken({ userId: user.id, role: user.role });
+  for (const decision of ["rejected", "approved"]) {
+    const sessionUid = `vps_${decision}`;
+    await db.verificationSession.create({ data: { tenantId: tenant.id, sessionUid, status: "manual_review" } });
+    await request(app).post(`/v1/manual-review/${sessionUid}/decision`).set("Authorization", `Bearer ${token}`).send({ decision, note: "Reviewed" }).expect(200);
+  }
+  const hooks = db.jobQueue.rows.filter(j => j.type === "send_webhook");
+  assert.equal(hooks.length, 1);
+  assert.equal(hooks[0].payload.event, "verification.approved");
 });

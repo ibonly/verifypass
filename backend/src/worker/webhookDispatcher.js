@@ -45,6 +45,11 @@ async function sendWebhook(payload, deps = {}) {
   const dispatch = enqueueJob || ((type, jobPayload, { runAfter = now(), maxAttempts = 1 } = {}) =>
     db.jobQueue.create({ data: { type, payload: jobPayload, status: "pending", runAfter, maxAttempts } }));
 
+  // Fence old queued events too, not only newly generated outcomes.
+  if (!payload.deliveryId && payload.event !== "verification.approved" && payload.event !== "webhook.test") {
+    return { skipped: true, reason: "only approved verifications send webhooks" };
+  }
+
   let delivery;
   if (payload.deliveryId) {
     delivery = await db.webhookDelivery.findFirst({ where: { id: payload.deliveryId } });
@@ -56,19 +61,25 @@ async function sendWebhook(payload, deps = {}) {
   }
 
   if (delivery.status === "delivered") return { skipped: true };
+  if (delivery.event !== "verification.approved" && delivery.event !== "webhook.test") {
+    await db.webhookDelivery.updateMany({ where: { id: delivery.id }, data: {
+      status: "skipped", nextAttemptAt: null, lastError: "Only approved verifications send webhooks"
+    } });
+    return { skipped: true, reason: "only approved verifications send webhooks" };
+  }
   const tenant = await db.tenant.findFirst({ where: { id: delivery.tenantId } });
   if (!tenant?.webhookUrl || !tenant?.webhookSecret) {
     await db.webhookDelivery.updateMany({ where: { id: delivery.id }, data: { status: "failed", lastError: "webhook not configured" } });
     return { skipped: true };
   }
 
-  const body = JSON.stringify(delivery.payload);
   const attempts = (delivery.attempts || 0) + 1;
 
   let statusCode = null;
   let error = null;
   try {
     await (deps.validateTarget || validateWebhookTarget)(tenant.webhookUrl);
+    const body = await serializeDelivery(delivery, db);
     const res = await doFetch(tenant.webhookUrl, {
       method: "POST",
       redirect: "error",
@@ -118,7 +129,7 @@ async function sendWebhook(payload, deps = {}) {
   return { delivered: false, attempts, exhausted };
 }
 
-async function createDelivery({ tenantId, sessionUid, event, eventUid: suppliedEventUid, snapshot }, { db, now }) {
+async function createDelivery({ tenantId, sessionUid, event, eventUid: suppliedEventUid, attemptId, snapshot }, { db, now }) {
   // tenantId travels through job payloads as a string — MongoDB ObjectId ids
   // are strings end to end, no coercion needed.
   const tenant = await db.tenant.findFirst({ where: { id: String(tenantId) } });
@@ -129,45 +140,28 @@ async function createDelivery({ tenantId, sessionUid, event, eventUid: suppliedE
   const existing = await db.webhookDelivery.findFirst({ where: { eventUid } });
   if (existing) return existing;
 
-  // Attempt number: the end-user retry flow re-verifies the SAME session, so
-  // consumers can receive several terminal events for one sessionId (e.g.
-  // verification.rejected then verification.approved). `attempt` lets them
-  // order and de-duplicate; the latest attempt always supersedes.
-  let attempt = 1;
-  if (session) {
-    const retries = await db.auditLog.findMany({
-      where: { sessionId: session.id, action: "session.retry" }
-    });
-    attempt = retries.length + 1;
-  }
-
-  // When minimalPayload is set on passed verification, send service id and all selfie ids only.
-  // Additional details will be added later once tested per consumer requirements.
-  let body;
-  if (snapshot?.minimalPayload && (event === "verification.approved" || snapshot?.status === "approved")) {
-    body = {
-      serviceId: snapshot.serviceId || sessionUid,
-      service_id: snapshot.serviceId || sessionUid,
-      sessionId: sessionUid,
-      selfieId: snapshot.selfieId || (snapshot.selfieIds && snapshot.selfieIds[0]) || null,
-      selfieIds: snapshot.selfieIds || [],
-      selfie_ids: snapshot.selfieIds || []
-    };
-  } else {
-    // Payload per PRD §9.11
-    body = {
-      event,
-      tenantId: tenant.tenantUid,
-      sessionId: sessionUid,
-      customerReference: session?.customerReference || null,
-      status: session?.status || null,
-      riskLevel: session?.riskLevel || null,
-      attempt,
-      createdAt: session?.createdAt ? new Date(session.createdAt).toISOString() : null,
-      completedAt: session?.completedAt ? new Date(session.completedAt).toISOString() : null,
-      ...(snapshot || {})
-    };
-  }
+  // Pin a single selfie from the event's attempt. Never substitute a document
+  // or liveness frame, or read a newer attempt when an old event is delayed.
+  const eventAttempt = snapshot && Object.hasOwn(snapshot, "attemptId")
+    ? snapshot.attemptId : attemptId !== undefined ? attemptId : session?.attemptId;
+  const selfie = session && session.verificationType !== "ID_ONLY"
+    ? (await db.evidenceFile.findMany({
+      where: {
+        sessionId: session.id, fileType: "selfie",
+        ...(eventAttempt ? { attemptId: eventAttempt } : { OR: [{ attemptId: null }, { attemptId: { isSet: false } }] }),
+        ...(snapshot?.selfieId ? { id: snapshot.selfieId } : {})
+      },
+      orderBy: { createdAt: "desc" }, take: 1
+    }))[0] : null;
+  const body = {
+    event,
+    sessionId: sessionUid || null,
+    status: snapshot?.status || (event.startsWith("verification.") ? event.slice("verification.".length) : session?.status) || null,
+    createdAt: snapshot?.createdAt || (session?.createdAt ? new Date(session.createdAt).toISOString() : null),
+    // Internal reference only: image bytes stay in encrypted evidence storage,
+    // rather than being copied into the queue or delivery log indefinitely.
+    _selfie: { version: 1, evidenceId: selfie?.id || null, attemptId: eventAttempt || null }
+  };
 
   return db.webhookDelivery.create({
     data: {
@@ -185,6 +179,28 @@ async function createDelivery({ tenantId, sessionUid, event, eventUid: suppliedE
     if (err.code === "P2002") return db.webhookDelivery.findFirst({ where: { eventUid } });
     throw err;
   });
+}
+
+async function serializeDelivery(delivery, db) {
+  const payload = delivery.payload;
+  // Previously created deliveries retain their original retry contract.
+  if (payload?._selfie?.version !== 1) return JSON.stringify(payload);
+  let selfieBase64 = null;
+  if (payload._selfie.evidenceId) {
+    const session = await db.verificationSession.findFirst({ where: { id: delivery.sessionId, tenantId: delivery.tenantId } });
+    if (!session) throw new Error("Webhook selfie session is unavailable");
+    const file = await db.evidenceFile.findFirst({ where: {
+      id: payload._selfie.evidenceId, sessionId: session.id, fileType: "selfie",
+      ...(payload._selfie.attemptId ? { attemptId: payload._selfie.attemptId } : { OR: [{ attemptId: null }, { attemptId: { isSet: false } }] })
+    } });
+    if (!file) throw new Error("Webhook selfie evidence is unavailable");
+    const bytes = await require("../services/evidenceStore").readEvidence(file.storagePath);
+    if (file.checksum && crypto.createHash("sha256").update(bytes).digest("hex") !== file.checksum) {
+      throw new Error("Webhook selfie checksum mismatch");
+    }
+    selfieBase64 = bytes.toString("base64");
+  }
+  return JSON.stringify({ event: payload.event, sessionId: payload.sessionId, status: payload.status, createdAt: payload.createdAt, selfieBase64 });
 }
 
 module.exports = { sendWebhook, validateWebhookTarget, isPrivateIp, RETRY_SCHEDULE_SECONDS, MAX_ATTEMPTS };

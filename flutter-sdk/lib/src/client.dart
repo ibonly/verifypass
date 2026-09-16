@@ -170,6 +170,10 @@ class VerifyPassClient {
     required String sdkToken,
     String? attemptId,
   }) async {
+    // Result-only screens may not have retained the creation response. Fetch
+    // the current attempt before retrying; never weaken the server's fence.
+    final currentAttemptId = attemptId ??
+        (await getStatus(sessionId: sessionId, sdkToken: sdkToken)).attemptId;
     final uri =
         Uri.parse('$_normalizedApiBase/v1/verification-sessions/$sessionId/retry');
     final response = await http.post(
@@ -180,7 +184,7 @@ class VerifyPassClient {
       },
       body: jsonEncode({
         'sdkToken': sdkToken,
-        'attemptId': ?attemptId,
+        'attemptId': ?currentAttemptId,
       }),
     );
 

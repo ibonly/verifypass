@@ -163,7 +163,10 @@ test("admin config → queued test → real HTTP receiver → visible signed del
   assert.equal(received[0].method, "POST");
   assert.equal(verifyWebhookSignature(received[0].body, received[0].headers, config.body.secret), true);
   assert.equal(JSON.parse(received[0].body).event, "webhook.test");
-  assert.equal(JSON.parse(received[0].body).eventId, queued.body.eventId);
+  assert.deepEqual(JSON.parse(received[0].body), {
+    event: "webhook.test", sessionId: null, status: "test",
+    createdAt: db.webhookDelivery.rows[0].payload.createdAt, selfieBase64: null
+  });
   const log = await call("get", "/v1/dashboard/webhook-deliveries").expect(200);
   assert.deepEqual(log.body.tenant, { tenantUid: tenant.tenantUid, companyName: tenant.companyName });
   assert.equal(log.body.deliveries[0].status, "delivered");
@@ -171,8 +174,7 @@ test("admin config → queued test → real HTTP receiver → visible signed del
   assert.equal(JSON.stringify(log.body).includes(config.body.secret), false);
   await call("post", `/v1/onboarding/webhooks/${queued.body.eventId}/retry`).send({}).expect(400);
 
-  // Actual verification finalization must dispatch its generated webhook in
-  // the same default drain invocation (no next-minute cron required).
+  // A failed verification must not generate another webhook.
   await db.verificationSession.create({ data: {
     tenantId: tenant.id, sessionUid: "vps_admin_delivery", status: "submitted", verificationType: "FACE_ONLY"
   } });
@@ -182,11 +184,8 @@ test("admin config → queued test → real HTTP receiver → visible signed del
   } });
   const drained = await drainDbQueue(deps);
   assert.equal(drained.failed, 0);
-  assert.equal(drained.processed, 2);
-  assert.equal(received.length, 2);
-  assert.equal(JSON.parse(received[1].body).event, "verification.failed");
-  assert.equal(JSON.parse(received[1].body).sessionId, "vps_admin_delivery");
-  assert.equal(verifyWebhookSignature(received[1].body, received[1].headers, config.body.secret), true);
+  assert.equal(drained.processed, 1);
+  assert.equal(received.length, 1, "missing-capture failure must not send a verification webhook");
 });
 
 test("test webhook requires admin and transactionally preserves queue-outage recovery", async t => {

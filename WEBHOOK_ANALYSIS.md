@@ -53,7 +53,7 @@ to one of these defects without examining its delivery/job records.
 | Evidence | Upload services validate and sanitize captures, encrypt stored evidence, and record checksums/bindings. Storage abstracts local and remote evidence. Retention and reconciliation workers clean up expired/orphaned data. |
 | Verification | `worker/pipeline.js` loads evidence, invokes providers, evaluates liveness/challenge/identity/document/risk signals and applies decision policy. It fences superseded attempts and atomically persists the result, session decision, audit entry and webhook outbox record. |
 | Background execution | `jobService.js` dispatches to database jobs or SQS. `worker.js` polls locally/on a server. `worker.lambda.js` handles database drains, SQS batches and scheduled maintenance. The checked-in SAM configuration uses database jobs and a drain every minute. |
-| Review and reporting | Dashboard users inspect sessions/evidence, make review decisions and view reports. Human approval/rejection also enqueues webhook events. |
+| Review and reporting | Dashboard users inspect sessions/evidence, make review decisions and view reports. Human approval also enqueues a webhook; rejection does not. |
 | Email | Node email service invokes the separate PHP mailer for onboarding, security, review and delivery-exhaustion notifications. Email is separate from webhook transport. |
 
 ### Normal verification-to-webhook flow
@@ -63,8 +63,8 @@ to one of these defects without examining its delivery/job records.
    the current attempt.
 3. Submission transaction changes the session to `submitted` and writes a
    `run_verification` outbox entry. The outbox publishes to the active queue.
-4. Verification worker commits the outcome and a `send_webhook` outbox entry
-   with a stable event ID and an outcome snapshot.
+4. Verification worker commits the outcome. Only an `approved` decision also
+   creates a `send_webhook` outbox entry with a stable event ID and snapshot.
 5. Dispatcher requires both tenant URL and secret, creates a delivery record,
    validates the target, signs the raw JSON and sends an HTTP POST.
 6. Any 2xx response marks the delivery `delivered`; retryable failure records
@@ -143,7 +143,77 @@ not absolute times from the first request.
 
 - Delivery session lookup now includes the tenant ID.
 - Secret-key configuration responses use `Cache-Control: no-store`.
-- Existing approved-event payload shape is preserved for compatibility.
+- New deliveries use the five-field selfie payload documented below; existing deliveries retain their original retry contract.
+
+## Detailed >60% delivery verification
+
+Read-only inspection of the local database confirmed:
+
+- Session `vps_1K2K8E5119HQ5MMKT8ED0`: liveness/selfie 99.6936%,
+  backend approved, webhook delivered once, HTTP 200.
+- Session `vps_1K2K8BUA5QXG559PWQ01V`: 99.1710%, manual review due to
+  `LIVENESS_IDENTITY_UNAVAILABLE`, no webhook. A high score does not bypass
+  identity checks.
+- Session `vps_1K2K7SL5GPJ4YKR8YE9HY`: 35.7880%, backend approved and
+  delivered HTTP 200. Existing policy allows a passing active challenge as an
+  alternative to the score waiver; the threshold integration tests reproduce it.
+
+The complete path was tested with encrypted synthetic evidence, the actual
+verification pipeline and outbox, the actual webhook dispatcher, a local HTTP
+receiver, signature validation, base64 decoding, and duplicate-event suppression.
+No real images or additional requests were sent to the configured external endpoint.
+
+| Scenario | Expected and observed |
+| --- | --- |
+| 59.99% and exactly 60%, score-only policy | Not approved; no webhook |
+| 60.0001%, 61%, 75%, 99.69%, 100%, other checks pass | Approved; receiver gets signed webhook and correct selfie bytes |
+| 60.0001%, default active-challenge option enabled | Approved; webhook delivered |
+| Exactly 60%, passing challenge override enabled | Approved; webhook delivered through challenge rule |
+| 35.79%, passing challenge override enabled | Approved; webhook delivered through challenge rule |
+| Low selfie with high frame scores, challenge override disabled | Not approved; no webhook |
+| 99%, identity unavailable or mismatched | Not approved; no webhook |
+| 75%, tenant score threshold raised to >80%, override disabled | Not approved; no webhook |
+| 99% approved, tenant endpoint missing | Dispatcher skips; no HTTP request |
+
+The numeric rule is strict `score > thresholds.liveness.autoApprove` (default
+0.6). `challengePassApproves` defaults to true and supplies the alternative
+approval route. Identity, document, risk and release-validation checks still
+apply. After the decision, webhooks follow `verification.approved`; the dispatcher
+does not independently turn a numeric score into an approval. Current pipeline
+results expose the same underlying selfie score as both liveness score and
+selfie score; action-frame scores are separate evidence.
+
+**Validation:** 15 new end-to-end scenarios; the combined pipeline, webhook and
+Lambda worker run passed **88 tests**, zero failures. Production decision rules
+and tenant thresholds were not changed during this check. These synthetic tests
+validate control flow and delivery, not biometric model accuracy.
+
+A strict product rule forbidding approval at or below 60% would require a separate
+policy change to the challenge override (and review/ID-only semantics), followed
+by release validation. The current policy must not be described as “>60% is the
+only way to approve.”
+
+## Approval-only delivery and Flutter retry fix
+
+Verification webhooks are emitted only for `verification.approved`, for both
+automatic and manual decisions. Failed, rejected, expired and manual-review
+outcomes do not generate a webhook. The dispatcher also suppresses previously
+queued non-approved events and marks old delivery retries `skipped`, clearing
+their next-attempt time. The explicit `webhook.test` diagnostic remains available.
+Approval webhook payloads keep the five-field selfie contract below.
+
+The Flutter result screen previously called `retrySession` without `attemptId`,
+which the backend correctly rejected with HTTP 400. The screen now fetches the
+current SDK status and supplies its attempt ID. The SDK also resolves the current
+attempt when callers omit it; explicitly supplied stale attempts remain errors,
+so server-side attempt fencing is preserved. The retry response's new attempt ID
+is retained in the returned session. Restart the API/worker and rebuild/relaunch
+the Flutter app to use the changes.
+
+Validation: repository suite 558 passing tests; final affected backend suite 48
+passing tests (including manual approvals/rejections); Flutter SDK 9 passing tests;
+Flutter app 7 passing tests, including clicks on Retry from both full-result and
+SDK-status screens. The dashboard production build also passes.
 
 ## 3. Receiver contract and troubleshooting
 
@@ -154,12 +224,33 @@ Verify `X-Verifypass-Signature` as HMAC-SHA256 over the exact
 Parsing and then reserializing the JSON before verification can invalidate the
 signature. The shared signature verifier uses a five-minute tolerance.
 
-The existing approved-event payload is deliberately minimal: service/session IDs
-and selfie IDs, including camelCase and snake_case aliases. It does **not** contain
-an `event` or `status` body field. Receivers should use `X-Verifypass-Event` to
-recognize `verification.approved`; otherwise they may receive the request and
-silently ignore it. Other verification events retain their richer snapshots.
-The new test event includes `event`, `eventId`, `tenantId`, `test` and `createdAt`.
+New verification deliveries use exactly this JSON body:
+
+```json
+{
+  "event": "verification.approved",
+  "sessionId": "vps_example",
+  "status": "approved",
+  "createdAt": "2026-09-16T04:05:08.771Z",
+  "selfieBase64": "<base64 image bytes>"
+}
+```
+
+`createdAt` is the session creation time. `selfieBase64` contains raw base64
+without a data-URL prefix. Only selfie evidence from the event's session and
+attempt is eligible; documents and liveness frames are excluded. Without a
+selfie (including ID-only sessions), the value is null. The test button sends
+the same five fields, with event `webhook.test`, status `test`, null session/image
+values, and the test creation time.
+
+The selected evidence ID is pinned internally for retries. Image bytes are read
+from encrypted evidence storage at send time; plaintext base64 is not persisted
+in delivery records or queue messages. Read/decryption/checksum errors fail the
+attempt and use the normal retry schedule. Evidence deleted by retention cannot
+be recovered by a webhook retry. Already-created legacy deliveries retain their
+previous payload on retries; new deliveries use the five-field contract.
+Restart the worker after updating this code. The webhook signature covers the
+complete JSON, including the base64 image.
 
 | Observation | Investigation / action |
 | --- | --- |

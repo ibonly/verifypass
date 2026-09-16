@@ -92,9 +92,14 @@ class _ResultScreenState extends State<ResultScreen> {
     final client = VerifyPassClient(apiBaseUrl: widget.apiBaseUrl);
 
     try {
+      final current = await client.getStatus(
+        sessionId: widget.sessionId,
+        sdkToken: widget.sdkToken,
+      );
       final retrySession = await client.retrySession(
         sessionId: widget.sessionId,
         sdkToken: widget.sdkToken,
+        attemptId: current.attemptId,
       );
 
       if (!mounted) return;
@@ -847,18 +852,20 @@ class _ResultScreenState extends State<ResultScreen> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(
+          Expanded(child: Text(
             label,
             style: const TextStyle(fontSize: 13, color: Color(0xFF6B7280)),
-          ),
-          Text(
+          )),
+          const SizedBox(width: 12),
+          Flexible(child: Text(
             value,
+            textAlign: TextAlign.right,
             style: TextStyle(
               fontSize: 13,
               fontWeight: FontWeight.w600,
               color: valColor,
             ),
-          ),
+          )),
         ],
       ),
     );
