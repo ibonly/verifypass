@@ -82,7 +82,7 @@ export default function App() {
   return (
     <div className="vp-dashboard-shell" style={{ display: "flex", minHeight: "100vh", fontFamily: "system-ui, -apple-system, sans-serif" }}>
       <nav className="vp-dashboard-nav" style={{ width: 200, background: "#111827", color: "#D1D5DB", padding: 16, flexShrink: 0 }}>
-        <h3 style={{ color: "#fff", margin: "0 0 20px", fontSize: 16 }}>VerifyPass</h3>
+        <h3 style={{ color: "#fff", margin: "0 0 20px", fontSize: 16 }}>Verix</h3>
         {Object.keys(views).map((v) => (
           <button key={v} type="button" aria-current={view === v ? "page" : undefined}
             onClick={() => { setView(v); setSelectedSession(null); }}

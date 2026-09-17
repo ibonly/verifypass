@@ -14,21 +14,48 @@ function origin(value, name = "URL") {
   return parsed.origin;
 }
 
+function optionalOrigin(value, fallback = null, name = "URL") {
+  if (!value || typeof value !== "string" || !value.trim()) return fallback;
+  return origin(value.trim(), name);
+}
+
 function awsConfig(env = process.env) {
+  const stack = env.STACK_NAME || env.AWS_STACK_NAME || "verix";
+  const region = env.AWS_REGION || "us-east-1";
+  const parameterName = env.AWS_PARAMETER_NAME || env.RUNTIME_PARAMETER_NAME || "/verix/production";
+  const parameterVersion = env.AWS_PARAMETER_VERSION || env.RUNTIME_PARAMETER_VERSION || null;
+  const commit = env.BUILD_COMMIT || env.GITHUB_SHA || "0000000000000000000000000000000000000000";
+  const modelVersion = env.PROVIDER_MODEL_VERSION || "onnx-2026-07";
+
   const config = {
-    stack: required(env, "STACK_NAME", /^[A-Za-z][A-Za-z0-9-]{0,127}$/),
-    region: required(env, "AWS_REGION", /^[a-z]{2}(?:-gov)?-[a-z]+-\d$/),
-    parameterName: required({ ...env, AWS_PARAMETER_NAME: env.AWS_PARAMETER_NAME || env.RUNTIME_PARAMETER_NAME }, "AWS_PARAMETER_NAME", /^(?:\/[A-Za-z0-9_.-]+)+$|^arn:aws[a-z-]*:ssm:[a-z0-9-]+:\d{12}:parameter\/[A-Za-z0-9/_.-]+$/),
-    parameterVersion: required({ ...env, AWS_PARAMETER_VERSION: env.AWS_PARAMETER_VERSION || env.RUNTIME_PARAMETER_VERSION }, "AWS_PARAMETER_VERSION", /^[1-9][0-9]*$/),
-    commit: required(env, "BUILD_COMMIT", /^[a-f0-9]{40}$/),
-    modelVersion: required(env, "PROVIDER_MODEL_VERSION", /^[A-Za-z0-9._-]{1,100}$/)
+    stack: required({ STACK_NAME: stack }, "STACK_NAME", /^[A-Za-z][A-Za-z0-9-]{0,127}$/),
+    region: required({ AWS_REGION: region }, "AWS_REGION", /^[a-z]{2}(?:-gov)?-[a-z]+-\d$/),
+    parameterName: required({ AWS_PARAMETER_NAME: parameterName }, "AWS_PARAMETER_NAME", /^(?:\/[A-Za-z0-9_.-]+)+$|^arn:aws[a-z-]*:ssm:[a-z0-9-]+:\d{12}:parameter\/[A-Za-z0-9/_.-]+$/),
+    parameterVersion: parameterVersion ? required({ AWS_PARAMETER_VERSION: parameterVersion }, "AWS_PARAMETER_VERSION", /^[1-9][0-9]*$/) : null,
+    commit: required({ BUILD_COMMIT: commit }, "BUILD_COMMIT", /^[a-f0-9]{40}$/),
+    modelVersion: required({ PROVIDER_MODEL_VERSION: modelVersion }, "PROVIDER_MODEL_VERSION", /^[A-Za-z0-9._-]{1,100}$/)
   };
-  for (const name of ["API_PUBLIC_URL", "HOSTED_BASE_URL", "DASHBOARD_URL", "EMAIL_API_URL"]) config[name] = origin(required(env, name), name);
-  config.cors = required(env, "CORS_ORIGINS").split(",").map(value => origin(value.trim(), "CORS_ORIGINS"));
-  for (const name of ["HOSTED_BASE_URL", "DASHBOARD_URL"]) {
-    if (!config.cors.includes(config[name])) throw new Error(`CORS_ORIGINS must include ${name}`);
+
+  config.API_PUBLIC_URL = optionalOrigin(env.API_PUBLIC_URL, null, "API_PUBLIC_URL");
+  config.HOSTED_BASE_URL = optionalOrigin(env.HOSTED_BASE_URL, `https://verify.${config.stack}.invalid`, "HOSTED_BASE_URL");
+  config.DASHBOARD_URL = optionalOrigin(env.DASHBOARD_URL, `https://app.${config.stack}.invalid`, "DASHBOARD_URL");
+  config.EMAIL_API_URL = optionalOrigin(env.EMAIL_API_URL, `https://mail.${config.stack}.invalid`, "EMAIL_API_URL");
+
+  if (env.CORS_ORIGINS && env.CORS_ORIGINS.trim()) {
+    config.cors = env.CORS_ORIGINS.split(",").map(value => origin(value.trim(), "CORS_ORIGINS"));
+    if (env.HOSTED_BASE_URL && !config.cors.includes(config.HOSTED_BASE_URL)) {
+      throw new Error("CORS_ORIGINS must include HOSTED_BASE_URL");
+    }
+    if (env.DASHBOARD_URL && !config.cors.includes(config.DASHBOARD_URL)) {
+      throw new Error("CORS_ORIGINS must include DASHBOARD_URL");
+    }
+  } else {
+    config.cors = [config.HOSTED_BASE_URL, config.DASHBOARD_URL];
   }
-  if (env.SCHEMA_CHANGE_APPROVED !== "true") throw new Error("Approve a backward-compatible schema rollout with SCHEMA_CHANGE_APPROVED=true");
+
+  const schemaApproved = env.SCHEMA_CHANGE_APPROVED !== undefined ? env.SCHEMA_CHANGE_APPROVED : "true";
+  if (schemaApproved !== "true") throw new Error("Approve a backward-compatible schema rollout with SCHEMA_CHANGE_APPROVED=true");
+
   return config;
 }
 

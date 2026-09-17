@@ -175,7 +175,7 @@ class _HomeScreenState extends State<HomeScreen> {
             Icon(Icons.verified_user_outlined, color: Colors.white),
             SizedBox(width: 8),
             Text(
-              'VerifyPass',
+              'Verix',
               style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
             ),
             SizedBox(width: 6),

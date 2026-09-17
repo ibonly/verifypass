@@ -1,6 +1,6 @@
-# VerifyPass Production Deployment & Operations Guide
+# Verix Production Deployment & Operations Guide
 
-This document provides a comprehensive, end-to-end guide for provisioning, configuring, deploying, and maintaining VerifyPass in production. It covers the complete architecture across AWS serverless infrastructure, cPanel web hosting, MongoDB Atlas, and GitHub Actions CI/CD automation.
+This document provides a comprehensive, end-to-end guide for provisioning, configuring, deploying, and maintaining Verix in production. It covers the complete architecture across AWS serverless infrastructure, cPanel web hosting, MongoDB Atlas, and GitHub Actions CI/CD automation.
 
 ---
 
@@ -9,7 +9,7 @@ This document provides a comprehensive, end-to-end guide for provisioning, confi
 1. [Architecture & Deployment Topology](#1-architecture--deployment-topology)
 2. [Prerequisites Checklist](#2-prerequisites-checklist)
 3. [Step 1: MongoDB Database Provisioning](#3-step-1-mongodb-database-provisioning)
-4. [Step 2: AWS Secrets Manager & IAM OIDC Setup](#4-step-2-aws-secrets-manager--iam-oidc-setup)
+4. [Step 2: AWS Systems Manager Parameter Store & IAM OIDC Setup](#4-step-2-aws-systems-manager-parameter-store--iam-oidc-setup)
 5. [Step 3: cPanel Hosting Account Configuration](#5-step-3-cpanel-hosting-account-configuration)
 6. [Step 4: GitHub Actions Variables & Secrets](#6-step-4-github-actions-variables--secrets)
 7. [Step 5: Pre-Flight Local Verification](#7-step-5-pre-flight-local-verification)
@@ -22,11 +22,11 @@ This document provides a comprehensive, end-to-end guide for provisioning, confi
 
 ## 1. Architecture & Deployment Topology
 
-VerifyPass deploys as a hybrid serverless and static/PHP application:
+Verix deploys as a hybrid serverless and static/PHP application:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                       VERIFYPASS MONOREPO                                   │
+│                                         VERIX MONOREPO                                      │
 └───────────────┬─────────────────────────────────────────────┬───────────────────────────────┘
                 │                                             │
       Push to main branch                           Build immutable artifact
@@ -38,7 +38,7 @@ VerifyPass deploys as a hybrid serverless and static/PHP application:
 │ • Express API (Docker Image)  │             │ • Dashboard: app.example.com                  │
 │ • Worker Engine (Docker Image)│             │ • Verification: verify.example.com            │
 │ • S3 Evidence (Encrypted SSE) │             │ • Mailer API: mail.example.com                │
-│ • EventBridge Schedulers      │             │ • Standalone JS SDK: /verify/sdk/verifypass.js│
+│ • EventBridge Schedulers      │             │ • Standalone JS SDK: /verify/sdk/verix.js     │
 └───────────────┬───────────────┘             └───────────────────────┬───────────────────────┘
                 │                                                     │
                 │                Shared MongoDB Atlas                 │
@@ -92,7 +92,7 @@ Prisma requires MongoDB to run as a **replica set** to support atomic transactio
 
 #### Example Production Connection String:
 ```text
-mongodb+srv://verifypass_prod:STRONG_DB_PASSWORD@cluster0.abcde.mongodb.net/verifypass?retryWrites=true&w=majority&maxPoolSize=5
+mongodb+srv://verix_prod:STRONG_DB_PASSWORD@cluster0.abcde.mongodb.net/verix?retryWrites=true&w=majority&maxPoolSize=5
 ```
 
 ### Network Access
@@ -104,13 +104,13 @@ mongodb+srv://verifypass_prod:STRONG_DB_PASSWORD@cluster0.abcde.mongodb.net/veri
 ## 4. Step 2: AWS Systems Manager Parameter Store & IAM OIDC Setup
 
 ### 4.1. Create Systems Manager SecureString Parameter
-Create an AWS Systems Manager Parameter Store parameter outside Git named `/verifypass/production` (or your chosen naming convention).
+Create an AWS Systems Manager Parameter Store parameter outside Git named `/verix/production` (or your chosen naming convention; `/verifypass/production` remains supported as a fallback).
 
 All keys must be strings inside a single JSON object:
 
 ```json
 {
-  "DATABASE_URL": "mongodb+srv://verifypass_prod:PASSWORD@cluster0.abcde.mongodb.net/verifypass?retryWrites=true&w=majority&maxPoolSize=5",
+  "DATABASE_URL": "mongodb+srv://verix_prod:PASSWORD@cluster0.abcde.mongodb.net/verix?retryWrites=true&w=majority&maxPoolSize=5",
   "SDK_TOKEN_SECRET": "32_OR_MORE_CRYPTOGRAPHICALLY_RANDOM_CHARACTERS",
   "AUTH_TOKEN_SECRET": "32_OR_MORE_CRYPTOGRAPHICALLY_RANDOM_CHARACTERS",
   "EMAIL_API_KEY": "32_OR_MORE_CRYPTOGRAPHICALLY_RANDOM_CHARACTERS",
@@ -131,22 +131,22 @@ All keys must be strings inside a single JSON object:
 #### Provision the Parameter with the AWS CLI:
 ```bash
 aws ssm put-parameter \
-  --name "/verifypass/production" \
+  --name "/verix/production" \
   --type "SecureString" \
   --value file://secrets.json
 ```
 
 #### Record the Parameter Name and Version:
-1. **Parameter Name**: e.g., `/verifypass/production` (or full ARN: `arn:aws:ssm:us-east-1:123456789012:parameter/verifypass/production`).
+1. **Parameter Name**: e.g., `/verix/production` (or full ARN: `arn:aws:ssm:us-east-1:123456789012:parameter/verix/production`).
 2. **Version**: The immutable integer version number (e.g., `1`, `2`). Pinned version IDs guarantee audit reproducibility and prevent accidental runtime configuration drift.
 
 ---
 
 ### 4.2. Configure AWS IAM OIDC Role for GitHub Actions
-Configure GitHub as an OIDC identity provider in AWS IAM, then create a deployment role (`VerifyPassDeployRole`).
+Configure GitHub as an OIDC identity provider in AWS IAM, then create a deployment role (`VerixDeployRole`).
 
 #### Trust Policy:
-Restrict the trust policy strictly to your repository and the `production` environment:
+Restrict the trust policy strictly to your repository and the `prod` environment:
 
 ```json
 {
@@ -171,7 +171,7 @@ Restrict the trust policy strictly to your repository and the `production` envir
 
 #### Permissions Policy:
 Attach a policy granting:
-- CloudFormation operations for stack `verifypass`
+- CloudFormation operations for stack `verix` (or `verifypass`)
 - S3 and ECR operations for SAM deployment artifacts
 - IAM `PassRole` and `CreateRole` for the Lambda execution roles defined in `backend/template.yaml`
 - SSM Parameter Store `GetParameter` on the specific parameter ARN (and KMS decrypt if using a custom key)
@@ -185,12 +185,12 @@ Attach a policy granting:
 Log into the cPanel server via SSH under the hosting account (e.g. username `accountuser`) and prepare the release root:
 
 ```bash
-mkdir -p /home/accountuser/verifypass/incoming
-mkdir -p /home/accountuser/verifypass/releases
-mkdir -p /home/accountuser/verifypass/shared
+mkdir -p /home/accountuser/verix/incoming
+mkdir -p /home/accountuser/verix/releases
+mkdir -p /home/accountuser/verix/shared
 chmod 711 /home/accountuser
-chmod 755 /home/accountuser/verifypass
-chmod 700 /home/accountuser/verifypass/shared
+chmod 755 /home/accountuser/verix
+chmod 700 /home/accountuser/verix/shared
 ```
 
 ### 5.2. Map Subdomain Document Roots
@@ -198,17 +198,17 @@ In cPanel > **Domains** (or **Subdomains**), map the document roots to the symli
 
 | Subdomain | Document Root in cPanel |
 |---|---|
-| `app.example.com` | `/home/accountuser/verifypass/current/dashboard` |
-| `verify.example.com` | `/home/accountuser/verifypass/current/verify` |
-| `mail.example.com` | `/home/accountuser/verifypass/current/mailer/public` |
+| `app.example.com` | `/home/accountuser/verix/current/dashboard` |
+| `verify.example.com` | `/home/accountuser/verix/current/verify` |
+| `mail.example.com` | `/home/accountuser/verix/current/mailer/public` |
 
 > **Critical**: Do not set document roots to the entire release root or `/mailer`. Only `/mailer/public` should be accessible to the web.
 
 ### 5.3. Configure Shared Email Settings
-Create the private configuration file `/home/accountuser/verifypass/shared/email-config.php`:
+Create the private configuration file `/home/accountuser/verix/shared/email-config.php`:
 
 ```bash
-nano /home/accountuser/verifypass/shared/email-config.php
+nano /home/accountuser/verix/shared/email-config.php
 ```
 
 Add the following configuration:
@@ -216,15 +216,15 @@ Add the following configuration:
 ```php
 <?php
 return [
-    // Must exactly match EMAIL_API_KEY in AWS Secrets Manager
-    'api_key' => 'SAME_32_CHAR_KEY_AS_IN_SECRETS_MANAGER',
+    // Must exactly match EMAIL_API_KEY in AWS Systems Manager Parameter Store
+    'api_key' => 'SAME_32_CHAR_KEY_AS_IN_PARAMETER_STORE',
 
     'require_https' => true,
     'trusted_proxies' => [],
     'enable_render_endpoint' => false,
 
-    'from'     => ['address' => 'no-reply@example.com', 'name' => 'VerifyPass'],
-    'reply_to' => ['address' => 'support@example.com', 'name' => 'VerifyPass Support'],
+    'from'     => ['address' => 'no-reply@example.com', 'name' => 'Verix'],
+    'reply_to' => ['address' => 'support@example.com', 'name' => 'Verix Support'],
 
     'dashboard_url' => 'https://app.example.com',
 
@@ -238,8 +238,8 @@ return [
     ],
 
     'brand' => [
-        'product' => 'VerifyPass',
-        'legal'   => 'VerifyPass Inc.',
+        'product' => 'Verix',
+        'legal'   => 'Verix Inc.',
         'address' => 'Lagos, Nigeria',
         'support' => 'https://example.com/support',
     ],
@@ -247,7 +247,7 @@ return [
     'rate_limit' => [
         'max' => 300,
         'windowSeconds' => 3600,
-        'file' => '/home/accountuser/verifypass/shared/.security-state'
+        'file' => '/home/accountuser/verix/shared/.security-state'
     ],
 
     'env' => 'production',
@@ -257,7 +257,7 @@ return [
 #### Enforce Permissions:
 The file **must** be readable only by the account owner:
 ```bash
-chmod 600 /home/accountuser/verifypass/shared/email-config.php
+chmod 600 /home/accountuser/verix/shared/email-config.php
 ```
 *Note: The cPanel deployment script validates that `email-config.php` has permissions matching `0600` and will fail if group or other permissions are present.*
 
@@ -265,7 +265,7 @@ chmod 600 /home/accountuser/verifypass/shared/email-config.php
 Generate a dedicated key pair on your deployment machine or workstation:
 
 ```bash
-ssh-keygen -t ed25519 -C "github-deploy@verifypass" -f ./id_cpanel_deploy -N ""
+ssh-keygen -t ed25519 -C "github-deploy@verix" -f ./id_cpanel_deploy -N ""
 ```
 
 1. Append `id_cpanel_deploy.pub` to `/home/accountuser/.ssh/authorized_keys` on cPanel.
@@ -280,8 +280,8 @@ ssh-keygen -t ed25519 -C "github-deploy@verifypass" -f ./id_cpanel_deploy -N ""
 
 ## 6. Step 4: GitHub Actions Variables & Secrets
 
-### 6.1. GitHub Environment: `production`
-In GitHub repository settings > **Environments**, create an environment named `production`.
+### 6.1. GitHub Environment: `prod`
+In GitHub repository settings > **Environments**, create an environment named `prod` (or `production`).
 - Enable **Required reviewers** for production deployments.
 - Restrict deployment branches strictly to `main`.
 
@@ -291,21 +291,21 @@ Configure the following variables in GitHub (under **Settings > Secrets and vari
 
 | Variable Name | Scope | Example Value | Description |
 |---|---|---|---|
-| `API_PUBLIC_URL` | **Repository & Environment** | `https://api.example.com` | Exact HTTPS origin of the API (must match across CI and deploy). |
+| `API_PUBLIC_URL` | **Repository & Environment** | `https://api.example.com` | Exact HTTPS origin of the API (if omitted initially, auto-detects Lambda Function URL). |
 | `HOSTED_BASE_URL` | Environment | `https://verify.example.com` | HTTPS origin of the verification flow. |
 | `DASHBOARD_URL` | Environment | `https://app.example.com` | HTTPS origin of the dashboard. |
 | `EMAIL_API_URL` | Environment | `https://mail.example.com` | HTTPS origin of the email mailer (without `/send.php`). |
 | `CORS_ORIGINS` | Environment | `https://app.example.com,https://verify.example.com` | Comma-separated allowed origins (no wildcards). |
 | `AWS_REGION` | Environment | `us-east-1` | Target AWS region. |
-| `AWS_STACK_NAME` | Environment | `verifypass` | CloudFormation SAM stack name. |
-| `AWS_PARAMETER_NAME` | Environment | `/verifypass/production` | Systems Manager Parameter Store parameter name or ARN. |
+| `AWS_STACK_NAME` | Environment | `verix` | CloudFormation SAM stack name (defaults to `verix`, `verifypass` supported). |
+| `AWS_PARAMETER_NAME` | Environment | `/verix/production` | Systems Manager Parameter Store parameter name or ARN (defaults to `/verix/production`, `/verifypass/production` supported). |
 | `AWS_PARAMETER_VERSION` | Environment | `1` | Pinned Parameter Store integer version number. |
 | `PROVIDER_MODEL_VERSION` | Environment | `onnx-2026-07` | Pinned biometrics model version label. |
 | `SCHEMA_CHANGE_APPROVED` | Environment | `true` | Must be `true` to approve backward-compatible Prisma push. |
 | `CPANEL_SSH_HOST` | Environment | `cpanel.example.com` | Hostname or IP of the cPanel server. |
 | `CPANEL_SSH_PORT` | Environment | `22` | SSH port on the cPanel server. |
 | `CPANEL_SSH_USER` | Environment | `accountuser` | cPanel Linux username. |
-| `CPANEL_RELEASE_ROOT` | Environment | `verifypass` | Directory name under `/home/accountuser`. |
+| `CPANEL_RELEASE_ROOT` | Environment | `verix` | Directory name under `/home/accountuser`. |
 
 ### 6.3. GitHub Repository Secrets
 
@@ -313,7 +313,7 @@ Configure the following GitHub Secrets:
 
 | Secret Name | Description |
 |---|---|
-| `AWS_DEPLOY_ROLE_ARN` | Full ARN of the IAM OIDC deployment role (e.g. `arn:aws:iam::123456789012:role/VerifyPassDeployRole`). |
+| `AWS_DEPLOY_ROLE_ARN` | Full ARN of the IAM OIDC deployment role (e.g. `arn:aws:iam::123456789012:role/VerixDeployRole`). |
 | `CPANEL_SSH_KEY` | Private Ed25519 SSH deployment key content. |
 | `CPANEL_KNOWN_HOSTS` | Pre-verified `known_hosts` single-line entry. |
 
@@ -382,7 +382,7 @@ The production release is completely automated and serialized:
 │ 3. Frontend Job (cPanel):                                              │
 │    • Downloads immutable release.tar.gz                                │
 │    • Connects via SSH/SCP with host-key verification                   │
-│    • Stages release in /home/user/verifypass/releases/<id>             │
+│    • Stages release in /home/user/verix/releases/<id>                  │
 │    • Links /shared/email-config.php and lints PHP                      │
 │    • Atomically updates /current symlink                               │
 │    • Executes cPanel smoke tests (Release JSON, Mailer, Playwright)    │
@@ -394,7 +394,7 @@ The production release is completely automated and serialized:
 1. Open a pull request from `dev` into `main`.
 2. Ensure all PR status checks pass.
 3. Merge the PR into `main` (or run **Workflow Dispatch** on `.github/workflows/release.yml`).
-4. In the GitHub Actions run, designated reviewers must approve the `production` environment prompt.
+4. In the GitHub Actions run, designated reviewers must approve the `prod` environment prompt.
 
 ---
 
@@ -404,7 +404,7 @@ The pipeline automatically validates both tiers before completing promotion:
 
 ### AWS Smoke Suite (`deploy/aws.cjs`):
 1. **Worker Health & Commit Verification**: Invokes `WorkerFunctionArn` directly with `{"type":"health"}`. Confirms `worker.ok === true` and `worker.release.commit` matches the deployed commit SHA.
-2. **Public API Identity**: Fetches `https://api.example.com/health`. Asserts HTTP 200 and commit SHA equality.
+2. **Public API Identity**: Fetches `https://api.example.com/health` (or Lambda Function URL on initial bring-up). Asserts HTTP 200 and commit SHA equality.
 3. **CORS Validation**: Sends `OPTIONS` preflight requests from each origin configured in `CORS_ORIGINS` to `POST /v1/verification-sessions`. Verifies `Access-Control-Allow-Origin` matches each exact origin.
 
 ### cPanel Smoke Suite (`deploy/cpanel.cjs`):
@@ -427,7 +427,7 @@ If a deployment runner terminates abruptly during promotion, you can trigger a m
 
 ```bash
 ssh -p 22 accountuser@cpanel.example.com
-bash /home/accountuser/verifypass/cpanel-remote.sh rollback verifypass <FAILED_RELEASE_IDENTIFIER>
+bash /home/accountuser/verix/cpanel-remote.sh rollback verix <FAILED_RELEASE_IDENTIFIER>
 ```
 *Note: The script verifies that the current symlink points to the specified release before reverting to the prior release recorded in `incoming/<release>.previous`.*
 
@@ -448,12 +448,12 @@ The SAM stack configures EventBridge schedules to run automated maintenance agai
 
 ### Monitoring & Logs
 - **AWS CloudWatch**:
-  - API Logs: `/aws/lambda/verifypass-ApiFunction-...`
-  - Worker Logs: `/aws/lambda/verifypass-WorkerFunction-...`
+  - API Logs: `/aws/lambda/verix-ApiFunction-...` (or `verifypass-ApiFunction-...` if legacy stack)
+  - Worker Logs: `/aws/lambda/verix-WorkerFunction-...` (or `verifypass-WorkerFunction-...` if legacy stack)
   - CloudWatch Alarms: Monitor 5xx errors, Lambda throttling, and execution duration approaching 300 seconds.
 - **cPanel Logs**:
   - Apache error logs: `/usr/local/apache/logs/error_log` or cPanel > **Errors**.
-  - Rate limiting state: `/home/accountuser/verifypass/shared/.security-state`.
+  - Rate limiting state: `/home/accountuser/verix/shared/.security-state`.
 
 ### Key Rotation Procedures
 - **Rotating `EMAIL_API_KEY`**:
