@@ -144,7 +144,7 @@ The dashboard Webhooks page includes **Send test webhook** to verify a saved end
 Production deployment is fully automated through `.github/workflows/release.yml` on push to `main` (or via manual workflow dispatch):
 
 1. **Pre-flight & CI Verification**: Backend tests, SDK core/react/js tests, dashboard tests, Playwright browser checks, PHP mailer security tests, SAM template lint, and deployment contract tests.
-2. **Backend (AWS Lambda + SAM)**: Digests and builds Node 22 container images for API and worker functions, checks runtime secrets against pinned AWS Secrets Manager versions, applies backward-compatible MongoDB migrations, and validates tenant policy receipts.
+2. **Backend (AWS Lambda + SAM)**: Digests and builds Node 22 container images for API and worker functions, checks runtime configuration against pinned AWS Systems Manager Parameter Store versions, applies backward-compatible MongoDB migrations, and validates tenant policy receipts.
 3. **Frontend & Mailer (cPanel)**: Packages immutable release artifacts via `deploy/package.cjs`, stages files over host-key-verified SSH/SCP, links shared PHP configuration, and performs atomic symlink switches with automatic rollback on smoke check failures.
 
 For complete step-by-step setup guides, configuration variables, and recovery procedures, see [DEPLOYMENT.md](DEPLOYMENT.md) and [deploy/README.md](deploy/README.md).

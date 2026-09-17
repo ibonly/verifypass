@@ -8,15 +8,15 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    environment: production
+    environment: prod
     permissions:
       contents: read
       id-token: write
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
       STACK_NAME: ${{ vars.AWS_STACK_NAME }}
-      RUNTIME_SECRET_ARN: ${{ vars.AWS_RUNTIME_SECRET_ARN }}
-      RUNTIME_SECRET_VERSION: ${{ vars.AWS_RUNTIME_SECRET_VERSION }}
+      AWS_PARAMETER_NAME: ${{ vars.AWS_PARAMETER_NAME }}
+      AWS_PARAMETER_VERSION: ${{ vars.AWS_PARAMETER_VERSION }}
       API_PUBLIC_URL: ${{ vars.API_PUBLIC_URL }}
       HOSTED_BASE_URL: ${{ vars.HOSTED_BASE_URL }}
       DASHBOARD_URL: ${{ vars.DASHBOARD_URL }}

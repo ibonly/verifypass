@@ -15,14 +15,30 @@ Metadata:
         has: Runtime secrets, retained evidence, worker time budget and release recovery constraints.
 
 Parameters:
-  RuntimeSecretArn:
+  DatabaseUrl:
     Type: String
-    AllowedPattern: 'arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+'
-    Description: Existing Secrets Manager JSON secret; see deploy/README.md for required keys.
-  RuntimeSecretVersion:
+    NoEcho: true
+    Description: Existing MongoDB replica-set connection string with TLS and maxPoolSize.
+  SdkTokenSecret:
     Type: String
-    AllowedPattern: '[A-Za-z0-9-]{32,64}'
-    Description: Immutable secret version ID, including matching liveness validation receipts.
+    NoEcho: true
+    Description: Random secret key of at least 32 characters for SDK token signing.
+  AuthTokenSecret:
+    Type: String
+    NoEcho: true
+    Description: Random secret key of at least 32 characters for API authentication JWT tokens.
+  EvidenceEncryptionKey:
+    Type: String
+    NoEcho: true
+    Description: 64-hex AES-256-GCM key for encrypting biometric evidence frames.
+  LivenessValidationReceipts:
+    Type: String
+    NoEcho: true
+    Description: JSON-encoded array string of matching evaluation receipts.
+  EmailApiKey:
+    Type: String
+    NoEcho: true
+    Description: Shared secret for cPanel transactional email API.
   BuildCommit:
     Type: String
     AllowedPattern: '[a-f0-9]{40}'
@@ -65,16 +81,16 @@ Globals:
         EVIDENCE_BACKEND: s3
         S3_BUCKET: !Ref EvidenceBucket
         S3_REGION: !Ref AWS::Region
-        DATABASE_URL: !Sub '{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:DATABASE_URL::${RuntimeSecretVersion}}}'
-        SDK_TOKEN_SECRET: !Sub '{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:SDK_TOKEN_SECRET::${RuntimeSecretVersion}}}'
-        EVIDENCE_ENCRYPTION_KEY: !Sub '{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:EVIDENCE_ENCRYPTION_KEY::${RuntimeSecretVersion}}}'
-        LIVENESS_VALIDATION_RECEIPTS: !Sub '{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:LIVENESS_VALIDATION_RECEIPTS::${RuntimeSecretVersion}}}'
+        DATABASE_URL: !Ref DatabaseUrl
+        SDK_TOKEN_SECRET: !Ref SdkTokenSecret
+        EVIDENCE_ENCRYPTION_KEY: !Ref EvidenceEncryptionKey
+        LIVENESS_VALIDATION_RECEIPTS: !Ref LivenessValidationReceipts
         BUILD_COMMIT: !Ref BuildCommit
         VP_PROVIDER: onnx
         PROVIDER_MODEL_VERSION: !Ref ProviderModelVersion
         DASHBOARD_URL: !Ref DashboardUrl
         EMAIL_API_URL: !Ref EmailApiUrl
-        EMAIL_API_KEY: !Sub '{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:EMAIL_API_KEY::${RuntimeSecretVersion}}}'
+        EMAIL_API_KEY: !Ref EmailApiKey
 
 Conditions:
   HasApiReservedConcurrency: !Not [!Equals [!Ref ApiReservedConcurrency, 0]]
@@ -168,7 +184,7 @@ Resources:
       Environment:
         Variables:
           API_PUBLIC_URL: !Ref ApiPublicUrl
-          AUTH_TOKEN_SECRET: !Sub '{{resolve:secretsmanager:${RuntimeSecretArn}:SecretString:AUTH_TOKEN_SECRET::${RuntimeSecretVersion}}}'
+          AUTH_TOKEN_SECRET: !Ref AuthTokenSecret
           HOSTED_BASE_URL: !Ref HostedBaseUrl
           CORS_ORIGINS: !Ref CorsOrigins
           WORKER_LAMBDA_ARN: !GetAtt WorkerFunction.Arn
