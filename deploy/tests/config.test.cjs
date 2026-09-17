@@ -3,17 +3,29 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { awsConfig, origin, runtimeSecret } = require("../config.cjs");
 const env = {
-  STACK_NAME: "verifypass", AWS_REGION: "us-east-1", AWS_PARAMETER_NAME: "/verifypass/production",
+  STACK_NAME: "verix", AWS_REGION: "us-east-1", AWS_PARAMETER_NAME: "/verix/production",
   AWS_PARAMETER_VERSION: "1", BUILD_COMMIT: "b".repeat(40), PROVIDER_MODEL_VERSION: "onnx-2026-07",
   API_PUBLIC_URL: "https://api.example.com", HOSTED_BASE_URL: "https://verify.example.com", DASHBOARD_URL: "https://app.example.com", EMAIL_API_URL: "https://mail.example.com",
   CORS_ORIGINS: "https://verify.example.com,https://app.example.com", SCHEMA_CHANGE_APPROVED: "true"
 };
 test("production configuration requires explicit matching origins and schema approval", () => {
-  assert.equal(awsConfig(env).stack, "verifypass");
-  assert.equal(awsConfig(env).parameterName, "/verifypass/production");
+  assert.equal(awsConfig(env).stack, "verix");
+  assert.equal(awsConfig(env).parameterName, "/verix/production");
   assert.equal(awsConfig(env).parameterVersion, "1");
-  assert.equal(awsConfig({ ...env, AWS_PARAMETER_NAME: "arn:aws:ssm:us-east-1:123456789012:parameter/verifypass/production" }).parameterName, "arn:aws:ssm:us-east-1:123456789012:parameter/verifypass/production");
-  for (const changed of [{ CORS_ORIGINS: "https://other.example.com" }, { STACK_NAME: 'stack";exit 0' }, { SCHEMA_CHANGE_APPROVED: "" }, { AWS_PARAMETER_NAME: "invalid-no-slash" }, { AWS_PARAMETER_VERSION: "0" }, { AWS_PARAMETER_VERSION: "latest" }]) assert.throws(() => awsConfig({ ...env, ...changed }));
+  assert.equal(awsConfig({ ...env, STACK_NAME: "verifypass", AWS_PARAMETER_NAME: "/verifypass/production" }).stack, "verifypass");
+  assert.equal(awsConfig({ ...env, AWS_PARAMETER_NAME: "arn:aws:ssm:us-east-1:123456789012:parameter/verix/production" }).parameterName, "arn:aws:ssm:us-east-1:123456789012:parameter/verix/production");
+  for (const changed of [{ CORS_ORIGINS: "https://other.example.com", HOSTED_BASE_URL: "https://verify.example.com" }, { STACK_NAME: 'stack";exit 0' }, { SCHEMA_CHANGE_APPROVED: "" }, { AWS_PARAMETER_NAME: "invalid-no-slash" }, { AWS_PARAMETER_VERSION: "0" }, { AWS_PARAMETER_VERSION: "latest" }]) assert.throws(() => awsConfig({ ...env, ...changed }));
+});
+test("fresh deployment works with minimal defaults and auto-detects URLs", () => {
+  const minimal = awsConfig({
+    AWS_PARAMETER_NAME: "/verix/production",
+    AWS_PARAMETER_VERSION: "1"
+  });
+  assert.equal(minimal.stack, "verix");
+  assert.equal(minimal.region, "us-east-1");
+  assert.equal(minimal.API_PUBLIC_URL, null);
+  assert.equal(minimal.HOSTED_BASE_URL, "https://verify.verix.invalid");
+  assert.equal(minimal.cors.length, 2);
 });
 test("deployment URLs reject credentials, paths, HTTP and query data", () => {
   for (const value of ["http://api.example.com", "https://name:secret@api.example.com", "https://api.example.com/path", "https://api.example.com?q=x", "https://api.example.com\\x"]) assert.throws(() => origin(value));

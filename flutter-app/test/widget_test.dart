@@ -131,10 +131,10 @@ void main() {
     testWidgets('App renders Home Screen with VerifyPass header', (
       WidgetTester tester,
     ) async {
-      await tester.pumpWidget(const VerifyPassSampleApp());
+      await tester.pumpWidget(const VerixSampleApp());
       await tester.pumpAndSettle();
 
-      expect(find.text('VerifyPass'), findsOneWidget);
+      expect(find.text('Verix'), findsOneWidget);
       expect(find.text('Start a Verification'), findsOneWidget);
       expect(find.text('Start Verification (SDK Modal)'), findsOneWidget);
     });

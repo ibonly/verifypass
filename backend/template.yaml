@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  VerifyPass — serverless deployment (API + verification worker on Lambda).
+  Verix — serverless deployment (API + verification worker on Lambda).
   Queue backend: db (job_queue table stays the source of truth). The API
   async-invokes the worker after each enqueue ("kick"); EventBridge drains
   every minute as the guarantee and runs the maintenance crons.

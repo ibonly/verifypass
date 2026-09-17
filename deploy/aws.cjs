@@ -23,6 +23,16 @@ async function main() {
   run(path.join(backend, "node_modules/.bin/prisma"), ["db", "push", "--schema", "prisma/schema.prisma", "--skip-generate"], { cwd: backend, env });
   run(process.execPath, ["scripts/check-liveness-release.js"], { cwd: backend, env });
   run("sam", ["build", "--no-use-container", "-t", "backend/template.yaml"]);
+  let apiPublicUrl = config.API_PUBLIC_URL;
+  if (!apiPublicUrl) {
+    try {
+      const existing = JSON.parse(execFileSync("aws", ["cloudformation", "describe-stacks", "--stack-name", config.stack, "--output", "json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })).Stacks[0];
+      const existingOutputs = Object.fromEntries((existing.Outputs || []).map(o => [o.OutputKey, o.OutputValue]));
+      if (existingOutputs.ApiUrl) apiPublicUrl = origin(existingOutputs.ApiUrl, "ApiUrl");
+    } catch {
+      apiPublicUrl = `https://${config.stack}.lambda-url.${config.region}.on.aws`;
+    }
+  }
   const parameters = {
     DatabaseUrl: secrets.DATABASE_URL,
     SdkTokenSecret: secrets.SDK_TOKEN_SECRET,
@@ -32,7 +42,7 @@ async function main() {
     EmailApiKey: secrets.EMAIL_API_KEY,
     BuildCommit: config.commit,
     CorsOrigins: config.cors.join(","),
-    ApiPublicUrl: config.API_PUBLIC_URL,
+    ApiPublicUrl: apiPublicUrl,
     HostedBaseUrl: config.HOSTED_BASE_URL,
     DashboardUrl: config.DASHBOARD_URL,
     EmailApiUrl: config.EMAIL_API_URL,
@@ -51,18 +61,27 @@ async function main() {
     ...Object.entries(parameters).map(([name, value]) => `${name}="${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`)
   ]);
   const stack = JSON.parse(execFileSync("aws", ["cloudformation", "describe-stacks", "--stack-name", config.stack, "--output", "json"], { encoding: "utf8" })).Stacks[0];
-  const outputs = Object.fromEntries(stack.Outputs.map(output => [output.OutputKey, output.OutputValue]));
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "vp-smoke-"));
+  const outputs = Object.fromEntries((stack.Outputs || []).map(output => [output.OutputKey, output.OutputValue]));
+  console.log(`\n============================================================`);
+  console.log(`🚀 Verix Lambda Function URL: ${outputs.ApiUrl}`);
+  if (config.API_PUBLIC_URL) console.log(`🌐 Configured Public API Origin: ${config.API_PUBLIC_URL}`);
+  console.log(`============================================================\n`);
+  if (process.env.GITHUB_ACTIONS) {
+    console.log(`::notice title=Verix API URL::Deployed Lambda Function URL: ${outputs.ApiUrl}`);
+  }
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "verix-smoke-"));
   try {
     const file = path.join(directory, "worker.json");
     const invocation = JSON.parse(execFileSync("aws", ["lambda", "invoke", "--function-name", outputs.WorkerFunctionArn, "--cli-binary-format", "raw-in-base64-out", "--payload", '{"type":"health"}', file], { encoding: "utf8" }));
     const worker = JSON.parse(fs.readFileSync(file));
     if (invocation.FunctionError || worker.release?.commit !== config.commit || !worker.ok) throw new Error("Deployed worker readiness or release identity failed");
-    const response = await fetch(config.API_PUBLIC_URL + "/health", { redirect: "error", signal: AbortSignal.timeout(20000) });
+    const testUrl = origin(outputs.ApiUrl, "ApiUrl");
+    const response = await fetch(testUrl + "/health", { redirect: "error", signal: AbortSignal.timeout(20000) });
     const health = await response.json();
     if (!response.ok || health.release?.commit !== config.commit) throw new Error("Public API is not serving the expected release");
-    for (const corsOrigin of config.cors) {
-      const preflight = await fetch(config.API_PUBLIC_URL + "/v1/verification-sessions", { method: "OPTIONS", headers: { Origin: corsOrigin, "Access-Control-Request-Method": "POST" }, redirect: "error", signal: AbortSignal.timeout(15000) });
+    const activeCors = config.cors.filter(c => !c.endsWith(".invalid"));
+    for (const corsOrigin of activeCors) {
+      const preflight = await fetch(testUrl + "/v1/verification-sessions", { method: "OPTIONS", headers: { Origin: corsOrigin, "Access-Control-Request-Method": "POST" }, redirect: "error", signal: AbortSignal.timeout(15000) });
       if (!preflight.ok || preflight.headers.get("access-control-allow-origin") !== corsOrigin) throw new Error("Production CORS smoke check failed");
     }
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }

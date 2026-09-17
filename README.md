@@ -1,4 +1,4 @@
-# VerifyPass
+# Verix
 
 Multitenant liveness, face recognition, and ID verification service for Nigerian fintechs.
 
@@ -14,7 +14,7 @@ frontend/      cPanel static builds
   dashboard/   tenant + admin dashboard      verify-page/  hosted verification flow
   sdk/         core / react / js — the client SDKs (file: deps)
 flutter-sdk/   Official Flutter SDK for mobile apps (WebView + status polling)
-flutter-app/   Sample mobile application integrating VerifyPass Flutter SDK
+flutter-app/   Sample mobile application integrating Verix Flutter SDK
 email-api/     PHP HMAC-authenticated mailer (21 transactional templates)
 deploy/        AWS SAM + cPanel atomic deployment automation and contract tests
 sample-app/    Web integration demo (cPanel)

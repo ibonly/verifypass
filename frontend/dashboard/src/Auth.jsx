@@ -24,13 +24,13 @@ export default function Auth({ onLogin }) {
     } catch (err) { setError(err.message); } finally { setBusy(false); }
   }
   return <main className="vp-auth vp-setup">
-    <aside className="vp-auth-story"><div className="vp-brand">◈ VerifyPass</div><span className="vp-eyebrow">YOUR FIRST VERIFICATION STARTS HERE</span>
+    <aside className="vp-auth-story"><div className="vp-brand">◈ Verix</div><span className="vp-eyebrow">YOUR FIRST VERIFICATION STARTS HERE</span>
       <h1>Know who’s on the other side.</h1><p>Bring identity checks, liveness verification, and your review team into one workspace.</p>
       <ol><li>Create your business workspace</li><li>Connect your verification flow</li><li>Run a test and review the result</li></ol>
       <small>Start in sandbox. Activate production separately when your integration is ready.</small>
     </aside>
     <section className="vp-auth-form"><div className="vp-eyebrow">{signup ? "LET’S GET YOU SET UP" : "WELCOME BACK"}</div>
-      <h1>{signup ? "Create your workspace" : "Sign in to VerifyPass"}</h1>
+      <h1>{signup ? "Create your workspace" : "Sign in to Verix"}</h1>
       <p className="vp-muted">{signup ? "You’ll be the administrator of your business workspace." : "Continue to your workspace and verification activity."}</p>
       <form onSubmit={submit}><fieldset disabled={busy}>
         {signup && <label>Business name<input required minLength={2} maxLength={120} autoComplete="organization" {...field("companyName")} /></label>}
@@ -43,7 +43,7 @@ export default function Auth({ onLogin }) {
         {error && <div className="vp-error" role="alert">{error}</div>}
         <button className="vp-primary vp-wide" type="submit">{busy ? "Please wait…" : signup ? "Create sandbox workspace" : "Sign in"}</button>
       </fieldset></form>
-      <p>{signup ? "Already have an account?" : "New to VerifyPass?"} <button className="vp-link" disabled={busy} onClick={() => { setSignup(!signup); setError(""); setForm({ ...form, password: "", confirm: "", totp: "", tenant: "" }); }}>{signup ? "Sign in" : "Create a workspace"}</button></p>
+      <p>{signup ? "Already have an account?" : "New to Verix?"} <button className="vp-link" disabled={busy} onClick={() => { setSignup(!signup); setError(""); setForm({ ...form, password: "", confirm: "", totp: "", tenant: "" }); }}>{signup ? "Sign in" : "Create a workspace"}</button></p>
       {!signup && <p className="vp-muted"><small>Need access or a password reset? Contact your workspace administrator.</small></p>}
     </section>
   </main>;

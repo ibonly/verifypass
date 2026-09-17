@@ -3,18 +3,18 @@ import 'screens/home_screen.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const VerifyPassSampleApp());
+  runApp(const VerixSampleApp());
 }
 
-class VerifyPassSampleApp extends StatelessWidget {
-  const VerifyPassSampleApp({super.key});
+class VerixSampleApp extends StatelessWidget {
+  const VerixSampleApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     const primaryColor = Color(0xFF6D28D9);
 
     return MaterialApp(
-      title: 'VerifyPass Sample',
+      title: 'Verix Sample',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,

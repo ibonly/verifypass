@@ -50,7 +50,7 @@ module.exports = {
   // the backend directory, NOT process.cwd(), so `node server.js` from
   // backend/ and `node scripts/dev-stack.js` from the repo root share one store.
   evidenceDir: path.resolve(__dirname, "..", process.env.EVIDENCE_DIR || "./evidence-store"),
-  hostedBaseUrl: process.env.HOSTED_BASE_URL || "https://verify.verifypass.com",
+  hostedBaseUrl: process.env.HOSTED_BASE_URL || "https://verify.verix.com",
   // Verification provider the worker runs (mirrors worker.js). The API needs
   // it to issue only challenges the provider can verify: expression actions
   // need 68-point landmarks, which only the ONNX provider supplies.

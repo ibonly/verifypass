@@ -13,8 +13,8 @@ return [
     'enable_render_endpoint' => false,
 
     // Sender mailbox (create in cPanel → Email Accounts).
-    'from'     => ['address' => 'no-reply@yourdomain.com', 'name' => 'VerifyPass'],
-    'reply_to' => ['address' => 'support@yourdomain.com', 'name' => 'VerifyPass Support'],
+    'from'     => ['address' => 'no-reply@yourdomain.com', 'name' => 'Verix'],
+    'reply_to' => ['address' => 'support@yourdomain.com', 'name' => 'Verix Support'],
 
     // Absolute dashboard origin for links (no trailing slash, https).
     'dashboard_url' => 'https://app.yourdomain.com',
@@ -32,8 +32,8 @@ return [
 
     // Branding (neutral, fixed — no tenant-supplied HTML).
     'brand' => [
-        'product' => 'VerifyPass',
-        'legal'   => 'VerifyPass Ltd',
+        'product' => 'Verix',
+        'legal'   => 'Verix Ltd',
         'address' => 'Registered office address',
         'support' => 'https://yourdomain.com/support',
     ],
