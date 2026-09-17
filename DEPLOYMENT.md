@@ -101,10 +101,10 @@ mongodb+srv://verifypass_prod:STRONG_DB_PASSWORD@cluster0.abcde.mongodb.net/veri
 
 ---
 
-## 4. Step 2: AWS Secrets Manager & IAM OIDC Setup
+## 4. Step 2: AWS Systems Manager Parameter Store & IAM OIDC Setup
 
-### 4.1. Create Secrets Manager JSON Secret
-Create an AWS Secrets Manager secret outside Git named `verifypass/production` (or your chosen naming convention).
+### 4.1. Create Systems Manager SecureString Parameter
+Create an AWS Systems Manager Parameter Store parameter outside Git named `/verifypass/production` (or your chosen naming convention).
 
 All keys must be strings inside a single JSON object:
 
@@ -126,12 +126,19 @@ All keys must be strings inside a single JSON object:
   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
   ```
 - `LIVENESS_VALIDATION_RECEIPTS`: JSON-stringified array of evaluation receipts. Each entry maps an effective tenant policy fingerprint to evaluated dataset and report references.
-- **Budget Constraint**: The total JSON secret payload must be under 2,700 bytes to stay within AWS Lambda's 4 KB total environment budget.
+- **Budget Constraint**: The total JSON payload must be under 2,700 bytes to stay within AWS Lambda's 4 KB total environment budget.
 
-#### Record the Secret ARN and Immutable Version:
-After creating or updating the secret, note:
-1. **Secret ARN**: e.g., `arn:aws:secretsmanager:us-east-1:123456789012:secret:verifypass/production-AbCdEf`
-2. **Version ID**: The immutable version UUID (e.g., `4a5b6c7d-8e9f-0123-4567-89abcdef0123`). **Never use `AWSCURRENT`**; the deployment strictly requires explicit, pinned version IDs to guarantee audit reproducibility.
+#### Provision the Parameter with the AWS CLI:
+```bash
+aws ssm put-parameter \
+  --name "/verifypass/production" \
+  --type "SecureString" \
+  --value file://secrets.json
+```
+
+#### Record the Parameter Name and Version:
+1. **Parameter Name**: e.g., `/verifypass/production` (or full ARN: `arn:aws:ssm:us-east-1:123456789012:parameter/verifypass/production`).
+2. **Version**: The immutable integer version number (e.g., `1`, `2`). Pinned version IDs guarantee audit reproducibility and prevent accidental runtime configuration drift.
 
 ---
 
@@ -154,7 +161,7 @@ Restrict the trust policy strictly to your repository and the `production` envir
       "Condition": {
         "StringEquals": {
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-          "token.actions.githubusercontent.com:sub": "repo:YOUR_ORG/YOUR_REPO:environment:production"
+          "token.actions.githubusercontent.com:sub": "repo:YOUR_ORG/YOUR_REPO:environment:prod"
         }
       }
     }
@@ -167,7 +174,7 @@ Attach a policy granting:
 - CloudFormation operations for stack `verifypass`
 - S3 and ECR operations for SAM deployment artifacts
 - IAM `PassRole` and `CreateRole` for the Lambda execution roles defined in `backend/template.yaml`
-- Secrets Manager `GetSecretValue` on the specific secret ARN
+- SSM Parameter Store `GetParameter` on the specific parameter ARN (and KMS decrypt if using a custom key)
 - Lambda `InvokeFunction` on `WorkerFunction` for post-deploy health smoke checks
 
 ---
@@ -291,8 +298,8 @@ Configure the following variables in GitHub (under **Settings > Secrets and vari
 | `CORS_ORIGINS` | Environment | `https://app.example.com,https://verify.example.com` | Comma-separated allowed origins (no wildcards). |
 | `AWS_REGION` | Environment | `us-east-1` | Target AWS region. |
 | `AWS_STACK_NAME` | Environment | `verifypass` | CloudFormation SAM stack name. |
-| `AWS_RUNTIME_SECRET_ARN` | Environment | `arn:aws:secretsmanager:...` | Secrets Manager JSON secret ARN. |
-| `AWS_RUNTIME_SECRET_VERSION` | Environment | `4a5b6c7d-8e9f-...` | Immutable Secrets Manager version ID. |
+| `AWS_PARAMETER_NAME` | Environment | `/verifypass/production` | Systems Manager Parameter Store parameter name or ARN. |
+| `AWS_PARAMETER_VERSION` | Environment | `1` | Pinned Parameter Store integer version number. |
 | `PROVIDER_MODEL_VERSION` | Environment | `onnx-2026-07` | Pinned biometrics model version label. |
 | `SCHEMA_CHANGE_APPROVED` | Environment | `true` | Must be `true` to approve backward-compatible Prisma push. |
 | `CPANEL_SSH_HOST` | Environment | `cpanel.example.com` | Hostname or IP of the cPanel server. |
@@ -426,7 +433,7 @@ bash /home/accountuser/verifypass/cpanel-remote.sh rollback verifypass <FAILED_R
 
 ### Restoring Previous AWS Release
 To revert AWS Lambda to a previous version:
-1. Update `AWS_RUNTIME_SECRET_VERSION` in GitHub Environment variables to the version ID associated with the prior commit.
+1. Update `AWS_PARAMETER_VERSION` in GitHub Environment variables to the version number associated with the prior commit.
 2. Re-run `.github/workflows/release.yml` on the previous known-good Git commit.
 
 ---
@@ -452,12 +459,12 @@ The SAM stack configures EventBridge schedules to run automated maintenance agai
 - **Rotating `EMAIL_API_KEY`**:
   1. Generate a new 32+ character random key.
   2. Update `/home/accountuser/verifypass/shared/email-config.php` on cPanel.
-  3. Create a new version of the AWS Secrets Manager secret with the matching `EMAIL_API_KEY`.
-  4. Update `AWS_RUNTIME_SECRET_VERSION` in GitHub and deploy.
+  3. Put a new version of the AWS Systems Manager parameter with the updated `EMAIL_API_KEY`.
+  4. Update `AWS_PARAMETER_VERSION` in GitHub and deploy.
 - **Rotating `EVIDENCE_ENCRYPTION_KEY`**:
   - **Warning**: Do not rotate `EVIDENCE_ENCRYPTION_KEY` in place without running an offline re-encryption script against existing S3 evidence objects. Old evidence encrypted under the prior key will become unreadable.
 - **Rotating Biometrics Models (`PROVIDER_MODEL_VERSION`)**:
   1. Upload new model files and compute SHA-256 digests.
   2. Run calibration dataset evaluation (`node backend/scripts/evaluate-liveness-dataset.js`).
-  3. Generate new policy validation receipts and update `LIVENESS_VALIDATION_RECEIPTS` in Secrets Manager.
-  4. Update `PROVIDER_MODEL_VERSION` variable and deploy.
+  3. Generate new policy validation receipts and update `LIVENESS_VALIDATION_RECEIPTS` in Parameter Store.
+  4. Update `AWS_PARAMETER_VERSION` and `PROVIDER_MODEL_VERSION` variables, then deploy.

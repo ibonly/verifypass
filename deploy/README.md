@@ -6,7 +6,7 @@ Every push to `main` (or a manual run on `main`) runs `Production release`:
 
 1. Run backend/shared/SDK/dashboard tests, Playwright desktop/mobile checks, PHP mailer tests, workflow lint and SAM template lint.
 2. Build and retain one cPanel artifact identified by the commit SHA. The artifact contains dashboard, verification page, standalone SDK and PHP mailer code. It excludes the sample harness, mail credentials, state and environment files.
-3. Approve the production environment. Validate configuration, load one immutable Secrets Manager version, apply an approved backward-compatible MongoDB schema update, and run `release:check` against the matching runtime/policy receipts.
+3. Approve the production environment. Validate configuration, load one immutable Systems Manager Parameter Store version, apply an approved backward-compatible MongoDB schema update, and run `release:check` against the matching runtime/policy receipts.
 4. Build digest-pinned Node 22 Lambda images with locked dependencies, deploy SAM with CloudFormation rollback enabled, then check worker database/model readiness, API commit identity and CORS.
 5. Stage the CI artifact on cPanel over host-key-verified SSH/SCP, validate PHP configuration, atomically switch the shared `current` symlink, and run release identity, mailer health and desktop/mobile browser smoke checks. A smoke failure restores the prior cPanel release.
 
@@ -14,16 +14,16 @@ The entire production release is serialized and is not cancelled by newer pushes
 
 ## GitHub Configuration
 
-Create a `production` environment with required reviewers and deployment branches restricted to `main`. Protect `main` with PR reviews and required CI checks (`backend`, `frontend`, `infrastructure`); disable direct unreviewed pushes. Configure the `demo` environment separately and restrict access to its artifacts. These repository settings are not provisioned by workflow YAML.
+Create a `prod` environment with deployment branches restricted to `main` (and optional required reviewers). Protect `main` with PR reviews and required CI checks (`backend`, `frontend`, `infrastructure`); disable direct unreviewed pushes. Configure the `demo` environment separately and restrict access to its artifacts. These repository settings are not provisioned by workflow YAML.
 
-Set the following GitHub repository variables (or production environment variables, except `API_PUBLIC_URL`, which must also be available at repository scope for CI builds). Do not override the repository API URL with a different environment value: artifact validation will reject it.
+Set the following GitHub repository variables (or `prod` environment variables, except `API_PUBLIC_URL`, which must also be available at repository scope for CI builds). Do not override the repository API URL with a different environment value: artifact validation will reject it.
 
 | Variable | Purpose |
 | --- | --- |
 | `AWS_REGION` | Existing AWS region, e.g. `us-east-1` |
 | `AWS_STACK_NAME` | Existing SAM stack name, e.g. `verifypass` |
-| `AWS_RUNTIME_SECRET_ARN` | Existing Secrets Manager JSON secret ARN |
-| `AWS_RUNTIME_SECRET_VERSION` | Exact immutable version ID, not `AWSCURRENT` |
+| `AWS_PARAMETER_NAME` | Systems Manager Parameter Store parameter name/path (e.g. `/verifypass/production`) or ARN |
+| `AWS_PARAMETER_VERSION` | Exact immutable integer version (e.g. `1`, `2`) |
 | `API_PUBLIC_URL` | Stable HTTPS API origin; used by both builds and Lambda |
 | `HOSTED_BASE_URL` | HTTPS verification subdomain origin |
 | `DASHBOARD_URL` | HTTPS dashboard subdomain origin |
@@ -38,22 +38,29 @@ Set the following GitHub repository variables (or production environment variabl
 
 GitHub secrets:
 
-- `AWS_DEPLOY_ROLE_ARN`: role assumed through GitHub OIDC. Restrict its trust policy audience to `sts.amazonaws.com` and subject to `repo:OWNER/REPO:environment:production`; environment branch restrictions enforce `main`. Do not grant a repository-wide wildcard subject.
+- `AWS_DEPLOY_ROLE_ARN`: role assumed through GitHub OIDC. Restrict its trust policy audience to `sts.amazonaws.com` and subject to `repo:OWNER/REPO:environment:prod`; environment branch restrictions enforce `main`. Do not grant a repository-wide wildcard subject.
 - `CPANEL_SSH_KEY`: dedicated unencrypted deployment key authorized only on the target hosting account. Do not reuse personal keys.
 - `CPANEL_KNOWN_HOSTS`: host key verified with your hosting provider out-of-band. Include the bracketed `[hostname]:port` entry for non-default ports. The workflow never trusts a fresh `ssh-keyscan` response automatically.
 
-The deploy role needs scoped CloudFormation/SAM artifact ECR/S3 operations, the required IAM role creation/pass-role permissions for this stack, read access to the configured secret version (and KMS decrypt if applicable), stack descriptions and invocation of this stack's worker. Do not use AdministratorAccess as the final policy. CloudFormation must be able to resolve the dynamic secret references. Confirm the exact policy in the target AWS account before deployment.
+The deploy role needs scoped CloudFormation/SAM artifact ECR/S3 operations, the required IAM role creation/pass-role permissions for this stack, read access to the configured SSM parameter version (`ssm:GetParameter` and KMS decrypt if applicable), stack descriptions and invocation of this stack's worker. Do not use AdministratorAccess as the final policy. Confirm the exact policy in the target AWS account before deployment.
 
-## Runtime Secret
+## Runtime Configuration & Secrets (AWS Systems Manager Parameter Store)
 
-Create the AWS Secrets Manager JSON secret outside Git. All values below are strings:
+Create the AWS Systems Manager Parameter Store parameter outside Git (type `SecureString` recommended, or `String`). All keys inside the JSON string value are strings:
+
+```bash
+aws ssm put-parameter \
+  --name "/verifypass/production" \
+  --type "SecureString" \
+  --value file://secrets.json
+```
 
 - `DATABASE_URL`: TLS MongoDB replica-set or sharded connection string. Set `maxPoolSize` explicitly between 1 and 10, normally 5. `mongodb://` requires `tls=true`; insecure TLS overrides are rejected.
 - `SDK_TOKEN_SECRET`, `AUTH_TOKEN_SECRET`, `EMAIL_API_KEY`: independent random values of at least 32 characters. `EMAIL_API_KEY` must match cPanel's mailer HMAC key.
 - `EVIDENCE_ENCRYPTION_KEY`: the existing 64-character hex key. Never replace it without an evidence-key migration plan.
 - `LIVENESS_VALIDATION_RECEIPTS`: a JSON-array string containing the real matching fingerprints, dataset references and evaluation references. Do not fabricate receipts or bypass the gate.
 
-Generate receipts with the final source digest and the exact production runtime configuration (`VP_PROVIDER=onnx` and the configured `PROVIDER_MODEL_VERSION` included). Changing this code, thresholds, tenant policies, model hashes or relevant runtime settings requires matching evaluation evidence. Update `AWS_RUNTIME_SECRET_VERSION` to the reviewed secret version before releasing. Version pinning ensures validation and Lambda resolve the same values.
+Generate receipts with the final source digest and the exact production runtime configuration (`VP_PROVIDER=onnx` and the configured `PROVIDER_MODEL_VERSION` included). Changing this code, thresholds, tenant policies, model hashes or relevant runtime settings requires matching evaluation evidence. Update `AWS_PARAMETER_VERSION` to the reviewed parameter version before releasing. Version pinning ensures validation and Lambda resolve the same values.
 
 Lambda has a 4 KB total environment limit. Deployment checks reserve overhead and reject oversized secret/receipt sets. If the tenant count makes receipts exceed this budget, external receipt storage is a required separate migration; do not truncate receipts or weaken validation.
 

@@ -8,7 +8,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    environment: production
+    environment: prod
     env:
       CPANEL_SSH_HOST: ${{ vars.CPANEL_SSH_HOST }}
       CPANEL_SSH_PORT: ${{ vars.CPANEL_SSH_PORT }}

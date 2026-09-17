@@ -7,8 +7,9 @@ const { awsConfig, runtimeSecret } = require("./config.cjs");
 
 async function main() {
   const config = awsConfig();
-  const secretResponse = JSON.parse(execFileSync("aws", ["secretsmanager", "get-secret-value", "--secret-id", config.secretArn, "--version-id", config.secretVersion, "--output", "json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
-  const raw = JSON.parse(secretResponse.SecretString);
+  const target = `${config.parameterName}:${config.parameterVersion}`;
+  const paramResponse = JSON.parse(execFileSync("aws", ["ssm", "get-parameter", "--name", target, "--with-decryption", "--output", "json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+  const raw = JSON.parse(paramResponse.Parameter.Value);
   for (const value of Object.values(raw)) {
     if (typeof value === "string" && process.env.GITHUB_ACTIONS) console.log(`::add-mask::${value.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A")}`);
   }
@@ -23,13 +24,32 @@ async function main() {
   run(process.execPath, ["scripts/check-liveness-release.js"], { cwd: backend, env });
   run("sam", ["build", "--no-use-container", "-t", "backend/template.yaml"]);
   const parameters = {
-    RuntimeSecretArn: config.secretArn, RuntimeSecretVersion: config.secretVersion,
-    BuildCommit: config.commit, CorsOrigins: config.cors.join(","),
-    ApiPublicUrl: config.API_PUBLIC_URL, HostedBaseUrl: config.HOSTED_BASE_URL,
-    DashboardUrl: config.DASHBOARD_URL, EmailApiUrl: config.EMAIL_API_URL,
-    ProviderModelVersion: config.modelVersion, ApiReservedConcurrency: "10"
+    DatabaseUrl: secrets.DATABASE_URL,
+    SdkTokenSecret: secrets.SDK_TOKEN_SECRET,
+    AuthTokenSecret: secrets.AUTH_TOKEN_SECRET,
+    EvidenceEncryptionKey: secrets.EVIDENCE_ENCRYPTION_KEY,
+    LivenessValidationReceipts: secrets.LIVENESS_VALIDATION_RECEIPTS,
+    EmailApiKey: secrets.EMAIL_API_KEY,
+    BuildCommit: config.commit,
+    CorsOrigins: config.cors.join(","),
+    ApiPublicUrl: config.API_PUBLIC_URL,
+    HostedBaseUrl: config.HOSTED_BASE_URL,
+    DashboardUrl: config.DASHBOARD_URL,
+    EmailApiUrl: config.EMAIL_API_URL,
+    ProviderModelVersion: config.modelVersion,
+    ApiReservedConcurrency: "10"
   };
-  run("sam", ["deploy", "--stack-name", config.stack, "--resolve-s3", "--resolve-image-repos", "--no-confirm-changeset", "--no-fail-on-empty-changeset", "--capabilities", "CAPABILITY_IAM", "--parameter-overrides", ...Object.entries(parameters).map(([name, value]) => `${name}=${value}`)]);
+  run("sam", [
+    "deploy",
+    "--stack-name", config.stack,
+    "--resolve-s3",
+    "--resolve-image-repos",
+    "--no-confirm-changeset",
+    "--no-fail-on-empty-changeset",
+    "--capabilities", "CAPABILITY_IAM",
+    "--parameter-overrides",
+    ...Object.entries(parameters).map(([name, value]) => `${name}="${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`)
+  ]);
   const stack = JSON.parse(execFileSync("aws", ["cloudformation", "describe-stacks", "--stack-name", config.stack, "--output", "json"], { encoding: "utf8" })).Stacks[0];
   const outputs = Object.fromEntries(stack.Outputs.map(output => [output.OutputKey, output.OutputValue]));
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "vp-smoke-"));

@@ -18,8 +18,8 @@ function awsConfig(env = process.env) {
   const config = {
     stack: required(env, "STACK_NAME", /^[A-Za-z][A-Za-z0-9-]{0,127}$/),
     region: required(env, "AWS_REGION", /^[a-z]{2}(?:-gov)?-[a-z]+-\d$/),
-    secretArn: required(env, "RUNTIME_SECRET_ARN", /^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:\d{12}:secret:[A-Za-z0-9/_+=.@-]+$/),
-    secretVersion: required(env, "RUNTIME_SECRET_VERSION", /^[A-Za-z0-9-]{32,64}$/),
+    parameterName: required({ ...env, AWS_PARAMETER_NAME: env.AWS_PARAMETER_NAME || env.RUNTIME_PARAMETER_NAME }, "AWS_PARAMETER_NAME", /^(?:\/[A-Za-z0-9_.-]+)+$|^arn:aws[a-z-]*:ssm:[a-z0-9-]+:\d{12}:parameter\/[A-Za-z0-9/_.-]+$/),
+    parameterVersion: required({ ...env, AWS_PARAMETER_VERSION: env.AWS_PARAMETER_VERSION || env.RUNTIME_PARAMETER_VERSION }, "AWS_PARAMETER_VERSION", /^[1-9][0-9]*$/),
     commit: required(env, "BUILD_COMMIT", /^[a-f0-9]{40}$/),
     modelVersion: required(env, "PROVIDER_MODEL_VERSION", /^[A-Za-z0-9._-]{1,100}$/)
   };
