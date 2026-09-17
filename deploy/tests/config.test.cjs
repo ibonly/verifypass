@@ -26,6 +26,17 @@ test("fresh deployment works with minimal defaults and auto-detects URLs", () =>
   assert.equal(minimal.API_PUBLIC_URL, null);
   assert.equal(minimal.HOSTED_BASE_URL, "https://verify.verix.invalid");
   assert.equal(minimal.cors.length, 2);
+
+  // Literal quotes in GitHub Actions environment variables should be stripped cleanly
+  const quoted = awsConfig({
+    ...env,
+    API_PUBLIC_URL: "''",
+    HOSTED_BASE_URL: "'https://verify.example.com'",
+    DASHBOARD_URL: '"https://app.example.com"'
+  });
+  assert.equal(quoted.API_PUBLIC_URL, null);
+  assert.equal(quoted.HOSTED_BASE_URL, "https://verify.example.com");
+  assert.equal(quoted.DASHBOARD_URL, "https://app.example.com");
 });
 test("deployment URLs reject credentials, paths, HTTP and query data", () => {
   for (const value of ["http://api.example.com", "https://name:secret@api.example.com", "https://api.example.com/path", "https://api.example.com?q=x", "https://api.example.com\\x"]) assert.throws(() => origin(value));
