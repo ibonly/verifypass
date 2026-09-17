@@ -1,22 +1,40 @@
 "use strict";
 
+function stripQuotes(value) {
+  if (typeof value !== "string") return value;
+  let trimmed = value.trim();
+  if ((trimmed.startsWith("'") && trimmed.endsWith("'")) || (trimmed.startsWith('"') && trimmed.endsWith('"'))) {
+    trimmed = trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
 function required(env, name, pattern) {
-  const value = env[name];
+  let value = env[name];
+  if (typeof value === "string") value = stripQuotes(value);
   if (typeof value !== "string" || !value || (pattern && !pattern.test(value))) throw new Error(`Invalid or missing ${name}`);
   return value;
 }
 
 function origin(value, name = "URL") {
-  const parsed = new URL(value);
-  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash || !["", "/"].includes(parsed.pathname) || /[\s\\]/.test(value)) {
+  const cleaned = stripQuotes(value);
+  let parsed;
+  try {
+    parsed = new URL(cleaned);
+  } catch {
+    throw new Error(`${name} must be a valid HTTPS URL (received: ${JSON.stringify(value)})`);
+  }
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash || !["", "/"].includes(parsed.pathname) || /[\s\\]/.test(cleaned)) {
     throw new Error(`${name} must be an HTTPS origin without credentials or a path`);
   }
   return parsed.origin;
 }
 
 function optionalOrigin(value, fallback = null, name = "URL") {
-  if (!value || typeof value !== "string" || !value.trim()) return fallback;
-  return origin(value.trim(), name);
+  if (!value || typeof value !== "string") return fallback;
+  const cleaned = stripQuotes(value);
+  if (!cleaned || cleaned === "null" || cleaned === "undefined") return fallback;
+  return origin(cleaned, name);
 }
 
 function awsConfig(env = process.env) {
@@ -41,19 +59,24 @@ function awsConfig(env = process.env) {
   config.DASHBOARD_URL = optionalOrigin(env.DASHBOARD_URL, `https://app.${config.stack}.invalid`, "DASHBOARD_URL");
   config.EMAIL_API_URL = optionalOrigin(env.EMAIL_API_URL, `https://mail.${config.stack}.invalid`, "EMAIL_API_URL");
 
-  if (env.CORS_ORIGINS && env.CORS_ORIGINS.trim()) {
-    config.cors = env.CORS_ORIGINS.split(",").map(value => origin(value.trim(), "CORS_ORIGINS"));
-    if (env.HOSTED_BASE_URL && !config.cors.includes(config.HOSTED_BASE_URL)) {
-      throw new Error("CORS_ORIGINS must include HOSTED_BASE_URL");
-    }
-    if (env.DASHBOARD_URL && !config.cors.includes(config.DASHBOARD_URL)) {
-      throw new Error("CORS_ORIGINS must include DASHBOARD_URL");
+  if (env.CORS_ORIGINS && typeof env.CORS_ORIGINS === "string" && env.CORS_ORIGINS.trim()) {
+    const cleanedCors = stripQuotes(env.CORS_ORIGINS);
+    if (cleanedCors) {
+      config.cors = cleanedCors.split(",").map(value => value.trim()).filter(Boolean).map(value => origin(value, "CORS_ORIGINS"));
+      if (config.HOSTED_BASE_URL && !config.cors.includes(config.HOSTED_BASE_URL)) {
+        throw new Error("CORS_ORIGINS must include HOSTED_BASE_URL");
+      }
+      if (config.DASHBOARD_URL && !config.cors.includes(config.DASHBOARD_URL)) {
+        throw new Error("CORS_ORIGINS must include DASHBOARD_URL");
+      }
+    } else {
+      config.cors = [config.HOSTED_BASE_URL, config.DASHBOARD_URL];
     }
   } else {
     config.cors = [config.HOSTED_BASE_URL, config.DASHBOARD_URL];
   }
 
-  const schemaApproved = env.SCHEMA_CHANGE_APPROVED !== undefined ? env.SCHEMA_CHANGE_APPROVED : "true";
+  const schemaApproved = env.SCHEMA_CHANGE_APPROVED !== undefined ? stripQuotes(String(env.SCHEMA_CHANGE_APPROVED)) : "true";
   if (schemaApproved !== "true") throw new Error("Approve a backward-compatible schema rollout with SCHEMA_CHANGE_APPROVED=true");
 
   return config;
