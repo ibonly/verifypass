@@ -38,7 +38,7 @@ Set the following GitHub repository variables (or `prod` environment variables, 
 
 GitHub secrets:
 
-- `AWS_DEPLOY_ROLE_ARN`: role assumed through GitHub OIDC. Restrict its trust policy audience to `sts.amazonaws.com` and subject to `repo:OWNER/REPO:environment:prod`; environment branch restrictions enforce `main`. Do not grant a repository-wide wildcard subject.
+- `AWS_DEPLOY_ROLE_ARN`: optional if you store the deploy role ARN as a GitHub variable instead. The workflow accepts either source. Restrict its trust policy audience to `sts.amazonaws.com` and subject to `repo:OWNER/REPO:environment:prod`; environment branch restrictions enforce `main`. Do not grant a repository-wide wildcard subject.
 - `CPANEL_SSH_KEY`: dedicated unencrypted deployment key authorized only on the target hosting account. Do not reuse personal keys.
 - `CPANEL_KNOWN_HOSTS`: host key verified with your hosting provider out-of-band. Include the bracketed `[hostname]:port` entry for non-default ports. The workflow never trusts a fresh `ssh-keyscan` response automatically.
 
