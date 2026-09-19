@@ -313,7 +313,7 @@ Configure the following GitHub Secrets:
 
 | Secret Name | Description |
 |---|---|
-| `AWS_DEPLOY_ROLE_ARN` | Full ARN of the IAM OIDC deployment role (e.g. `arn:aws:iam::123456789012:role/VerixDeployRole`). |
+| `AWS_DEPLOY_ROLE_ARN` | Full ARN of the IAM OIDC deployment role (e.g. `arn:aws:iam::123456789012:role/VerixDeployRole`). The workflow accepts this as either a secret or a variable. |
 | `CPANEL_SSH_KEY` | Private Ed25519 SSH deployment key content. |
 | `CPANEL_KNOWN_HOSTS` | Pre-verified `known_hosts` single-line entry. |
 
