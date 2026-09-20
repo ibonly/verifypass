@@ -53,5 +53,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
+      - name: Validate AWS runtime parameter
+        run: node deploy/runtime-parameter.cjs
       - name: Validate, synchronize compatible schema, and deploy
         run: node deploy/aws.cjs

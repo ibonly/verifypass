@@ -3,11 +3,11 @@ const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { awsConfig, runtimeSecret } = require("./config.cjs");
+const { awsConfig } = require("./config.cjs");
+const { parameterTarget, validateRuntimeParameter } = require("./runtime-parameter.cjs");
 
 async function main() {
   const config = awsConfig();
-  const target = `${config.parameterName}:${config.parameterVersion}`;
   const step = (name, fn) => {
     console.log(`\n==> ${name}`);
     try {
@@ -24,16 +24,7 @@ async function main() {
       throw error;
     }
   };
-  const paramResponse = JSON.parse(step("Load runtime secrets from SSM Parameter Store", () => execFileSync("aws", ["ssm", "get-parameter", "--name", target, "--with-decryption", "--output", "json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })));
-  const raw = step("Parse runtime secret JSON", () => JSON.parse(paramResponse.Parameter.Value));
-  for (const value of Object.values(raw)) {
-    if (typeof value === "string" && process.env.GITHUB_ACTIONS) console.log(`::add-mask::${value.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A")}`);
-  }
-  const secrets = step("Validate runtime secret shape", () => runtimeSecret(raw));
-  step("Check Lambda runtime environment budget", () => {
-    const runtimeBytes = Buffer.byteLength(JSON.stringify({ ...secrets, ...Object.fromEntries(["API_PUBLIC_URL", "HOSTED_BASE_URL", "DASHBOARD_URL", "EMAIL_API_URL"].map(name => [name, config[name]])), CORS_ORIGINS: config.cors.join(","), PROVIDER_MODEL_VERSION: config.modelVersion, BUILD_COMMIT: config.commit }));
-    if (runtimeBytes > 3500) throw new Error("Lambda runtime configuration exceeds its reserved environment budget");
-  });
+  const { secrets } = step(`Validate runtime parameter ${parameterTarget(config)}`, () => validateRuntimeParameter());
   const env = { ...process.env, ...secrets, NODE_ENV: "production", VP_PROVIDER: "onnx", PROVIDER_MODEL_VERSION: config.modelVersion };
   const backend = path.resolve(__dirname, "../backend");
   const run = (command, args, options = {}) => execFileSync(command, args, { stdio: "inherit", ...options });
