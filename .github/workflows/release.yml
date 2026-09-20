@@ -31,3 +31,4 @@ jobs:
     needs: backend
     uses: ./.github/workflows/frontend-deploy.yml
     secrets: inherit
+    
