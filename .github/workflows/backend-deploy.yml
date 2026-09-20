@@ -38,6 +38,17 @@ jobs:
       - run: node backend/scripts/fetch-models.js
       - name: Install SAM before acquiring deployment credentials
         run: pipx install aws-sam-cli==1.145.2
+      - name: Inspect GitHub OIDC Token Claims
+        run: |
+          # Request OIDC token from GitHub's runtime API
+          TOKEN=$(curl -sLS \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')
+
+          # Decode and print the JWT payload (base64url to JSON)
+          echo "=== Decoded OIDC Token Payload ==="
+          echo "$TOKEN" | awk -F. '{print $2}' | base64 --decode 2>/dev/null | jq . || \
+          echo "$TOKEN" | awk -F. '{print $2}' | tr '_-' '/+' | base64 -d | jq .
       - uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
