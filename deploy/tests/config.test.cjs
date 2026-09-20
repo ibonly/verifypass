@@ -10,11 +10,13 @@ const env = {
 };
 test("production configuration requires explicit matching origins and schema approval", () => {
   assert.equal(awsConfig(env).stack, "verix");
+  assert.equal(awsConfig(env).apiReservedConcurrency, "0");
   assert.equal(awsConfig(env).parameterName, "/verix/production");
   assert.equal(awsConfig(env).parameterVersion, "1");
   assert.equal(awsConfig({ ...env, STACK_NAME: "verifypass", AWS_PARAMETER_NAME: "/verifypass/production" }).stack, "verifypass");
   assert.equal(awsConfig({ ...env, AWS_PARAMETER_NAME: "arn:aws:ssm:us-east-1:123456789012:parameter/verix/production" }).parameterName, "arn:aws:ssm:us-east-1:123456789012:parameter/verix/production");
-  for (const changed of [{ CORS_ORIGINS: "https://other.example.com", HOSTED_BASE_URL: "https://verify.example.com" }, { STACK_NAME: 'stack";exit 0' }, { SCHEMA_CHANGE_APPROVED: "" }, { AWS_PARAMETER_NAME: "invalid-no-slash" }, { AWS_PARAMETER_VERSION: "0" }, { AWS_PARAMETER_VERSION: "latest" }]) assert.throws(() => awsConfig({ ...env, ...changed }));
+  assert.equal(awsConfig({ ...env, API_RESERVED_CONCURRENCY: "10" }).apiReservedConcurrency, "10");
+  for (const changed of [{ CORS_ORIGINS: "https://other.example.com", HOSTED_BASE_URL: "https://verify.example.com" }, { STACK_NAME: 'stack";exit 0' }, { SCHEMA_CHANGE_APPROVED: "" }, { AWS_PARAMETER_NAME: "invalid-no-slash" }, { AWS_PARAMETER_VERSION: "0" }, { AWS_PARAMETER_VERSION: "latest" }, { API_RESERVED_CONCURRENCY: "-1" }, { API_RESERVED_CONCURRENCY: "ten" }]) assert.throws(() => awsConfig({ ...env, ...changed }));
 });
 test("fresh deployment works with minimal defaults and auto-detects URLs", () => {
   const minimal = awsConfig({

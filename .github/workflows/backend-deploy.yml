@@ -24,6 +24,7 @@ jobs:
       EMAIL_API_URL: ${{ vars.EMAIL_API_URL }}
       CORS_ORIGINS: ${{ vars.CORS_ORIGINS }}
       PROVIDER_MODEL_VERSION: ${{ vars.PROVIDER_MODEL_VERSION }}
+      API_RESERVED_CONCURRENCY: ${{ vars.API_RESERVED_CONCURRENCY }}
       SCHEMA_CHANGE_APPROVED: ${{ vars.SCHEMA_CHANGE_APPROVED }}
       BUILD_COMMIT: ${{ github.sha }}
     steps:

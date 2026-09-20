@@ -3,7 +3,7 @@ const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { awsConfig } = require("./config.cjs");
+const { awsConfig, origin } = require("./config.cjs");
 const { parameterTarget, validateRuntimeParameter } = require("./runtime-parameter.cjs");
 
 async function main() {
@@ -56,7 +56,7 @@ async function main() {
     DashboardUrl: config.DASHBOARD_URL,
     EmailApiUrl: config.EMAIL_API_URL,
     ProviderModelVersion: config.modelVersion,
-    ApiReservedConcurrency: "10"
+    ApiReservedConcurrency: config.apiReservedConcurrency
   };
   step("Deploy SAM stack", () => run("sam", [
     "deploy",

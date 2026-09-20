@@ -44,6 +44,7 @@ function awsConfig(env = process.env) {
   const parameterVersion = env.AWS_PARAMETER_VERSION || env.RUNTIME_PARAMETER_VERSION || null;
   const commit = env.BUILD_COMMIT || env.GITHUB_SHA || "0000000000000000000000000000000000000000";
   const modelVersion = env.PROVIDER_MODEL_VERSION || "onnx-2026-07";
+  const apiReservedConcurrency = env.API_RESERVED_CONCURRENCY || "0";
 
   const config = {
     stack: required({ STACK_NAME: stack }, "STACK_NAME", /^[A-Za-z][A-Za-z0-9-]{0,127}$/),
@@ -51,7 +52,8 @@ function awsConfig(env = process.env) {
     parameterName: required({ AWS_PARAMETER_NAME: parameterName }, "AWS_PARAMETER_NAME", /^(?:\/[A-Za-z0-9_.-]+)+$|^arn:aws[a-z-]*:ssm:[a-z0-9-]+:\d{12}:parameter\/[A-Za-z0-9/_.-]+$/),
     parameterVersion: parameterVersion ? required({ AWS_PARAMETER_VERSION: parameterVersion }, "AWS_PARAMETER_VERSION", /^[1-9][0-9]*$/) : null,
     commit: required({ BUILD_COMMIT: commit }, "BUILD_COMMIT", /^[a-f0-9]{40}$/),
-    modelVersion: required({ PROVIDER_MODEL_VERSION: modelVersion }, "PROVIDER_MODEL_VERSION", /^[A-Za-z0-9._-]{1,100}$/)
+    modelVersion: required({ PROVIDER_MODEL_VERSION: modelVersion }, "PROVIDER_MODEL_VERSION", /^[A-Za-z0-9._-]{1,100}$/),
+    apiReservedConcurrency: required({ API_RESERVED_CONCURRENCY: apiReservedConcurrency }, "API_RESERVED_CONCURRENCY", /^(?:0|[1-9][0-9]*)$/)
   };
 
   config.API_PUBLIC_URL = optionalOrigin(env.API_PUBLIC_URL, null, "API_PUBLIC_URL");
