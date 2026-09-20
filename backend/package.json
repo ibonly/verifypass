@@ -34,5 +34,5 @@
     "prisma": "^5.16.0",
     "supertest": "^7.0.0"
   },
-  "description": "VerifyPass backend \u2014 API + verification worker as one Lambda-ready service"
+  "description": "VerifyPass backend \u2014 API + verification worker as one Lambda-ready service."
 }

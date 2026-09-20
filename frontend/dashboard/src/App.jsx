@@ -11,7 +11,7 @@ const STATUS_COLORS = {
   delivered: "#059669", pending: "#D97706", exhausted: "#DC2626"
 };
 
-// Human-readable labels for decision reason codes
+// Human-readable labels for decision reason codes.
 const REASON_LABELS = {
   SESSION_EXPIRED: "Session expired before submission",
   LIVENESS_POLICY_UNVERIFIED: "Liveness policy requires validation for automatic approval",

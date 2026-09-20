@@ -7,7 +7,7 @@ return [
     'api_key' => 'CHANGE_ME_32_RANDOM_CHARS_MIN',
 
     // HTTPS is mandatory in production. Only trust forwarded protocol headers
-    // from explicitly listed reverse-proxy IPs; leave empty for direct cPanel TLS.
+    // from explicitly listed reverse-proxy IPs; leave empty for direct cPanel. TLS.
     'require_https' => true,
     'trusted_proxies' => [],
     'enable_render_endpoint' => false,
