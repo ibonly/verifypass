@@ -5,7 +5,7 @@ import { VerifyPassProvider, VerificationWidget } from "@verifypass/react";
 // normally plays (creating a session with the secret key), then hands the
 // self-locating sdkToken to the browser widget for DEVICE CAMERA capture.
 //
-// SECURITY NOTE: a real integration NEVER puts the secret key in the browser —
+// SECURITY NOTE: a real integration NEVER puts the secret key in the browser —.
 // the backend creates the session and passes only { sessionId, sdkToken } to
 // the client. The sdkToken embeds the API origin, so the widget does not need a
 // baseUrl. This app takes the secret key at runtime purely for local testing.

@@ -7,7 +7,7 @@ failure. The `webhook.test` delivery `evt_5f3765f9180be30e88320639` succeeded on
 its first attempt with HTTP 200. However, the latest actual verification events
 belonged to `tnt_1K2AMODQDYZ8QV5RV7ESP`, which had no webhook configuration.
 The configured endpoint and the `admin@demo.local` account belonged to
-`tnt_1K1DGQ9UPXV7WD9JWBMZ7`.
+`tnt_1K1DGQ9UPXV7WD9JWBMZ7`..
 
 The root cause was `scripts/setup-inhouse.js`: it could create/reuse credentials
 for a new tenant while accepting existing demo users solely by email, without
