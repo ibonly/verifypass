@@ -8,25 +8,43 @@ const { awsConfig, runtimeSecret } = require("./config.cjs");
 async function main() {
   const config = awsConfig();
   const target = `${config.parameterName}:${config.parameterVersion}`;
-  const paramResponse = JSON.parse(execFileSync("aws", ["ssm", "get-parameter", "--name", target, "--with-decryption", "--output", "json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
-  const raw = JSON.parse(paramResponse.Parameter.Value);
+  const step = (name, fn) => {
+    console.log(`\n==> ${name}`);
+    try {
+      const result = fn();
+      if (result && typeof result.then === "function") {
+        return result.catch(error => {
+          error.deployStep = name;
+          throw error;
+        });
+      }
+      return result;
+    } catch (error) {
+      error.deployStep = name;
+      throw error;
+    }
+  };
+  const paramResponse = JSON.parse(step("Load runtime secrets from SSM Parameter Store", () => execFileSync("aws", ["ssm", "get-parameter", "--name", target, "--with-decryption", "--output", "json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })));
+  const raw = step("Parse runtime secret JSON", () => JSON.parse(paramResponse.Parameter.Value));
   for (const value of Object.values(raw)) {
     if (typeof value === "string" && process.env.GITHUB_ACTIONS) console.log(`::add-mask::${value.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A")}`);
   }
-  const secrets = runtimeSecret(raw);
-  const runtimeBytes = Buffer.byteLength(JSON.stringify({ ...secrets, ...Object.fromEntries(["API_PUBLIC_URL", "HOSTED_BASE_URL", "DASHBOARD_URL", "EMAIL_API_URL"].map(name => [name, config[name]])), CORS_ORIGINS: config.cors.join(","), PROVIDER_MODEL_VERSION: config.modelVersion, BUILD_COMMIT: config.commit }));
-  if (runtimeBytes > 3500) throw new Error("Lambda runtime configuration exceeds its reserved environment budget");
+  const secrets = step("Validate runtime secret shape", () => runtimeSecret(raw));
+  step("Check Lambda runtime environment budget", () => {
+    const runtimeBytes = Buffer.byteLength(JSON.stringify({ ...secrets, ...Object.fromEntries(["API_PUBLIC_URL", "HOSTED_BASE_URL", "DASHBOARD_URL", "EMAIL_API_URL"].map(name => [name, config[name]])), CORS_ORIGINS: config.cors.join(","), PROVIDER_MODEL_VERSION: config.modelVersion, BUILD_COMMIT: config.commit }));
+    if (runtimeBytes > 3500) throw new Error("Lambda runtime configuration exceeds its reserved environment budget");
+  });
   const env = { ...process.env, ...secrets, NODE_ENV: "production", VP_PROVIDER: "onnx", PROVIDER_MODEL_VERSION: config.modelVersion };
   const backend = path.resolve(__dirname, "../backend");
   const run = (command, args, options = {}) => execFileSync(command, args, { stdio: "inherit", ...options });
-  run("sam", ["validate", "--lint", "-t", "backend/template.yaml"]);
-  run(path.join(backend, "node_modules/.bin/prisma"), ["db", "push", "--schema", "prisma/schema.prisma", "--skip-generate"], { cwd: backend, env });
-  run(process.execPath, ["scripts/check-liveness-release.js"], { cwd: backend, env });
-  run("sam", ["build", "--no-use-container", "-t", "backend/template.yaml"]);
+  step("Validate SAM template", () => run("sam", ["validate", "--lint", "-t", "backend/template.yaml"]));
+  step("Synchronize MongoDB schema", () => run(path.join(backend, "node_modules/.bin/prisma"), ["db", "push", "--schema", "prisma/schema.prisma", "--skip-generate"], { cwd: backend, env }));
+  step("Check liveness release receipts", () => run(process.execPath, ["scripts/check-liveness-release.js"], { cwd: backend, env }));
+  step("Build SAM application", () => run("sam", ["build", "--no-use-container", "-t", "backend/template.yaml"]));
   let apiPublicUrl = config.API_PUBLIC_URL;
   if (!apiPublicUrl) {
     try {
-      const existing = JSON.parse(execFileSync("aws", ["cloudformation", "describe-stacks", "--stack-name", config.stack, "--output", "json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })).Stacks[0];
+      const existing = JSON.parse(step("Detect existing API URL from CloudFormation", () => execFileSync("aws", ["cloudformation", "describe-stacks", "--stack-name", config.stack, "--output", "json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }))).Stacks[0];
       const existingOutputs = Object.fromEntries((existing.Outputs || []).map(o => [o.OutputKey, o.OutputValue]));
       if (existingOutputs.ApiUrl) apiPublicUrl = origin(existingOutputs.ApiUrl, "ApiUrl");
     } catch {
@@ -49,7 +67,7 @@ async function main() {
     ProviderModelVersion: config.modelVersion,
     ApiReservedConcurrency: "10"
   };
-  run("sam", [
+  step("Deploy SAM stack", () => run("sam", [
     "deploy",
     "--stack-name", config.stack,
     "--resolve-s3",
@@ -59,8 +77,8 @@ async function main() {
     "--capabilities", "CAPABILITY_IAM",
     "--parameter-overrides",
     ...Object.entries(parameters).map(([name, value]) => `${name}="${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`)
-  ]);
-  const stack = JSON.parse(execFileSync("aws", ["cloudformation", "describe-stacks", "--stack-name", config.stack, "--output", "json"], { encoding: "utf8" })).Stacks[0];
+  ]));
+  const stack = JSON.parse(step("Read deployed stack outputs", () => execFileSync("aws", ["cloudformation", "describe-stacks", "--stack-name", config.stack, "--output", "json"], { encoding: "utf8" }))).Stacks[0];
   const outputs = Object.fromEntries((stack.Outputs || []).map(output => [output.OutputKey, output.OutputValue]));
   console.log(`\n============================================================`);
   console.log(`🚀 Verix Lambda Function URL: ${outputs.ApiUrl}`);
@@ -69,23 +87,30 @@ async function main() {
   if (process.env.GITHUB_ACTIONS) {
     console.log(`::notice title=Verix API URL::Deployed Lambda Function URL: ${outputs.ApiUrl}`);
   }
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "verix-smoke-"));
-  try {
-    const file = path.join(directory, "worker.json");
-    const invocation = JSON.parse(execFileSync("aws", ["lambda", "invoke", "--function-name", outputs.WorkerFunctionArn, "--cli-binary-format", "raw-in-base64-out", "--payload", '{"type":"health"}', file], { encoding: "utf8" }));
-    const worker = JSON.parse(fs.readFileSync(file));
-    if (invocation.FunctionError || worker.release?.commit !== config.commit || !worker.ok) throw new Error("Deployed worker readiness or release identity failed");
-    const testUrl = origin(outputs.ApiUrl, "ApiUrl");
-    const response = await fetch(testUrl + "/health", { redirect: "error", signal: AbortSignal.timeout(20000) });
-    const health = await response.json();
-    if (!response.ok || health.release?.commit !== config.commit) throw new Error("Public API is not serving the expected release");
-    const activeCors = config.cors.filter(c => !c.endsWith(".invalid"));
-    for (const corsOrigin of activeCors) {
-      const preflight = await fetch(testUrl + "/v1/verification-sessions", { method: "OPTIONS", headers: { Origin: corsOrigin, "Access-Control-Request-Method": "POST" }, redirect: "error", signal: AbortSignal.timeout(15000) });
-      if (!preflight.ok || preflight.headers.get("access-control-allow-origin") !== corsOrigin) throw new Error("Production CORS smoke check failed");
-    }
-  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  await step("Run AWS smoke checks", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "verix-smoke-"));
+    try {
+      const file = path.join(directory, "worker.json");
+      const invocation = JSON.parse(step("Smoke check worker release identity", () => execFileSync("aws", ["lambda", "invoke", "--function-name", outputs.WorkerFunctionArn, "--cli-binary-format", "raw-in-base64-out", "--payload", '{"type":"health"}', file], { encoding: "utf8" })));
+      const worker = JSON.parse(fs.readFileSync(file));
+      if (invocation.FunctionError || worker.release?.commit !== config.commit || !worker.ok) throw new Error("Deployed worker readiness or release identity failed");
+      const testUrl = origin(outputs.ApiUrl, "ApiUrl");
+      const response = await step("Smoke check public API health", () => fetch(testUrl + "/health", { redirect: "error", signal: AbortSignal.timeout(20000) }));
+      const health = await response.json();
+      if (!response.ok || health.release?.commit !== config.commit) throw new Error("Public API is not serving the expected release");
+      const activeCors = config.cors.filter(c => !c.endsWith(".invalid"));
+      for (const corsOrigin of activeCors) {
+        const preflight = await step(`Smoke check CORS preflight for ${corsOrigin}`, () => fetch(testUrl + "/v1/verification-sessions", { method: "OPTIONS", headers: { Origin: corsOrigin, "Access-Control-Request-Method": "POST" }, redirect: "error", signal: AbortSignal.timeout(15000) }));
+        if (!preflight.ok || preflight.headers.get("access-control-allow-origin") !== corsOrigin) throw new Error("Production CORS smoke check failed");
+      }
+    } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  });
   console.log("AWS release, database, worker and CORS smoke checks passed");
 }
 
-main().catch(() => { console.error("AWS release failed. Review the failed step; cPanel promotion is blocked. No secret values are logged here."); process.exitCode = 1; });
+main().catch(error => {
+  if (error.deployStep) console.error(`AWS release failed during: ${error.deployStep}`);
+  if (error.message) console.error(error.message);
+  console.error("AWS release failed. Review the failed step; cPanel promotion is blocked. No secret values are logged here.");
+  process.exitCode = 1;
+});
