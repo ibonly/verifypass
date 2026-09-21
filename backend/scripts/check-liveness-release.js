@@ -28,7 +28,21 @@ const { livenessValidation } = require("../src/lib/livenessValidation");
       ...livenessValidation({ settings: tenant.settings || {}, thresholds: resolveThresholds(tenant.settings || {}, provider), provider })
     }));
     const policyValidated = policies.every(policy => policy.validated);
-    console.log(JSON.stringify({ success: policyValidated, release: releaseIdentity(), transactions: true, modelChecksums: "verified", policyValidated, policies }, null, 2));
+    const missingReceipts = policies.filter(policy => !policy.validated).map(policy => ({
+      fingerprint: policy.fingerprint,
+      dataset: "<dataset-version-or-id>",
+      evaluation: "<evaluation-report-reference>",
+      ...(policy.tenantUid ? { tenantUid: policy.tenantUid } : {})
+    }));
+    console.log(JSON.stringify({
+      success: policyValidated,
+      release: releaseIdentity(),
+      transactions: true,
+      modelChecksums: "verified",
+      policyValidated,
+      policies,
+      ...(missingReceipts.length ? { missingReceipts, livenessValidationReceiptsTemplate: JSON.stringify(missingReceipts.map(({ fingerprint, dataset, evaluation }) => ({ fingerprint, dataset, evaluation }))) } : {})
+    }, null, 2));
     if (!policyValidated) throw new Error("LIVENESS_RELEASE_UNVALIDATED: provide matching LIVENESS_VALIDATION_RECEIPTS with dataset and evaluation references for every effective tenant policy");
   } finally { await db.$disconnect(); }
 })().catch(e => { console.error(e.message); process.exitCode = 1; });
