@@ -28,6 +28,11 @@ async function main() {
   const env = { ...process.env, ...secrets, NODE_ENV: "production", VP_PROVIDER: "onnx", PROVIDER_MODEL_VERSION: config.modelVersion };
   const backend = path.resolve(__dirname, "../backend");
   const run = (command, args, options = {}) => execFileSync(command, args, { stdio: "inherit", ...options });
+  const smokeError = (message, details) => {
+    const error = new Error(message);
+    error.details = details;
+    throw error;
+  };
   step("Validate SAM template", () => run("sam", ["validate", "--lint", "-t", "backend/template.yaml"]));
   step("Synchronize MongoDB schema", () => run(path.join(backend, "node_modules/.bin/prisma"), ["db", "push", "--schema", "prisma/schema.prisma", "--skip-generate"], { cwd: backend, env }));
   step("Check liveness release receipts", () => run(process.execPath, ["scripts/check-liveness-release.js"], { cwd: backend, env }));
@@ -82,9 +87,25 @@ async function main() {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "verix-smoke-"));
     try {
       const file = path.join(directory, "worker.json");
-      const invocation = JSON.parse(step("Smoke check worker release identity", () => execFileSync("aws", ["lambda", "invoke", "--function-name", outputs.WorkerFunctionArn, "--cli-binary-format", "raw-in-base64-out", "--payload", '{"type":"health"}', file], { encoding: "utf8" })));
-      const worker = JSON.parse(fs.readFileSync(file));
-      if (invocation.FunctionError || worker.release?.commit !== config.commit || !worker.ok) throw new Error("Deployed worker readiness or release identity failed");
+      const invocation = JSON.parse(step("Smoke check worker release identity", () => execFileSync("aws", ["lambda", "invoke", "--function-name", outputs.WorkerFunctionArn, "--cli-binary-format", "raw-in-base64-out", "--payload", '{"type":"health"}', "--log-type", "Tail", file], { encoding: "utf8" })));
+      let worker;
+      try {
+        worker = JSON.parse(fs.readFileSync(file, "utf8"));
+      } catch (error) {
+        smokeError("Worker health response was not valid JSON", { parseError: error.message });
+      }
+      if (invocation.FunctionError || worker.release?.commit !== config.commit || !worker.ok) {
+        smokeError("Deployed worker readiness or release identity failed", {
+          functionError: invocation.FunctionError || null,
+          statusCode: invocation.StatusCode,
+          workerOk: worker.ok === true,
+          expectedCommit: config.commit,
+          actualCommit: worker.release?.commit || null,
+          errorType: worker.errorType || null,
+          errorMessage: worker.errorMessage || null,
+          logTail: invocation.LogResult ? Buffer.from(invocation.LogResult, "base64").toString("utf8").slice(-4000) : null
+        });
+      }
       const testUrl = origin(outputs.ApiUrl, "ApiUrl");
       const response = await step("Smoke check public API health", () => fetch(testUrl + "/health", { redirect: "error", signal: AbortSignal.timeout(20000) }));
       const health = await response.json();
@@ -102,6 +123,7 @@ async function main() {
 main().catch(error => {
   if (error.deployStep) console.error(`AWS release failed during: ${error.deployStep}`);
   if (error.message) console.error(error.message);
+  if (error.details) console.error(JSON.stringify(error.details, null, 2));
   console.error("AWS release failed. Review the failed step; cPanel promotion is blocked. No secret values are logged here.");
   process.exitCode = 1;
 });
