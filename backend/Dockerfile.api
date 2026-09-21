@@ -15,4 +15,4 @@ RUN cd ${LAMBDA_TASK_ROOT} && \
 # EVIDENCE_BACKEND=s3 + S3_BUCKET/S3_REGION, QUEUE_BACKEND=db,
 # WORKER_LAMBDA_ARN (drain kick), RATE_LIMIT_BACKEND=db, NODE_ENV=production
 
-CMD ["api.lambda.handler"]
+CMD ["api-lambda-entry.handler"]

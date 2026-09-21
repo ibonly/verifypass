@@ -12,7 +12,7 @@ const root = path.resolve(__dirname, "../..");
 const sources = [];
 function collect(dir) { for (const item of fs.readdirSync(dir, { withFileTypes: true })) { const file = path.join(dir,item.name); if (item.isDirectory()) collect(file); else if (item.name.endsWith(".js")) sources.push(file); } }
 collect(path.join(root,"src")); collect(path.join(root,"shared/src"));
-sources.push(path.join(root,"worker.js"),path.join(root,"worker.lambda.js"),path.join(root,"prisma/schema.prisma"));
+sources.push(path.join(root,"worker.js"),path.join(root,"worker.lambda.js"),path.join(root,"worker-lambda-entry.js"),path.join(root,"api-lambda-entry.js"),path.join(root,"prisma/schema.prisma"));
 const hasher = crypto.createHash("sha256");
 for (const file of sources.sort()) hasher.update(path.relative(root,file)).update(fs.readFileSync(file));
 const sourceDigest = hasher.digest("hex");

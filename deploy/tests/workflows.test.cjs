@@ -17,3 +17,12 @@ test("backend deploy validates the AWS runtime parameter before deployment", () 
   assert.match(workflow, /run:\s*node deploy\/runtime-parameter\.cjs/);
   assert.ok(workflow.indexOf("Validate AWS runtime parameter") < workflow.indexOf("Validate, synchronize compatible schema, and deploy"));
 });
+
+test("Lambda container handlers use dot-free entry modules", () => {
+  const workerDockerfile = fs.readFileSync(path.join(root, "backend/Dockerfile.worker"), "utf8");
+  const apiDockerfile = fs.readFileSync(path.join(root, "backend/Dockerfile.api"), "utf8");
+  assert.match(workerDockerfile, /CMD \["worker-lambda-entry\.handler"\]/);
+  assert.match(apiDockerfile, /CMD \["api-lambda-entry\.handler"\]/);
+  assert.doesNotMatch(workerDockerfile, /CMD \["worker\.lambda\.handler"\]/);
+  assert.doesNotMatch(apiDockerfile, /CMD \["api\.lambda\.handler"\]/);
+});

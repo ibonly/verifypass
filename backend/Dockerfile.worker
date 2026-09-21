@@ -16,4 +16,4 @@ RUN cd ${LAMBDA_TASK_ROOT} && \
 # QUEUE_BACKEND=db, EVIDENCE_ENCRYPTION_KEY, SDK_TOKEN_SECRET,
 # VP_PROVIDER=onnx, PROVIDER_MODEL_VERSION, NODE_ENV=production
 
-CMD ["worker.lambda.handler"]
+CMD ["worker-lambda-entry.handler"]
