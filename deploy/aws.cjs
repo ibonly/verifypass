@@ -8,6 +8,7 @@ const { parameterTarget, validateRuntimeParameter } = require("./runtime-paramet
 
 async function main() {
   const config = awsConfig();
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const step = (name, fn) => {
     console.log(`\n==> ${name}`);
     try {
@@ -28,10 +29,69 @@ async function main() {
   const env = { ...process.env, ...secrets, NODE_ENV: "production", VP_PROVIDER: "onnx", PROVIDER_MODEL_VERSION: config.modelVersion };
   const backend = path.resolve(__dirname, "../backend");
   const run = (command, args, options = {}) => execFileSync(command, args, { stdio: "inherit", ...options });
+  const awsJson = (args, options = {}) => JSON.parse(execFileSync("aws", [...args, "--output", "json"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...options }));
   const smokeError = (message, details) => {
     const error = new Error(message);
     error.details = details;
     throw error;
+  };
+  const stackEvents = () => {
+    try {
+      return awsJson(["cloudformation", "describe-stack-events", "--stack-name", config.stack]).StackEvents || [];
+    } catch {
+      return [];
+    }
+  };
+  const printRecentStackEvents = (seen = new Set(), { limit = 8 } = {}) => {
+    for (const event of stackEvents().slice(0, limit).reverse()) {
+      const id = event.EventId || `${event.LogicalResourceId}:${event.Timestamp}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      console.log(`[CloudFormation] ${event.Timestamp} ${event.LogicalResourceId} ${event.ResourceStatus}${event.ResourceStatusReason ? ` - ${event.ResourceStatusReason}` : ""}`);
+    }
+    return seen;
+  };
+  const waitForStack = async () => {
+    const complete = new Set(["CREATE_COMPLETE", "UPDATE_COMPLETE"]);
+    const failed = /(?:FAILED|ROLLBACK|DELETE_COMPLETE)$/;
+    const seen = printRecentStackEvents(new Set());
+    const deadline = Date.now() + 35 * 60 * 1000;
+    while (Date.now() < deadline) {
+      const stack = awsJson(["cloudformation", "describe-stacks", "--stack-name", config.stack]).Stacks[0];
+      printRecentStackEvents(seen, { limit: 12 });
+      if (complete.has(stack.StackStatus)) return stack;
+      if (failed.test(stack.StackStatus)) throw new Error(`CloudFormation stack ${config.stack} ended in ${stack.StackStatus}${stack.StackStatusReason ? `: ${stack.StackStatusReason}` : ""}`);
+      console.log(`Waiting for CloudFormation stack ${config.stack}: ${stack.StackStatus}`);
+      await sleep(30000);
+    }
+    throw new Error(`Timed out waiting for CloudFormation stack ${config.stack} to complete`);
+  };
+  const recoverSamChangeSet = async () => {
+    console.log("SAM change-set waiter timed out; inspecting CloudFormation directly");
+    const list = awsJson(["cloudformation", "list-change-sets", "--stack-name", config.stack]).Summaries || [];
+    const latest = list.sort((a, b) => new Date(b.CreationTime) - new Date(a.CreationTime))[0];
+    if (!latest) throw new Error(`SAM deploy failed and no CloudFormation change set was found for stack ${config.stack}`);
+    console.log(`Newest change set: ${latest.ChangeSetName} (${latest.Status}/${latest.ExecutionStatus})`);
+    const deadline = Date.now() + 25 * 60 * 1000;
+    let changeSet = null;
+    while (Date.now() < deadline) {
+      changeSet = awsJson(["cloudformation", "describe-change-set", "--stack-name", config.stack, "--change-set-name", latest.ChangeSetName]);
+      if (changeSet.Status === "CREATE_COMPLETE") break;
+      if (changeSet.Status === "FAILED") {
+        if (/didn't contain changes|No updates are to be performed/i.test(changeSet.StatusReason || "")) {
+          console.log(`Change set contains no changes: ${changeSet.StatusReason}`);
+          return;
+        }
+        throw new Error(`Change set ${latest.ChangeSetName} failed: ${changeSet.StatusReason || "unknown reason"}`);
+      }
+      console.log(`Waiting for change set ${latest.ChangeSetName}: ${changeSet.Status}${changeSet.StatusReason ? ` - ${changeSet.StatusReason}` : ""}`);
+      await sleep(30000);
+    }
+    if (!changeSet || changeSet.Status !== "CREATE_COMPLETE") throw new Error(`Timed out waiting for change set ${latest.ChangeSetName} to finish creating`);
+    if (changeSet.ExecutionStatus !== "AVAILABLE") throw new Error(`Change set ${latest.ChangeSetName} is ${changeSet.ExecutionStatus}, not executable`);
+    console.log(`Executing recovered change set ${latest.ChangeSetName}`);
+    execFileSync("aws", ["cloudformation", "execute-change-set", "--stack-name", config.stack, "--change-set-name", latest.ChangeSetName], { stdio: "inherit" });
+    await waitForStack();
   };
   step("Validate SAM template", () => run("sam", ["validate", "--lint", "-t", "backend/template.yaml"]));
   step("Synchronize MongoDB schema", () => run(path.join(backend, "node_modules/.bin/prisma"), ["db", "push", "--schema", "prisma/schema.prisma", "--skip-generate"], { cwd: backend, env }));
@@ -63,17 +123,23 @@ async function main() {
     ProviderModelVersion: config.modelVersion,
     ApiReservedConcurrency: config.apiReservedConcurrency
   };
-  step("Deploy SAM stack", () => run("sam", [
-    "deploy",
-    "--stack-name", config.stack,
-    "--resolve-s3",
-    "--resolve-image-repos",
-    "--no-confirm-changeset",
-    "--no-fail-on-empty-changeset",
-    "--capabilities", "CAPABILITY_IAM",
-    "--parameter-overrides",
-    ...Object.entries(parameters).map(([name, value]) => `${name}="${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`)
-  ]));
+  await step("Deploy SAM stack", async () => {
+    try {
+      run("sam", [
+        "deploy",
+        "--stack-name", config.stack,
+        "--resolve-s3",
+        "--resolve-image-repos",
+        "--no-confirm-changeset",
+        "--no-fail-on-empty-changeset",
+        "--capabilities", "CAPABILITY_IAM",
+        "--parameter-overrides",
+        ...Object.entries(parameters).map(([name, value]) => `${name}="${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`)
+      ]);
+    } catch {
+      await recoverSamChangeSet();
+    }
+  });
   const stack = JSON.parse(step("Read deployed stack outputs", () => execFileSync("aws", ["cloudformation", "describe-stacks", "--stack-name", config.stack, "--output", "json"], { encoding: "utf8" }))).Stacks[0];
   const outputs = Object.fromEntries((stack.Outputs || []).map(output => [output.OutputKey, output.OutputValue]));
   console.log(`\n============================================================`);
