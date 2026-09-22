@@ -27,6 +27,13 @@ jobs:
         with:
           name: cpanel-${{ github.sha }}
           path: artifact
+      - name: Validate cPanel environment secrets
+        env:
+          CPANEL_SSH_KEY: ${{ secrets.CPANEL_SSH_KEY }}
+          CPANEL_KNOWN_HOSTS: ${{ secrets.CPANEL_KNOWN_HOSTS }}
+        run: |
+          test -n "$CPANEL_SSH_KEY" || { echo "CPANEL_SSH_KEY is not visible to this job. Store it in the prod environment or repository secrets, and ensure this job uses environment: prod."; exit 1; }
+          test -n "$CPANEL_KNOWN_HOSTS" || { echo "CPANEL_KNOWN_HOSTS is not visible to this job. Store it in the prod environment or repository secrets, and ensure this job uses environment: prod."; exit 1; }
       - name: Install browser smoke tooling without deployment secrets
         run: |
           npm ci --prefix frontend/sdk/react

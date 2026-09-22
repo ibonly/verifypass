@@ -26,3 +26,12 @@ test("Lambda container handlers use dot-free entry modules", () => {
   assert.doesNotMatch(workerDockerfile, /CMD \["worker\.lambda\.handler"\]/);
   assert.doesNotMatch(apiDockerfile, /CMD \["api\.lambda\.handler"\]/);
 });
+
+test("frontend deploy binds prod environment and validates cPanel secrets", () => {
+  const workflow = fs.readFileSync(path.join(root, ".github/workflows/frontend-deploy.yml"), "utf8");
+  assert.match(workflow, /environment:\s*prod/);
+  assert.match(workflow, /name:\s*Validate cPanel environment secrets/);
+  assert.match(workflow, /CPANEL_SSH_KEY is not visible to this job/);
+  assert.match(workflow, /CPANEL_KNOWN_HOSTS is not visible to this job/);
+  assert.ok(workflow.indexOf("Validate cPanel environment secrets") < workflow.indexOf("Stage, promote, smoke-test and roll back on failure"));
+});
