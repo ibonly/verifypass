@@ -16,6 +16,8 @@ backend/.worker.pid
 backend/models/*.partial
 /audit/liveness/private/
 .DS_Store
+id_cpanel_deploy
+id_cpanel_deploy.pub
 
 # Local cleanup records and generated Vite config bundles
 /delete/

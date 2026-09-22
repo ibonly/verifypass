@@ -29,6 +29,18 @@ async function main() {
     fs.writeFileSync(key, required(env, "CPANEL_SSH_KEY") + "\n", { mode: 0o600 });
     fs.writeFileSync(hosts, required(env, "CPANEL_KNOWN_HOSTS") + "\n", { mode: 0o600 });
     const common = ["-i", key, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", `UserKnownHostsFile=${hosts}`, "-o", "ConnectTimeout=20"];
+    const publicKey = execFileSync("ssh-keygen", ["-y", "-f", key], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+    const fingerprint = execFileSync("ssh-keygen", ["-lf", "-"], { input: publicKey, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
+    console.log(`Using cPanel deploy key fingerprint: ${fingerprint}`);
+    try {
+      execFileSync("ssh", [...common, "-p", port, `${user}@${host}`, "true"], { stdio: ["ignore", "pipe", "pipe"], timeout: 30000 });
+    } catch (error) {
+      throw new Error([
+        `Unable to authenticate to cPanel over SSH as ${user}@${host}:${port}.`,
+        `Deploy key fingerprint offered by CI: ${fingerprint}`,
+        "Verify that this exact public key is installed in the cPanel account's ~/.ssh/authorized_keys, SSH access is enabled for the account, the username and port are correct, and the private key in CPANEL_SSH_KEY is the matching unencrypted key."
+      ].join("\n"));
+    }
     const remoteScript = fs.readFileSync(path.join(__dirname, "cpanel-remote.sh"));
     const remote = action => execFileSync("ssh", [...common, "-p", port, `${user}@${host}`, "bash", "-s", "--", action, folder, release], { input: remoteScript, stdio: ["pipe", "inherit", "inherit"], timeout: 180000 });
     remote("prepare");
@@ -38,8 +50,13 @@ async function main() {
       remote("promote");
       promoted = true;
       for (const base of [dashboard, verify, mailer]) {
-        const response = await fetch(`${base}/release.json?release=${release}`, { redirect: "error", cache: "no-store", signal: AbortSignal.timeout(15000) });
-        if (!response.ok || (await response.json()).commit !== commit) throw new Error("cPanel is not serving the expected release");
+        const url = `${base}/release.json?release=${release}`;
+        const response = await fetch(url, { redirect: "error", cache: "no-store", signal: AbortSignal.timeout(15000) });
+        if (!response.ok) throw new Error(`cPanel release identity failed for ${url}: HTTP ${response.status}`);
+        const receipt = await response.json();
+        if (receipt.commit !== commit) {
+          throw new Error(`cPanel release identity failed for ${url}: expected ${commit}, got ${receipt.commit ?? "missing commit"}`);
+        }
       }
       const health = await fetch(`${mailer}/health.php`, { redirect: "error", signal: AbortSignal.timeout(15000) });
       if (!health.ok) throw new Error("cPanel mailer health failed");
