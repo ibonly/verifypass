@@ -18,13 +18,15 @@ test("cPanel release switching is atomic and rollback is ownership-aware", () =>
       run("prepare", release);
       const target = path.join(home, "verifypass/releases", release);
       fs.mkdirSync(target);
-      fs.writeFileSync(path.join(target, "manifest.json"), "{}");
+      fs.writeFileSync(path.join(target, "manifest.json"), JSON.stringify({ release }));
       run("promote", release);
-      assert.equal(fs.readlinkSync(path.join(home, "verifypass/current")), `releases/${release}`);
+      const current = path.join(home, "verifypass/current");
+      assert.equal(fs.lstatSync(current).isDirectory(), true);
+      assert.deepEqual(JSON.parse(fs.readFileSync(path.join(current, "manifest.json"), "utf8")), { release });
     }
     assert.notEqual(spawnSync("bash", [script, "rollback", "verifypass", first], { env }).status, 0);
     run("rollback", second);
-    assert.equal(fs.readlinkSync(path.join(home, "verifypass/current")), `releases/${first}`);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, "verifypass/current/manifest.json"), "utf8")), { release: first });
     assert.ok(fs.existsSync(path.join(home, "verifypass/releases", second)), "Keep failed release available for diagnosis");
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });

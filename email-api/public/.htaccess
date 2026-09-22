@@ -1,8 +1,9 @@
 Options -Indexes
 ServerSignature Off
 LimitRequestBody 65536
+Require all granted
 
-<FilesMatch "^(?!send\.php$|render\.php$|health\.php$).+">
+<FilesMatch "^(?!send\.php$|render\.php$|health\.php$|release\.json$).+">
   Require all denied
 </FilesMatch>
 

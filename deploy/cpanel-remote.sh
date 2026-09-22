@@ -8,13 +8,17 @@ release="${3:?release identifier required}"
 root="$HOME/$folder"
 target="$root/releases/$release"
 archive="$root/incoming/$release.tar.gz"
+current="$root/current"
+next="$root/.current-$release"
+previous_backup="$root/.previous-$release"
+previous_file="$root/incoming/$release.previous"
 
 case "$action" in
   prepare)
     umask 022
     mkdir -p "$root/incoming" "$root/releases" "$root/shared"
     [[ ! -e "$target" && ! -L "$target" ]] || exit 3
-    [[ ! -e "$root/current" || -L "$root/current" ]] || exit 3
+    [[ ! -e "$current" || -L "$current" || -d "$current" ]] || exit 3
     ;;
   stage)
     [[ -f "$archive" && ! -e "$target" ]] || exit 3
@@ -30,21 +34,25 @@ case "$action" in
     ;;
   promote)
     [[ -f "$target/manifest.json" ]] || exit 3
-    previous="$(readlink "$root/current" || true)"
-    [[ -z "$previous" || "$previous" =~ ^releases/[a-f0-9]{40}-[0-9]+-[0-9]+$ ]] || exit 3
-    printf '%s' "$previous" > "$root/incoming/$release.previous"
-    ln -s "releases/$release" "$root/.current-$release"
-    php -r 'if (!rename($argv[1], $argv[2])) exit(1);' "$root/.current-$release" "$root/current"
+    [[ ! -e "$next" && ! -L "$next" && ! -e "$previous_backup" && ! -L "$previous_backup" ]] || exit 3
+    cp -a "$target" "$next"
+    chmod 755 "$next"
+    if [[ -e "$current" || -L "$current" ]]; then
+      php -r 'if (!rename($argv[1], $argv[2])) exit(1);' "$current" "$previous_backup"
+      printf '%s' "$previous_backup" > "$previous_file"
+    else
+      printf '' > "$previous_file"
+    fi
+    php -r 'if (!rename($argv[1], $argv[2])) exit(1);' "$next" "$current"
     ;;
   rollback)
-    [[ "$(readlink "$root/current" || true)" == "releases/$release" ]] || exit 3
-    previous="$(cat "$root/incoming/$release.previous")"
+    [[ -f "$previous_file" && -f "$current/manifest.json" && -f "$target/manifest.json" ]] || exit 3
+    cmp -s "$current/manifest.json" "$target/manifest.json" || exit 3
+    previous="$(cat "$previous_file")"
+    rm -rf "$current"
     if [[ -n "$previous" ]]; then
-      [[ "$previous" =~ ^releases/[a-f0-9]{40}-[0-9]+-[0-9]+$ && -d "$root/$previous" ]] || exit 3
-      ln -s "$previous" "$root/.rollback-$release"
-      php -r 'if (!rename($argv[1], $argv[2])) exit(1);' "$root/.rollback-$release" "$root/current"
-    else
-      rm "$root/current"
+      [[ "$previous" == "$previous_backup" && ( -d "$previous" || -L "$previous" ) ]] || exit 3
+      php -r 'if (!rename($argv[1], $argv[2])) exit(1);' "$previous" "$current"
     fi
     ;;
   *) exit 2 ;;
