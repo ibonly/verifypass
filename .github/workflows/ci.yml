@@ -6,6 +6,9 @@ on:
       api_url:
         type: string
         default: https://api.example.com
+      use_prod_environment:
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -29,6 +32,7 @@ jobs:
       - name: Deployment contracts
         run: node --test ../deploy/tests/*.test.cjs
   frontend:
+    if: ${{ !inputs.use_prod_environment }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -41,6 +45,46 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
+      - run: node --test frontend/sdk/core/tests/*.test.js
+      - run: npm ci --prefix frontend/sdk/react
+      - run: npm ci --prefix frontend/sdk/js && npm run build --prefix frontend/sdk/js
+      - run: npm ci --prefix frontend/dashboard && npm test --prefix frontend/dashboard && npm run build --prefix frontend/dashboard
+      - run: npm ci --prefix frontend/verify-page
+      - run: frontend/verify-page/node_modules/.bin/playwright install --with-deps chromium
+      - run: npm run test:sdk --prefix frontend/verify-page
+      - run: npm run build --prefix frontend/verify-page
+      - run: npm ci --prefix sample-app && npm run build --prefix sample-app
+      - name: Test mailer
+        run: |
+          php email-api/test/self-test.php
+          php email-api/test/security-test.php
+      - name: Package immutable cPanel release
+        run: node deploy/package.cjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cpanel-${{ github.sha }}
+          path: release.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+  frontend-prod:
+    if: ${{ inputs.use_prod_environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: prod
+    env:
+      VP_API_BASE: ${{ vars.API_PUBLIC_URL }}
+      VITE_VP_API_BASE: ${{ vars.API_PUBLIC_URL }}
+      VITE_VP_FACE_MODEL_URL: /models/fr_detect.onnx
+      VITE_VP_LANDMARK_MODEL_URL: /models/fr_landmark.onnx
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Validate prod API URL for cPanel artifact
+        run: |
+          test -n "$VITE_VP_API_BASE" || { echo "prod API_PUBLIC_URL is not visible to the CI artifact job. Store API_PUBLIC_URL in the prod environment variables."; exit 1; }
+          node -e 'const url = new URL(process.env.VITE_VP_API_BASE); if (url.protocol !== "https:") throw new Error("prod API_PUBLIC_URL must be https");'
       - run: node --test frontend/sdk/core/tests/*.test.js
       - run: npm ci --prefix frontend/sdk/react
       - run: npm ci --prefix frontend/sdk/js && npm run build --prefix frontend/sdk/js
