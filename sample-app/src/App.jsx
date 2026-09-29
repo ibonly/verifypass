@@ -10,15 +10,18 @@ import { VerifyPassProvider, VerificationWidget } from "@verifypass/react";
 // the client. The sdkToken embeds the API origin, so the widget does not need a
 // baseUrl. This app takes the secret key at runtime purely for local testing.
 
+const LIVE_API_BASE = "https://uybb6wv27prwyijtkcteovvvke0hfkqw.lambda-url.us-east-2.on.aws";
+const LIVE_PUBLIC_KEY = "vp_pub_test_g0CAzW80fTNG5GJYV2wA1XUFFXov7VU9";
 const CONFIGURED_API_BASE = typeof __VP_API_BASE__ !== "undefined" ? __VP_API_BASE__ : "";
+const PUBLIC_KEY = import.meta.env.VITE_VP_PUBLIC_KEY || LIVE_PUBLIC_KEY;
 
 function inferApiBase() {
-  if (typeof window === "undefined") return "http://localhost:3000";
+  if (typeof window === "undefined") return LIVE_API_BASE;
 
   const { hostname } = window.location;
   if (CONFIGURED_API_BASE) return CONFIGURED_API_BASE.replace(/\/$/, "");
-  if (hostname === "localhost" || hostname === "127.0.0.1") return "http://localhost:3000";
-  return window.location.origin;
+  if (hostname === "localhost" || hostname === "127.0.0.1") return LIVE_API_BASE;
+  return LIVE_API_BASE;
 }
 
 const API_BASE = inferApiBase();
@@ -31,7 +34,7 @@ const RETRYABLE_STATUSES = ["rejected", "manual_review", "failed"];
 export default function App() {
   const [secretKey, setSecretKey] = useState("");
   const [customerRef, setCustomerRef] = useState("");
-  const [verificationType, setVerificationType] = useState("ID_AND_FACE");
+  const [verificationType, setVerificationType] = useState("FACE_ONLY");
   const [session, setSession] = useState(null);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
@@ -116,8 +119,8 @@ export default function App() {
           <Card>
             <h2 style={{ marginTop: 0 }}>Start a verification</h2>
             <p style={{ color: "#6B7280", fontSize: 14 }}>
-              Paste a <b>secret key</b> from the dev stack output
-              (<code>vp_sec_…</code>). This stands in for your backend creating a
+              Paste your <b>test secret key</b>
+              (<code>vp_sec_test_…</code>). This stands in for your backend creating a
               session; the returned sdkToken then tells the widget which API to use.
             </p>
 
@@ -167,9 +170,9 @@ export default function App() {
             <div style={{ fontSize: 12, color: "#6B7280", marginBottom: 8 }}>
               Session <code>{session.sessionId}</code>
               <br />
-              Widget API is using the secure same-origin proxy.
+              Widget API is using <code>{API_BASE}</code>.
             </div>
-            <VerifyPassProvider publicKey={null} baseUrl={widgetBaseUrl} faceModelUrl={import.meta.env.VITE_VP_FACE_MODEL_URL || "/models/fr_detect.onnx"}>
+            <VerifyPassProvider publicKey={PUBLIC_KEY} baseUrl={widgetBaseUrl} faceModelUrl={import.meta.env.VITE_VP_FACE_MODEL_URL || "/models/fr_detect.onnx"}>
               <VerificationWidget
                 sessionId={session.sessionId}
                 sdkToken={session.sdkToken}

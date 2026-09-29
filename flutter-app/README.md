@@ -46,6 +46,8 @@ Camera and internet permissions are required:
         android:usesCleartextTraffic="true"> <!-- Needed for local HTTP dev testing -->
 ```
 
+The sample app requests Android camera permission before opening the hosted WebView. If Android reports “Could not start video source,” confirm the app has Camera permission enabled in system settings and that no other app is using the camera.
+
 ### iOS (`ios/Runner/Info.plist`)
 
 Camera usage description is required:
@@ -79,15 +81,22 @@ macOS apps run in the Apple App Sandbox by default. Network client and camera en
 
 ## How to Run the Sample App
 
-### 1. Start VerifyPass Backend & Hosted Verification
+### 1. Live Test Defaults
 
-In the root directory:
+The sample app defaults to the live test deployment:
+
+```text
+API Base:    https://uybb6wv27prwyijtkcteovvvke0hfkqw.lambda-url.us-east-2.on.aws
+Hosted Flow: https://verify.verix.ifsolutions.org
+```
+
+Keep your `vp_sec_test_...` key out of source control. For local harness testing, pass it at launch time:
 
 ```bash
-# Start backend API (port 3000), worker, and hosted verify-page (port 5174)
-npm start
-# or: node scripts/start-all.js
+flutter run -d macos --dart-define=VERIFYPASS_SECRET_KEY=vp_sec_test_REPLACE_ME
 ```
+
+You can also leave it blank and paste the key into the Test Harness field at runtime.
 
 ### 2. Launch the Flutter Application
 
@@ -107,9 +116,8 @@ flutter run -d chrome
 flutter run
 ```
 
-> **Network Note for Android Emulator**:
-> - The Android emulator accesses the host machine at `http://10.0.2.2`.
-> - The app automatically defaults API Base to `http://10.0.2.2:3000` and Hosted Base to `http://10.0.2.2:5174` on Android.
+> **Local Backend Note**:
+> The app now defaults to the live test URLs above. For local backend testing, expand **Advanced: Server Endpoints** in the app and override API Base / Hosted Web Verification URL manually.
 
 ---
 
@@ -144,15 +152,15 @@ final session = VerificationSession(
 final outcome = await VerifyPass.startVerification(
   context,
   session: session,
-  hostedBaseUrl: 'https://verify.yourdomain.com',
-  apiBaseUrl: 'https://api.yourdomain.com',
+  hostedBaseUrl: 'https://verify.verix.ifsolutions.org',
+  apiBaseUrl: 'https://uybb6wv27prwyijtkcteovvvke0hfkqw.lambda-url.us-east-2.on.aws',
   title: 'Identity Verification',
 );
 
 // Or embed the widget directly inside your own UI:
 VerifyPassView(
   session: session,
-  hostedBaseUrl: 'https://verify.yourdomain.com',
+  hostedBaseUrl: 'https://verify.verix.ifsolutions.org',
   redirectUrl: 'verifypass://complete',
   onComplete: (sessionId, status) {
     print('Verification finished: $status for session $sessionId');

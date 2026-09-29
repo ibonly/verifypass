@@ -1,9 +1,14 @@
-import 'dart:io' show Platform;
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:verifypass_flutter/verifypass_flutter.dart';
 import 'verification_screen.dart';
 import 'result_screen.dart';
+
+const _liveApiBase =
+    'https://uybb6wv27prwyijtkcteovvvke0hfkqw.lambda-url.us-east-2.on.aws';
+const _liveHostedBase = 'https://verify.verix.ifsolutions.org';
+const _testHarnessSecretKey =
+    String.fromEnvironment('VERIFYPASS_SECRET_KEY');
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -22,7 +27,7 @@ class _HomeScreenState extends State<HomeScreen> {
   late final TextEditingController _sessionIdController;
   late final TextEditingController _sdkTokenController;
 
-  VerificationType _verificationType = VerificationType.idAndFace;
+  VerificationType _verificationType = VerificationType.faceOnly;
   bool _isCreatingSession = false;
   String? _errorMessage;
   int _selectedTab = 0; // 0 = Create via Test Secret Key, 1 = Connect Existing Session
@@ -31,14 +36,9 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
 
-    // Default network endpoints depending on execution platform:
-    // Android emulator routes host machine loopback to 10.0.2.2
-    final isAndroid = !kIsWeb && Platform.isAndroid;
-    final defaultHost = isAndroid ? 'http://10.0.2.2' : 'http://localhost';
-
-    _apiBaseController = TextEditingController(text: '$defaultHost:3000');
-    _hostedBaseController = TextEditingController(text: '$defaultHost:5174');
-    _secretKeyController = TextEditingController();
+    _apiBaseController = TextEditingController(text: _liveApiBase);
+    _hostedBaseController = TextEditingController(text: _liveHostedBase);
+    _secretKeyController = TextEditingController(text: _testHarnessSecretKey);
     _customerRefController = TextEditingController(
       text: 'SAMPLE-${DateTime.now().millisecondsSinceEpoch % 100000}',
     );
@@ -63,6 +63,8 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     if (!_formKey.currentState!.validate()) return;
+
+    if (!await _ensureCameraPermission()) return;
 
     final apiBase = _apiBaseController.text.trim();
     final hostedBase = _hostedBaseController.text.trim();
@@ -117,6 +119,25 @@ class _HomeScreenState extends State<HomeScreen> {
 
       await _launchVerification(session, apiBase, hostedBase, secretKey: secretKey, useModal: useModal);
     }
+  }
+
+  Future<bool> _ensureCameraPermission() async {
+    final status = await Permission.camera.status;
+    if (status.isGranted || status.isLimited) return true;
+
+    final requested = await Permission.camera.request();
+    if (requested.isGranted || requested.isLimited) return true;
+
+    if (!mounted) return false;
+    setState(() {
+      _errorMessage = requested.isPermanentlyDenied
+          ? 'Camera permission is disabled for this app. Enable it in system settings, then try again.'
+          : 'Camera permission is required to start verification.';
+    });
+    if (requested.isPermanentlyDenied) {
+      await openAppSettings();
+    }
+    return false;
   }
 
   Future<void> _launchVerification(
@@ -464,7 +485,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                 TextFormField(
                                   controller: _apiBaseController,
                                   decoration: _inputDecoration(
-                                    hintText: 'http://localhost:3000',
+                                    hintText: _liveApiBase,
                                     icon: Icons.dns_outlined,
                                   ),
                                   validator: (v) =>
@@ -475,7 +496,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                 TextFormField(
                                   controller: _hostedBaseController,
                                   decoration: _inputDecoration(
-                                    hintText: 'http://localhost:5174',
+                                    hintText: _liveHostedBase,
                                     icon: Icons.language_outlined,
                                   ),
                                   validator: (v) =>
