@@ -5,12 +5,12 @@
 Every push to `main` (or a manual run on `main`) runs `Production release`:
 
 1. Run backend/shared/SDK/dashboard tests, Playwright desktop/mobile checks, PHP mailer tests, workflow lint and SAM template lint.
-2. Build and retain one cPanel artifact identified by the commit SHA. The artifact contains dashboard, verification page, standalone SDK and PHP mailer code. It excludes the sample harness, mail credentials, state and environment files.
+2. Build and retain one cPanel artifact identified by the commit SHA. The artifact contains dashboard, verification page, the sample test app (hosted at `/sample-app`), standalone SDK and PHP mailer code. It excludes mail credentials, state and environment files.
 3. Approve the production environment. Validate configuration, load one immutable Systems Manager Parameter Store version, apply an approved backward-compatible MongoDB schema update, and run `release:check` against the matching runtime/policy receipts.
 4. Build digest-pinned Node 22 Lambda images with locked dependencies, deploy SAM with CloudFormation rollback enabled, then check worker database/model readiness, API commit identity and CORS.
 5. Stage the CI artifact on cPanel over host-key-verified SSH/SCP, validate PHP configuration, atomically switch the shared `current` directory, and run release identity, mailer health and desktop/mobile browser smoke checks. A smoke failure restores the prior cPanel release.
 
-The entire production release is serialized and is not cancelled by newer pushes. Reusable deployment workflows have no independent manual/push trigger. Pull requests run CI without production credentials. AWS OIDC permission exists only on the backend deployment job. The sample harness has a separate manual `demo` artifact build and is never published to production automatically.
+The entire production release is serialized and is not cancelled by newer pushes. Reusable deployment workflows have no independent manual/push trigger. Pull requests run CI without production credentials. AWS OIDC permission exists only on the backend deployment job. The sample app is built with production defaults and deployed to `/sample-app` on the verification domain (`HOSTED_BASE_URL`).
 
 ## GitHub Configuration
 
@@ -87,6 +87,7 @@ verify.example.com  /home/ACCOUNT/verix/current/verify
 mail.example.com    /home/ACCOUNT/verix/current/mailer/public
 ```
 
+Under `verify.example.com`, the sample application is served at `/sample-app/`.
 The hostname origins must match the GitHub variables. These builds use root-relative assets and are not configured for path-prefix hosting such as `example.com/verify/`. Some shared hosts restrict document roots to `public_html` or disallow symlink traversal: get provider confirmation before proceeding. Never expose the entire release root or `mailer` directory as a document root.
 
 Create `/home/ACCOUNT/verix/shared/email-config.php` using the structure in `email-api/config.example.php`. Configure the actual SMTP account, HMAC key, HTTPS dashboard URL and branding; keep `env=production`, `require_https=true`, and `enable_render_endpoint=false`. Set its permissions to `0600`. Set `rate_limit.file` to an absolute path inside the same `shared` directory, which must be writable by the account's PHP process. This preserves replay/rate-limit state across releases and rollbacks.

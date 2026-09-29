@@ -15,7 +15,7 @@ class VerifyPass {
   static Future<VerificationStatusResponse?> startVerification(
     BuildContext context, {
     required VerificationSession session,
-    required String hostedBaseUrl,
+    String? hostedBaseUrl,
     String? apiBaseUrl,
     String title = 'Identity Verification',
     String redirectUrl = 'verifypass://complete',
@@ -23,13 +23,22 @@ class VerifyPass {
     Color appBarColor = const Color(0xFF111827),
     bool enableBackgroundPolling = true,
   }) {
+    final effectiveHostedBase =
+        (hostedBaseUrl != null && hostedBaseUrl.isNotEmpty)
+            ? hostedBaseUrl
+            : (session.hostedBaseUrl ?? defaultLiveHostedBase);
+
+    final effectiveApiBase = (apiBaseUrl != null && apiBaseUrl.isNotEmpty)
+        ? apiBaseUrl
+        : (parseSdkTokenOrigin(session.sdkToken) ?? defaultLiveApiBase);
+
     return Navigator.of(context).push<VerificationStatusResponse>(
       MaterialPageRoute(
         fullscreenDialog: true,
         builder: (ctx) => _VerifyPassFlowPage(
           session: session,
-          hostedBaseUrl: hostedBaseUrl,
-          apiBaseUrl: apiBaseUrl,
+          hostedBaseUrl: effectiveHostedBase,
+          apiBaseUrl: effectiveApiBase,
           title: title,
           redirectUrl: redirectUrl,
           primaryColor: primaryColor,

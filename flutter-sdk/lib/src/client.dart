@@ -15,10 +15,46 @@ class VerifyPassException implements Exception {
       'VerifyPassException: $message${code != null ? ' (code: $code)' : ''}${statusCode != null ? ' [HTTP $statusCode]' : ''}';
 }
 
+/// Default production/live test API base URL.
+const String defaultLiveApiBase =
+    'https://uybb6wv27prwyijtkcteovvvke0hfkqw.lambda-url.us-east-2.on.aws';
+
+/// Default production/live test hosted verification base URL.
+const String defaultLiveHostedBase =
+    'https://verify.verix.ifsolutions.org';
+
+/// Decodes the embedded API origin from a self-locating `sdk_v1_...` token.
+/// Returns null if the token is not a self-locating v1 token.
+String? parseSdkTokenOrigin(String token) {
+  if (token.isEmpty) return null;
+  final match = RegExp(r'^sdk_v1_([A-Za-z0-9_-]+)$').firstMatch(token);
+  if (match == null) return null;
+  try {
+    var b64 = match.group(1)!;
+    b64 = b64.replaceAll('-', '+').replaceAll('_', '/');
+    while (b64.length % 4 != 0) {
+      b64 += '=';
+    }
+    final jsonStr = utf8.decode(base64Decode(b64));
+    final data = jsonDecode(jsonStr) as Map<String, dynamic>;
+    final u = data['u']?.toString();
+    if (u != null && u.isNotEmpty) {
+      final uri = Uri.parse(u);
+      if (uri.hasScheme && uri.hasAuthority) {
+        return '${uri.scheme}://${uri.host}${uri.hasPort ? ':${uri.port}' : ''}';
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
 class VerifyPassClient {
   final String apiBaseUrl;
 
-  VerifyPassClient({required this.apiBaseUrl});
+  VerifyPassClient({String? apiBaseUrl})
+      : apiBaseUrl = (apiBaseUrl != null && apiBaseUrl.isNotEmpty)
+            ? apiBaseUrl
+            : defaultLiveApiBase;
 
   String get _normalizedApiBase => apiBaseUrl.replaceAll(RegExp(r'/+$'), '');
 
@@ -75,8 +111,10 @@ class VerifyPassClient {
     required String sessionId,
     required String sdkToken,
   }) async {
+    final tokenBase = parseSdkTokenOrigin(sdkToken);
+    final effectiveBase = tokenBase ?? _normalizedApiBase;
     final uri = Uri.parse(
-      '$_normalizedApiBase/v1/verification-sessions/$sessionId/status?sdkToken=${Uri.encodeComponent(sdkToken)}',
+      '$effectiveBase/v1/verification-sessions/$sessionId/status',
     );
     final response = await http.get(
       uri,

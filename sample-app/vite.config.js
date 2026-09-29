@@ -9,9 +9,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // from the dev stack. Camera capture requires a secure context — localhost is
 // treated as secure by browsers, so `vite dev` on http://localhost works.
 export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, __dirname, ["VITE_VP_", "VP_API_BASE", "VP_API_PROXY_TARGET"]);
+  const env = loadEnv(mode, __dirname, ["VITE_VP_", "VP_API_BASE", "VP_API_PROXY_TARGET", "VITE_BASE"]);
   return {
-  plugins: [react()],
+    base: env.VITE_BASE || (mode === "production" ? "/sample-app/" : "/"),
+    plugins: [react()],
   resolve: {
     dedupe: ["react", "react-dom"],
     alias: {

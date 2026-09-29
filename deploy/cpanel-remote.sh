@@ -26,7 +26,7 @@ case "$action" in
     php -r 'if ((fileperms($argv[1]) & 0077) !== 0) exit(1);' "$root/shared/email-config.php"
     mkdir "$target"
     tar -xzf "$archive" -C "$target"
-    [[ -f "$target/dashboard/index.html" && -f "$target/verify/index.html" && -f "$target/mailer/public/send.php" ]] || exit 3
+    [[ -f "$target/dashboard/index.html" && -f "$target/verify/index.html" && -f "$target/verify/sample-app/index.html" && -f "$target/mailer/public/send.php" ]] || exit 3
     [[ ! -e "$target/mailer/config.php" && ! -L "$target/mailer/config.php" ]] || exit 3
     ln -s "$root/shared/email-config.php" "$target/mailer/config.php"
     while IFS= read -r -d '' file; do php -l "$file" >/dev/null; done < <(find "$target/mailer" -type f -name '*.php' -print0)

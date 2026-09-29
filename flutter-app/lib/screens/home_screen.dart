@@ -4,9 +4,8 @@ import 'package:verifypass_flutter/verifypass_flutter.dart';
 import 'verification_screen.dart';
 import 'result_screen.dart';
 
-const _liveApiBase =
-    'https://uybb6wv27prwyijtkcteovvvke0hfkqw.lambda-url.us-east-2.on.aws';
-const _liveHostedBase = 'https://verify.verix.ifsolutions.org';
+const _liveApiBase = defaultLiveApiBase;
+const _liveHostedBase = defaultLiveHostedBase;
 const _testHarnessSecretKey =
     String.fromEnvironment('VERIFYPASS_SECRET_KEY');
 

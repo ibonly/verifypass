@@ -23,6 +23,7 @@ class VerificationSession {
   final String verificationType;
   final String? customerReference;
   final String? hostedBaseUrl;
+  final String? hostedUrl;
   final DateTime? expiresAt;
   final Map<String, dynamic> raw;
 
@@ -33,18 +34,32 @@ class VerificationSession {
     required this.verificationType,
     this.customerReference,
     this.hostedBaseUrl,
+    this.hostedUrl,
     this.expiresAt,
     required this.raw,
   });
 
   factory VerificationSession.fromJson(Map<String, dynamic> json) {
+    final rawHostedUrl = json['hostedUrl'] as String?;
+    String? derivedBase;
+    if (rawHostedUrl != null && rawHostedUrl.isNotEmpty) {
+      try {
+        final parsed = Uri.parse(rawHostedUrl);
+        if (parsed.hasScheme && parsed.hasAuthority) {
+          derivedBase =
+              '${parsed.scheme}://${parsed.host}${parsed.hasPort ? ':${parsed.port}' : ''}';
+        }
+      } catch (_) {}
+    }
+
     return VerificationSession(
       sessionId: json['sessionId'] as String,
       sdkToken: json['sdkToken'] as String,
       attemptId: json['attemptId'] as String?,
       verificationType: (json['verificationType'] as String?) ?? 'ID_AND_FACE',
       customerReference: json['customerReference'] as String?,
-      hostedBaseUrl: json['hostedBaseUrl'] as String?,
+      hostedBaseUrl: (json['hostedBaseUrl'] as String?) ?? derivedBase,
+      hostedUrl: rawHostedUrl,
       expiresAt: json['expiresAt'] != null
           ? DateTime.tryParse(json['expiresAt'].toString())
           : null,
@@ -54,10 +69,19 @@ class VerificationSession {
 
   /// Builds the URL for the hosted verification flow.
   ///
+  /// [baseUrl] is optional (pass null to use the session's [hostedBaseUrl],
+  /// derived origin from [hostedUrl], or the live test hosted service).
   /// [redirectUrl] can be a custom app URI like `verifypass://complete`
   /// or a standard HTTPS callback.
-  Uri buildHostedUri(String baseUrl, {String? redirectUrl}) {
-    final cleanBase = baseUrl.replaceAll(RegExp(r'/+$'), '');
+  Uri buildHostedUri(String? baseUrl, {String? redirectUrl}) {
+    final effectiveBase = (baseUrl != null && baseUrl.isNotEmpty)
+        ? baseUrl
+        : (hostedBaseUrl ??
+            (hostedUrl != null && hostedUrl!.isNotEmpty
+                ? '${Uri.parse(hostedUrl!).scheme}://${Uri.parse(hostedUrl!).host}${Uri.parse(hostedUrl!).hasPort ? ':${Uri.parse(hostedUrl!).port}' : ''}'
+                : null) ??
+            'https://verify.verix.ifsolutions.org');
+    final cleanBase = effectiveBase.replaceAll(RegExp(r'/+$'), '');
     final uri = Uri.parse('$cleanBase/session/$sessionId');
     final fragParams = <String, String>{
       't': sdkToken,

@@ -49,7 +49,7 @@ async function main() {
     try {
       remote("promote");
       promoted = true;
-      for (const base of [dashboard, verify, mailer]) {
+      for (const base of [dashboard, verify, mailer, `${verify}/sample-app`]) {
         const url = `${base}/release.json?release=${release}`;
         const response = await fetch(url, { redirect: "error", cache: "no-store", signal: AbortSignal.timeout(15000) });
         if (!response.ok) throw new Error(`cPanel release identity failed for ${url}: HTTP ${response.status}`);
@@ -71,6 +71,8 @@ async function main() {
           await page.getByRole("heading", { name: "Invalid verification link" }).waitFor();
           await page.goto(dashboard, { waitUntil: "networkidle", timeout: 30000 });
           if (!(await page.locator("#root").innerText()).trim() || errors.length) throw new Error("Production browser smoke failed");
+          await page.goto(`${verify}/sample-app`, { waitUntil: "networkidle", timeout: 30000 });
+          if (!(await page.locator("#root").innerText()).trim() || errors.length) throw new Error("Production browser smoke failed for sample app");
           await page.close();
         }
       } finally { await browser.close(); }

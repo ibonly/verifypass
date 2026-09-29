@@ -12,8 +12,8 @@ class VerifyPassView extends StatefulWidget {
   /// The active verification session credentials.
   final VerificationSession session;
 
-  /// The base URL of the hosted verification page (e.g. `https://verify.example.com`).
-  final String hostedBaseUrl;
+  /// The base URL of the hosted verification page (defaults to session base or live hosted URL).
+  final String? hostedBaseUrl;
 
   /// The redirect URI intercepted to determine completion (default: `verifypass://complete`).
   final String redirectUrl;
@@ -34,7 +34,7 @@ class VerifyPassView extends StatefulWidget {
   const VerifyPassView({
     super.key,
     required this.session,
-    required this.hostedBaseUrl,
+    this.hostedBaseUrl,
     this.redirectUrl = 'verifypass://complete',
     required this.onComplete,
     this.onError,

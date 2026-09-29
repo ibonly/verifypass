@@ -431,7 +431,13 @@ function VerificationWidgetSession({
       })
       .catch((err) => {
         if (cancelled || cameraController.signal.aborted) return;
-        flowRef.current.fail({ code: "CAMERA_ERROR", message: err.message });
+        const isPermission = err.name === "NotAllowedError" || err.name === "PermissionDeniedError" || /permission/i.test(err.message || "");
+        const userMessage = err.message && !/permission denied/i.test(err.message)
+          ? err.message
+          : (isPermission
+              ? "Camera permission was denied. Please allow camera access in your device/browser settings, then click Retry."
+              : (err.message || "Failed to access camera."));
+        flowRef.current.fail({ code: "CAMERA_ERROR", message: userMessage });
         if (onErrorRef.current) onErrorRef.current(err);
       });
     const pauseCamera = () => {

@@ -21,6 +21,9 @@ function packageRelease(root, env = process.env) {
     fs.writeFileSync(path.join(mailer, "public/release.json"), JSON.stringify({ commit }));
     fs.mkdirSync(path.join(stage, "verify/sdk"));
     fs.copyFileSync(path.join(root, "frontend/sdk/js/dist/verifypass.js"), path.join(stage, "verify/sdk/verifypass.js"));
+    fs.cpSync(path.join(root, "sample-app/dist"), path.join(stage, "verify/sample-app"), { recursive: true });
+    if (!fs.existsSync(path.join(stage, "verify/sample-app/.htaccess"))) throw new Error("Missing Apache routing configuration");
+    fs.writeFileSync(path.join(stage, "verify/sample-app/release.json"), JSON.stringify({ commit, apiUrl }));
     fs.writeFileSync(path.join(stage, "manifest.json"), JSON.stringify({ commit, apiUrl }));
     function validate(directory) {
       for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {

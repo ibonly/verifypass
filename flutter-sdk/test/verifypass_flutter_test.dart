@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:verifypass_flutter/verifypass_flutter.dart';
 
@@ -169,6 +170,43 @@ void main() {
         VerificationType.fromValue('UNKNOWN_TYPE'),
         VerificationType.idAndFace,
       );
+    });
+  });
+
+  group('Live Defaults and Self-Locating Tokens', () {
+    test('VerificationSession parses hostedUrl and derives hostedBaseUrl', () {
+      final session = VerificationSession.fromJson({
+        'sessionId': 'vps_live_123',
+        'sdkToken': 'sdk_v1_mock',
+        'hostedUrl': 'https://verify.verix.ifsolutions.org/session/vps_live_123#t=mock',
+      });
+
+      expect(session.hostedUrl, 'https://verify.verix.ifsolutions.org/session/vps_live_123#t=mock');
+      expect(session.hostedBaseUrl, 'https://verify.verix.ifsolutions.org');
+
+      final uri = session.buildHostedUri(null, redirectUrl: 'myapp://done');
+      expect(uri.host, 'verify.verix.ifsolutions.org');
+      expect(uri.path, '/session/vps_live_123');
+      expect(uri.fragment, contains('t=sdk_v1_mock'));
+      expect(uri.fragment, contains('r=myapp%3A%2F%2Fdone'));
+    });
+
+    test('parseSdkTokenOrigin decodes origin correctly from sdk_v1 tokens', () {
+      // payload: {"u":"https://api.verix.example","t":"sig"} -> base64url
+      const payload = '{"u":"https://api.verix.example","t":"sig"}';
+      final b64 = base64Url.encode(utf8.encode(payload)).replaceAll('=', '');
+      final token = 'sdk_v1_$b64';
+
+      final origin = parseSdkTokenOrigin(token);
+      expect(origin, 'https://api.verix.example');
+
+      expect(parseSdkTokenOrigin('legacy_token_123'), isNull);
+      expect(parseSdkTokenOrigin(''), isNull);
+    });
+
+    test('VerifyPassClient defaults to defaultLiveApiBase', () {
+      final client = VerifyPassClient();
+      expect(client.apiBaseUrl, defaultLiveApiBase);
     });
   });
 }

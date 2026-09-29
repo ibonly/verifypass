@@ -1,17 +1,23 @@
 import { useEffect, useState } from "react";
-import { VerifyPassProvider, VerificationWidget } from "@verifypass/react";
+import {
+  VerifyPassProvider,
+  VerificationWidget,
+  LIVE_TEST_API_BASE,
+  LIVE_TEST_PUBLIC_KEY,
+  DEFAULT_FACE_MODEL_URL
+} from "@verifypass/react";
 
 // Local in-house webcam test harness. It plays the role a fintech BACKEND
 // normally plays (creating a session with the secret key), then hands the
 // self-locating sdkToken to the browser widget for DEVICE CAMERA capture.
 //
-// SECURITY NOTE: a real integration NEVER puts the secret key in the browser —.
+// SECURITY NOTE: a real integration NEVER puts the secret key in the browser —
 // the backend creates the session and passes only { sessionId, sdkToken } to
 // the client. The sdkToken embeds the API origin, so the widget does not need a
 // baseUrl. This app takes the secret key at runtime purely for local testing.
 
-const LIVE_API_BASE = "https://uybb6wv27prwyijtkcteovvvke0hfkqw.lambda-url.us-east-2.on.aws";
-const LIVE_PUBLIC_KEY = "vp_pub_test_g0CAzW80fTNG5GJYV2wA1XUFFXov7VU9";
+const LIVE_API_BASE = LIVE_TEST_API_BASE;
+const LIVE_PUBLIC_KEY = LIVE_TEST_PUBLIC_KEY;
 const CONFIGURED_API_BASE = typeof __VP_API_BASE__ !== "undefined" ? __VP_API_BASE__ : "";
 const PUBLIC_KEY = import.meta.env.VITE_VP_PUBLIC_KEY || LIVE_PUBLIC_KEY;
 
@@ -172,7 +178,7 @@ export default function App() {
               <br />
               Widget API is using <code>{API_BASE}</code>.
             </div>
-            <VerifyPassProvider publicKey={PUBLIC_KEY} baseUrl={widgetBaseUrl} faceModelUrl={import.meta.env.VITE_VP_FACE_MODEL_URL || "/models/fr_detect.onnx"}>
+            <VerifyPassProvider publicKey={PUBLIC_KEY} baseUrl={widgetBaseUrl} faceModelUrl={import.meta.env.VITE_VP_FACE_MODEL_URL || DEFAULT_FACE_MODEL_URL}>
               <VerificationWidget
                 sessionId={session.sessionId}
                 sdkToken={session.sdkToken}
