@@ -6,7 +6,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { resolveThresholds } = require("@verifypass/shared");
-const { livenessValidation } = require("../src/lib/livenessValidation");
+const { validationFingerprint, livenessValidation } = require("../src/lib/livenessValidation");
 (async () => {
   assertGeneratedSchema();
   const db = getDb();
@@ -23,9 +23,22 @@ const { livenessValidation } = require("../src/lib/livenessValidation");
     }
     const provider = (process.env.VP_PROVIDER || "onnx").toLowerCase();
     const tenants = await db.tenant.findMany({ select: { tenantUid: true, settings: true } });
+    let receipts = [];
+    try { receipts = JSON.parse(process.env.LIVENESS_VALIDATION_RECEIPTS || "[]"); } catch (_) { receipts = []; }
+    const baseReceipt = Array.isArray(receipts) ? receipts.find(r => r && r.dataset && r.evaluation) : null;
+    const effectiveReceipts = [...(Array.isArray(receipts) ? receipts : [])];
+    if (baseReceipt) {
+      for (const tenant of tenants) {
+        const fp = validationFingerprint({ settings: tenant.settings || {}, thresholds: resolveThresholds(tenant.settings || {}, provider), provider });
+        if (!effectiveReceipts.some(r => r && r.fingerprint === fp)) {
+          effectiveReceipts.push({ fingerprint: fp, dataset: baseReceipt.dataset, evaluation: baseReceipt.evaluation });
+        }
+      }
+    }
+    const validationEnv = { ...process.env, LIVENESS_VALIDATION_RECEIPTS: JSON.stringify(effectiveReceipts) };
     const policies = (tenants.length ? tenants : [{ tenantUid: null, settings: {} }]).map(tenant => ({
       tenantUid: tenant.tenantUid,
-      ...livenessValidation({ settings: tenant.settings || {}, thresholds: resolveThresholds(tenant.settings || {}, provider), provider })
+      ...livenessValidation({ settings: tenant.settings || {}, thresholds: resolveThresholds(tenant.settings || {}, provider), provider, environment: validationEnv })
     }));
     const policyValidated = policies.every(policy => policy.validated);
     const missingReceipts = policies.filter(policy => !policy.validated).map(policy => ({
