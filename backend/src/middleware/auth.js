@@ -34,7 +34,13 @@ function requireApiKey(expectedType = "secret") {
  */
 function requireAllowedDomain(req, res, next) {
   const origin = req.headers.origin || req.headers.referer || "";
-  const allowed = Array.isArray(req.tenant?.allowedDomains) ? req.tenant.allowedDomains : [];
+  const allowed = Array.isArray(req.tenant?.allowedDomains) ? [...req.tenant.allowedDomains] : [];
+  if (process.env.HOSTED_BASE_URL) {
+    try {
+      const hostedHost = new URL(process.env.HOSTED_BASE_URL).hostname;
+      if (hostedHost && !allowed.includes(hostedHost)) allowed.push(hostedHost);
+    } catch (_) { /* invalid HOSTED_BASE_URL */ }
+  }
   if (allowed.length === 0) {
     if (req.isLive) return next(new AppError("DOMAIN_NOT_ALLOWED"));
     return next();

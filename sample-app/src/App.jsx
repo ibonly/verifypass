@@ -19,7 +19,7 @@ import {
 const LIVE_API_BASE = LIVE_TEST_API_BASE;
 const LIVE_PUBLIC_KEY = LIVE_TEST_PUBLIC_KEY;
 const CONFIGURED_API_BASE = typeof __VP_API_BASE__ !== "undefined" ? __VP_API_BASE__ : "";
-const PUBLIC_KEY = import.meta.env.VITE_VP_PUBLIC_KEY || LIVE_PUBLIC_KEY;
+const PUBLIC_KEY = import.meta.env.VITE_VP_PUBLIC_KEY || null;
 
 function inferApiBase() {
   if (typeof window === "undefined") return LIVE_API_BASE;
