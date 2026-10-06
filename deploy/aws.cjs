@@ -76,9 +76,64 @@ async function main() {
           }
         }
       } catch (error) {
-        console.error(`  Could not read events: ${error.message}`);
+        console.error(`  Could not read stack events: ${error.message}`);
+      }
+      try {
+        const opEvents = awsJson(["cloudformation", "describe-events", "--stack-name", s.StackId]).OperationEvents || [];
+        for (const e of opEvents) {
+          const detail = e.ValidationStatusReason || e.ResourceStatusReason || e.HookStatusReason;
+          if (detail && !detail.includes("Resource creation cancelled")) {
+            console.error(`  [${e.EventType || "EVENT"}] ${e.LogicalResourceId || s.StackName} [${e.ResourceStatus || e.ValidationStatus || ""}] - ${detail}${e.ValidationPath ? ` (Path: ${e.ValidationPath})` : ""}`);
+          }
+        }
+      } catch (_) {
+        // describe-events may not be supported or applicable
       }
     }
+  };
+  const ensureEcrRepository = repoName => {
+    try {
+      const res = awsJson(["ecr", "describe-repositories", "--repository-names", repoName]);
+      return res.repositories[0].repositoryUri;
+    } catch (err) {
+      if (err.message && err.message.includes("RepositoryNotFoundException")) {
+        console.log(`Creating ECR repository ${repoName}...`);
+        try {
+          const res = awsJson(["ecr", "create-repository", "--repository-name", repoName, "--image-tag-mutability", "MUTABLE"]);
+          return res.repository.repositoryUri;
+        } catch (createErr) {
+          if (createErr.message && createErr.message.includes("RepositoryAlreadyExistsException")) {
+            const retryRes = awsJson(["ecr", "describe-repositories", "--repository-names", repoName]);
+            return retryRes.repositories[0].repositoryUri;
+          }
+          throw createErr;
+        }
+      }
+      throw err;
+    }
+  };
+  const resolveEcrRepositories = () => {
+    let allRepos = [];
+    try {
+      allRepos = awsJson(["ecr", "describe-repositories"]).repositories || [];
+    } catch {
+      allRepos = [];
+    }
+    const findOrCreate = suffix => {
+      const match = allRepos.find(r => {
+        const name = r.repositoryName.toLowerCase();
+        return name.includes(config.stack.toLowerCase()) && name.includes(suffix.toLowerCase());
+      });
+      if (match) {
+        console.log(`Found existing ECR repository for ${suffix}: ${match.repositoryName} (${match.repositoryUri})`);
+        return match.repositoryUri;
+      }
+      const defaultName = `${config.stack}-${suffix}`.toLowerCase();
+      return ensureEcrRepository(defaultName);
+    };
+    const workerRepoUri = findOrCreate("worker");
+    const apiRepoUri = findOrCreate("api");
+    return { workerRepoUri, apiRepoUri };
   };
   const waitForStack = async () => {
     const complete = new Set(["CREATE_COMPLETE", "UPDATE_COMPLETE"]);
@@ -164,8 +219,8 @@ async function main() {
       const allStacks = awsJson(["cloudformation", "describe-stacks"]).Stacks || [];
       for (const s of allStacks) {
         const isTarget = s.StackName === config.stack || (s.StackName.startsWith(`${config.stack}-`) && s.StackName.endsWith("-CompanionStack"));
-        if (isTarget && s.StackStatus === "ROLLBACK_COMPLETE") {
-          console.log(`Stack ${s.StackName} is in ROLLBACK_COMPLETE from a prior failed creation. Deleting dead stack before redeployment...`);
+        if (isTarget && (s.StackStatus === "ROLLBACK_COMPLETE" || s.StackStatus.endsWith("_FAILED"))) {
+          console.log(`Stack ${s.StackName} is in ${s.StackStatus} from a prior failed operation. Deleting dead stack before redeployment...`);
           execFileSync("aws", ["cloudformation", "delete-stack", "--stack-name", s.StackName]);
           execFileSync("aws", ["cloudformation", "wait", "stack-delete-complete", "--stack-name", s.StackName], { stdio: "inherit" });
         }
@@ -174,12 +229,16 @@ async function main() {
       // Normal if no stacks exist yet
     }
 
+    const { workerRepoUri, apiRepoUri } = resolveEcrRepositories();
+    console.log(`Using ECR repositories:\n  WorkerFunction: ${workerRepoUri}\n  ApiFunction: ${apiRepoUri}`);
+
     try {
       run("sam", [
         "deploy",
         "--stack-name", config.stack,
         "--resolve-s3",
-        "--resolve-image-repos",
+        "--image-repositories", `WorkerFunction=${workerRepoUri}`,
+        "--image-repositories", `ApiFunction=${apiRepoUri}`,
         "--no-confirm-changeset",
         "--no-fail-on-empty-changeset",
         "--capabilities", "CAPABILITY_IAM", "CAPABILITY_NAMED_IAM", "CAPABILITY_AUTO_EXPAND",
@@ -189,7 +248,16 @@ async function main() {
     } catch (err) {
       console.error("SAM deploy failed. CloudFormation failure reasons:");
       printFailureReasons();
-      await recoverSamChangeSet();
+      let stackExists = false;
+      try {
+        awsJson(["cloudformation", "describe-stacks", "--stack-name", config.stack]);
+        stackExists = true;
+      } catch (_) {}
+      if (stackExists) {
+        await recoverSamChangeSet();
+      } else {
+        throw new Error(`SAM deploy failed before stack ${config.stack} could be created. Review the CloudFormation failure reasons above.`);
+      }
     }
   });
   const stack = JSON.parse(step("Read deployed stack outputs", () => execFileSync("aws", ["cloudformation", "describe-stacks", "--stack-name", config.stack, "--output", "json"], { encoding: "utf8" }))).Stacks[0];
