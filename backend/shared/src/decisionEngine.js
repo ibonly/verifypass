@@ -40,6 +40,9 @@ function resolveThresholds(tenantSettings = {}, providerName) {
     ? Math.min(Math.max(aa, lb.autoApproveMin ?? 0), lb.autoApproveMax ?? 1)
     : baseDefaults.liveness.autoApprove;
   merged.liveness.challengePassApproves = merged.liveness.challengePassApproves !== false;
+  merged.liveness.requireIdentity = process.env.CHALLENGE_REQUIRE_IDENTITY === "false"
+    ? false
+    : t.liveness?.requireIdentity !== false;
   return merged;
 }
 
@@ -69,7 +72,7 @@ const ENFORCEABLE = Object.freeze(new Set(["LIVENESS_DIRECTION_INCONSISTENT", "L
 
 /**
  * Product rule (2026-09-07): the liveness gate is satisfied when the passive
- * score is strictly above thresholds.liveness.autoApprove OR the active
+ * score is at or above thresholds.liveness.autoApprove (>= 60%) OR the active
  * challenge passed. Returns the waiver source or null.
  */
 function livenessWaiver({ liveness, livenessChallenge }, thresholds) {
@@ -110,7 +113,9 @@ function decide(signals, thresholds = DEFAULT_THRESHOLDS) {
     if (livenessIdentity.score < thresholds.faceMatch.reject) rejects.push(R.LIVENESS_IDENTITY_MISMATCH);
     else if (livenessIdentity.score < thresholds.faceMatch.pass) reviews.push(R.LIVENESS_IDENTITY_BORDERLINE);
   }
-  if (livenessIdentity && (!Number.isFinite(livenessIdentity.score) || livenessIdentity.score < 0 || livenessIdentity.score > 1)) reviews.push(R.LIVENESS_IDENTITY_UNAVAILABLE);
+  if (livenessIdentity && (!Number.isFinite(livenessIdentity.score) || livenessIdentity.score < 0 || livenessIdentity.score > 1)) {
+    if (thresholds.liveness?.requireIdentity !== false) reviews.push(R.LIVENESS_IDENTITY_UNAVAILABLE);
+  }
   if (livenessChallenge?.evidenceInsufficient) reviews.push(R.LIVENESS_EVIDENCE_INSUFFICIENT);
   if (livenessChallenge?.policyUnverified) reviews.push(R.LIVENESS_POLICY_UNVERIFIED);
   // Occlusion on the selfie (mask/hand/sunglasses per the liveness model) →

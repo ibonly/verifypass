@@ -18,6 +18,7 @@ flutter-app/   Sample mobile application integrating Verix Flutter SDK
 email-api/     PHP HMAC-authenticated mailer (21 transactional templates)
 deploy/        AWS SAM + cPanel atomic deployment automation and contract tests
 sample-app/    Web integration demo (cPanel)
+vue-sample/    Third-party Vue 3 app consuming the React SDK from GitHub
 scripts/       dev-stack (local MongoDB + API + worker)
 ```
 

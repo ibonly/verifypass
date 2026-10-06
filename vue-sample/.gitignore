@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+
+# Fetched from github.com/ibonly/verifypass by `npm run sdk:fetch`
+vendor/
+public/models/

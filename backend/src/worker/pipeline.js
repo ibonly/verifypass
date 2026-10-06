@@ -395,7 +395,8 @@ async function runVerificationInternal(payload, { db, provider, evidenceKey, env
     };
     challengeOpts.now = () => session.submittedAt ? new Date(session.submittedAt).getTime() : Date.now();
     challenge = verifyLivenessChallenge(session.livenessChallenge, frames, thresholds, challengeOpts);
-    challenge.policyUnverified = challengeOpts.enforcePose === false || session.livenessChallenge.assisted === true || (env === "production" && !policyBlock(tenant, provider?.name).validated);
+    const enforceReleaseValidation = process.env.LIVENESS_ENFORCE_RELEASE_VALIDATION !== "false" && tenant?.settings?.challenge?.enforceReleaseValidation !== false;
+    challenge.policyUnverified = challengeOpts.enforcePose === false || session.livenessChallenge.assisted === true || (env === "production" && enforceReleaseValidation && !policyBlock(tenant, provider?.name).validated);
     if (bindingRejected > 0) {
       challenge = {
         ...challenge,

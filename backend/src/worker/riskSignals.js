@@ -74,9 +74,9 @@ async function computeRiskSignals(db, session, thresholds, now = new Date(), opt
   }
 
   // 2. Same device fingerprint across many distinct identities (identity
-  //    farming). Skipped in development — one dev machine legitimately
-  //    creates dozens of throwaway identities.
-  if (session.deviceFingerprint && opts.env !== "development") {
+  //    farming). Skipped in development or test sessions (isLive: false) —
+  //    dev/test machines legitimately create dozens of throwaway identities.
+  if (session.deviceFingerprint && opts.env !== "development" && session.isLive !== false && session.environment !== "test") {
     const since = new Date(now.getTime() - t.deviceWindowDays * 24 * HOUR_MS);
     const rows = await db.verificationSession.findMany({
       where: {

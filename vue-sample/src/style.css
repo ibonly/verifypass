@@ -1,0 +1,143 @@
+:root {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #111827;
+  background: #f1f5f9;
+}
+
+body {
+  margin: 0;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px;
+  background: #0f766e;
+  color: #fff;
+}
+
+.topbar .muted {
+  color: #ccfbf1;
+  font-size: 12px;
+}
+
+.container {
+  max-width: 480px;
+  margin: 24px auto;
+  padding: 0 16px;
+  display: grid;
+  gap: 16px;
+}
+
+.card {
+  background: #fff;
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+h1, h2 {
+  margin-top: 0;
+}
+
+.muted {
+  color: #6b7280;
+  font-size: 14px;
+}
+
+.meta {
+  margin-top: 0;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+label {
+  display: block;
+  margin: 12px 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+input, select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+button.primary {
+  width: 100%;
+  margin-top: 16px;
+  padding: 12px;
+  border: 0;
+  border-radius: 8px;
+  background: #0f766e;
+  color: #fff;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+button.primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+button.link {
+  display: block;
+  margin: 12px auto 0;
+  background: none;
+  border: 0;
+  color: #6b7280;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.notice {
+  margin: 10px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.notice-info { background: #eff6ff; color: #1d4ed8; }
+.notice-ok { background: #ecfdf5; color: #047857; }
+.notice-warn { background: #fef3c7; color: #92400e; }
+.notice-error { background: #fef2f2; color: #b91c1c; }
+
+.error {
+  color: #dc2626;
+  font-size: 14px;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 12px;
+  font-size: 14px;
+}
+
+.facts dt {
+  font-weight: 600;
+}
+
+.facts dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+details {
+  margin-top: 12px;
+  font-size: 13px;
+}
+
+pre {
+  overflow: auto;
+  padding: 12px;
+  border-radius: 8px;
+  background: #f9fafb;
+  font-size: 12px;
+}
