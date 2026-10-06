@@ -121,7 +121,9 @@ async function main() {
     DashboardUrl: config.DASHBOARD_URL,
     EmailApiUrl: config.EMAIL_API_URL,
     ProviderModelVersion: config.modelVersion,
-    ApiReservedConcurrency: config.apiReservedConcurrency
+    ApiReservedConcurrency: config.apiReservedConcurrency,
+    ChallengeRequireIdentity: String(secrets.CHALLENGE_REQUIRE_IDENTITY ?? process.env.CHALLENGE_REQUIRE_IDENTITY ?? "false"),
+    LivenessEnforceReleaseValidation: String(secrets.LIVENESS_ENFORCE_RELEASE_VALIDATION ?? process.env.LIVENESS_ENFORCE_RELEASE_VALIDATION ?? "false")
   };
   await step("Deploy SAM stack", async () => {
     try {

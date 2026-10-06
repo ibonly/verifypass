@@ -97,6 +97,8 @@ function runtimeSecret(value) {
   if ((database.protocol === "mongodb:" && database.searchParams.get("tls") !== "true") || ["tls", "ssl"].some(name => database.searchParams.get(name) === "false") || ["tlsAllowInvalidCertificates", "tlsAllowInvalidHostnames", "tlsInsecure"].some(name => database.searchParams.get(name) === "true")) throw new Error("Production MongoDB requires verified TLS");
   const receipts = JSON.parse(secret.LIVENESS_VALIDATION_RECEIPTS);
   if (!Array.isArray(receipts) || !receipts.length) throw new Error("Matching liveness validation receipts are required");
+  if (value.CHALLENGE_REQUIRE_IDENTITY !== undefined) secret.CHALLENGE_REQUIRE_IDENTITY = String(value.CHALLENGE_REQUIRE_IDENTITY);
+  if (value.LIVENESS_ENFORCE_RELEASE_VALIDATION !== undefined) secret.LIVENESS_ENFORCE_RELEASE_VALIDATION = String(value.LIVENESS_ENFORCE_RELEASE_VALIDATION);
   if (Buffer.byteLength(JSON.stringify(secret)) > 2700) throw new Error("Runtime secret values exceed the reserved Lambda environment budget; reduce receipts or externalize receipt storage before release");
   return secret;
 }

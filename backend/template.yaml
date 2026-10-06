@@ -69,6 +69,14 @@ Parameters:
     Type: String
     Default: onnx-2026-07
     Description: Version label for the deployed biometric models (scores are only comparable within one version)
+  ChallengeRequireIdentity:
+    Type: String
+    Default: "false"
+    Description: Whether active challenge requires frontal identity verification against the selfie (false = waived for non-frontal actions)
+  LivenessEnforceReleaseValidation:
+    Type: String
+    Default: "false"
+    Description: Whether to enforce release validation receipts in production
 
 Globals:
   Function:
@@ -88,6 +96,8 @@ Globals:
         BUILD_COMMIT: !Ref BuildCommit
         VP_PROVIDER: onnx
         PROVIDER_MODEL_VERSION: !Ref ProviderModelVersion
+        CHALLENGE_REQUIRE_IDENTITY: !Ref ChallengeRequireIdentity
+        LIVENESS_ENFORCE_RELEASE_VALIDATION: !Ref LivenessEnforceReleaseValidation
         DASHBOARD_URL: !Ref DashboardUrl
         EMAIL_API_URL: !Ref EmailApiUrl
         EMAIL_API_KEY: !Ref EmailApiKey
