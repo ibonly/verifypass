@@ -139,7 +139,7 @@ Resources:
           - Effect: Deny
             Principal: '*'
             Action: 's3:*'
-            Resource: [!GetAtt EvidenceBucket.Arn, !Sub '${EvidenceBucket.Arn}/*']
+            Resource: [!GetAtt EvidenceBucket.Arn, !Join ['', [!GetAtt EvidenceBucket.Arn, '/*']]]
             Condition:
               Bool:
                 aws:SecureTransport: 'false'

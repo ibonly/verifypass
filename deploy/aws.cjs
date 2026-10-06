@@ -70,8 +70,10 @@ async function main() {
       console.error(`\n[CloudFormation] ${s.StackName} (${s.StackStatus})${s.StackStatusReason ? ` - ${s.StackStatusReason}` : ""}`);
       try {
         const events = awsJson(["cloudformation", "describe-stack-events", "--stack-name", s.StackId]).StackEvents || [];
-        for (const e of events.filter(e => /FAILED$/.test(e.ResourceStatus) && e.ResourceStatusReason).slice(0, 10).reverse()) {
-          console.error(`  ${e.LogicalResourceId} ${e.ResourceStatus} - ${e.ResourceStatusReason}`);
+        for (const e of events.reverse()) {
+          if (e.ResourceStatusReason && !e.ResourceStatusReason.includes("Resource creation cancelled")) {
+            console.error(`  ${e.LogicalResourceId} [${e.ResourceStatus}] - ${e.ResourceStatusReason}`);
+          }
         }
       } catch (error) {
         console.error(`  Could not read events: ${error.message}`);
