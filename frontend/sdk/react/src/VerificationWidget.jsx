@@ -894,6 +894,11 @@ function VerificationWidgetSession({
       : (now - lastPresentAt > 700) ? "face_lost"
       : (actionState.magnitude > 0.08) ? "further"
       : "none";
+    // Near-miss: a head movement armed, not the wrong way, and at ≥60 % of
+    // the trigger threshold (same bar as a held burst shot) — the user IS
+    // doing the movement, just not far enough for the client detector.
+    const headNearMiss = () => !isExprAction() && actionState.armed !== false && actionState.hasPose
+      && !actionState.wrongWay && actionState.magnitude >= 0.6 * (currentAction === "look_up" || currentAction === "look_down" ? 0.2 : 0.22);
     let lastPresentAt = performance.now();
     // Action-SPECIFIC detector (geometry signature for turns/tilts, eye/mouth
     // band motion for blink/smile) — created when align completes.
@@ -1154,7 +1159,11 @@ function VerificationWidgetSession({
               setLivePhase({ phase: "await", startedAt: awaitStart, total: 0, hint: lastHint });
               if (now - awaitStart > REISSUE_OFFER_MS && !reissueOffered) { reissueOffered = true; setCanReissue(true); }
             } else if (hintShown && now - awaitStart > AWAIT_FALLBACK_MS
-              && !actionState.hasPose // with live pose the detector is not blind — keep coaching instead
+              // With live pose the detector is not blind — keep coaching
+              // instead, UNLESS the user is visibly mid-movement but short of
+              // the threshold (a near-miss held through the coaching): capture
+              // that attempt rather than coach forever; the server judges it.
+              && (!actionState.hasPose || headNearMiss())
               && now - lastPresentAt < 2000 && !capturingRef.current) {
               // The user has been here, coached, and moving for ~9s without
               // the signature firing — capture anyway; the server is the

@@ -148,6 +148,25 @@ test("a turn never satisfies look_up/look_down, and a tilt never satisfies a tur
   assert.equal(feed(createActionDetector("look_down", BASE, { need: 2, frontalRef: REF }), tiltSeq).wrongWay, true);
 });
 
+test("look_down: a held, realistic chin-down (Δpitch ≈ +0.22) triggers; the same dip upward is wrongWay", () => {
+  const down = createActionDetector("look_down", BASE, { need: 2, frontalRef: REF, requireArm: true });
+  feed(down, [P(0.05), P(0.05)]); // arm
+  assert.equal(feed(down, [P(0.05, 0.66), P(0.05, 0.77), P(0.05, 0.77), P(0.05, 0.77)]).triggered, true);
+  const up = createActionDetector("look_down", BASE, { need: 2, frontalRef: REF, requireArm: true });
+  feed(up, [P(0.05), P(0.05)]);
+  const st = feed(up, [P(0.05, 0.44), P(0.05, 0.33), P(0.05, 0.33), P(0.05, 0.33)]);
+  assert.equal(st.triggered, false);
+  assert.equal(st.wrongWay, true);
+});
+
+test("look_down: sub-threshold dip (Δpitch +0.15) does not trigger but reports magnitude for coaching", () => {
+  const det = createActionDetector("look_down", BASE, { need: 2, frontalRef: REF, requireArm: true });
+  feed(det, [P(0.05), P(0.05)]);
+  const st = feed(det, [P(0.05, 0.7), P(0.05, 0.7), P(0.05, 0.7)]);
+  assert.equal(st.triggered, false);
+  assert.ok(st.magnitude > 0.12);
+});
+
 test("arming: still turned when the instruction appears → returning to centre is NOT a movement", () => {
   const det = createActionDetector("turn_right", BASE, { need: 2, frontalRef: REF });
   const seq = [0.5, 0.5, 0.4, 0.3, 0.15, 0.05, 0.05, 0.05].map((y) => P(y));

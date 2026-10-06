@@ -98,7 +98,11 @@ function landmarkInputFromImageData(imageData, box) {
 const POSE_THRESHOLDS = Object.freeze({
   yaw: 0.22,      // turns: |Δyaw| (noise floor ≈ 0.08, real turns 0.4–0.65)
   pitchUp: 0.2,   // look_up: baseline − pitch (real look-up ≈ 0.4)
-  pitchDown: 0.3,  // look_down: pitch − baseline (return overshoot from a look-up reached +0.26 in replay)
+  // look_down: pitch − baseline. Was 0.3 (to absorb a +0.26 return overshoot
+  // after a look-up), but a challenge never issues both tilts, and the proxy
+  // gains only ≈+0.0075/° chin-down — 0.3 demanded ~35–40° and look_down
+  // never triggered. Symmetric with look_up; the server gate is 10°.
+  pitchDown: 0.2,
   frontalYaw: 0.25,        // selfie gate: |yaw| below this reads as frontal
   refYaw: 0.15,            // a pose may only contribute to the session FRONTAL REFERENCE below this
   frontalPitch: [0.2, 0.95] // selfie gate / reference band; wide enough for a phone held below eye level
