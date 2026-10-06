@@ -51,6 +51,33 @@ async function main() {
     }
     return seen;
   };
+  // Prints the *_FAILED reasons for the main stack AND any SAM companion
+  // (ECR repository) stack, including stacks that already rolled back.
+  const printFailureReasons = () => {
+    let summaries = [];
+    try {
+      summaries = awsJson(["cloudformation", "list-stacks"]).StackSummaries || [];
+    } catch (error) {
+      console.error(`Could not list stacks: ${error.message}`);
+      return;
+    }
+    const related = summaries
+      .filter(s => s.StackName === config.stack || s.StackName.startsWith(`${config.stack}-`))
+      .sort((a, b) => new Date(b.CreationTime) - new Date(a.CreationTime))
+      .slice(0, 4);
+    if (!related.length) console.error(`No CloudFormation stacks named ${config.stack}* found in ${config.region}.`);
+    for (const s of related) {
+      console.error(`\n[CloudFormation] ${s.StackName} (${s.StackStatus})${s.StackStatusReason ? ` - ${s.StackStatusReason}` : ""}`);
+      try {
+        const events = awsJson(["cloudformation", "describe-stack-events", "--stack-name", s.StackId]).StackEvents || [];
+        for (const e of events.filter(e => /FAILED$/.test(e.ResourceStatus) && e.ResourceStatusReason).slice(0, 10).reverse()) {
+          console.error(`  ${e.LogicalResourceId} ${e.ResourceStatus} - ${e.ResourceStatusReason}`);
+        }
+      } catch (error) {
+        console.error(`  Could not read events: ${error.message}`);
+      }
+    }
+  };
   const waitForStack = async () => {
     const complete = new Set(["CREATE_COMPLETE", "UPDATE_COMPLETE"]);
     const failed = /(?:FAILED|ROLLBACK|DELETE_COMPLETE)$/;
@@ -138,7 +165,7 @@ async function main() {
         if (isTarget && s.StackStatus === "ROLLBACK_COMPLETE") {
           console.log(`Stack ${s.StackName} is in ROLLBACK_COMPLETE from a prior failed creation. Deleting dead stack before redeployment...`);
           execFileSync("aws", ["cloudformation", "delete-stack", "--stack-name", s.StackName]);
-          await sleep(20000);
+          execFileSync("aws", ["cloudformation", "wait", "stack-delete-complete", "--stack-name", s.StackName], { stdio: "inherit" });
         }
       }
     } catch (_) {
@@ -158,8 +185,8 @@ async function main() {
         ...Object.entries(parameters).map(([name, value]) => `${name}="${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`)
       ]);
     } catch (err) {
-      console.error("SAM deploy failed. Fetching recent CloudFormation events:");
-      printRecentStackEvents();
+      console.error("SAM deploy failed. CloudFormation failure reasons:");
+      printFailureReasons();
       await recoverSamChangeSet();
     }
   });
