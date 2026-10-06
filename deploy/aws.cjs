@@ -67,8 +67,13 @@ async function main() {
     throw new Error(`Timed out waiting for CloudFormation stack ${config.stack} to complete`);
   };
   const recoverSamChangeSet = async () => {
-    console.log("SAM change-set waiter timed out; inspecting CloudFormation directly");
-    const list = awsJson(["cloudformation", "list-change-sets", "--stack-name", config.stack]).Summaries || [];
+    let list = [];
+    try {
+      list = awsJson(["cloudformation", "list-change-sets", "--stack-name", config.stack]).Summaries || [];
+    } catch (err) {
+      console.error(`Could not list change sets for stack ${config.stack}:`, err.message);
+      throw new Error(`SAM deploy failed for stack ${config.stack}. Please check the CloudFormation events above.`);
+    }
     const latest = list.sort((a, b) => new Date(b.CreationTime) - new Date(a.CreationTime))[0];
     if (!latest) throw new Error(`SAM deploy failed and no CloudFormation change set was found for stack ${config.stack}`);
     console.log(`Newest change set: ${latest.ChangeSetName} (${latest.Status}/${latest.ExecutionStatus})`);
@@ -127,6 +132,17 @@ async function main() {
   };
   await step("Deploy SAM stack", async () => {
     try {
+      const existing = awsJson(["cloudformation", "describe-stacks", "--stack-name", config.stack]).Stacks[0];
+      if (existing && existing.StackStatus === "ROLLBACK_COMPLETE") {
+        console.log(`Stack ${config.stack} is in ROLLBACK_COMPLETE from a prior failed creation. Deleting dead stack before redeployment...`);
+        execFileSync("aws", ["cloudformation", "delete-stack", "--stack-name", config.stack]);
+        await sleep(15000);
+      }
+    } catch (_) {
+      // Stack does not exist yet, normal for first deploy
+    }
+
+    try {
       run("sam", [
         "deploy",
         "--stack-name", config.stack,
@@ -134,11 +150,13 @@ async function main() {
         "--resolve-image-repos",
         "--no-confirm-changeset",
         "--no-fail-on-empty-changeset",
-        "--capabilities", "CAPABILITY_IAM",
+        "--capabilities", "CAPABILITY_IAM", "CAPABILITY_NAMED_IAM", "CAPABILITY_AUTO_EXPAND",
         "--parameter-overrides",
         ...Object.entries(parameters).map(([name, value]) => `${name}="${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`)
       ]);
-    } catch {
+    } catch (err) {
+      console.error("SAM deploy failed. Fetching recent CloudFormation events:");
+      printRecentStackEvents();
       await recoverSamChangeSet();
     }
   });
