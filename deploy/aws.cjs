@@ -132,14 +132,17 @@ async function main() {
   };
   await step("Deploy SAM stack", async () => {
     try {
-      const existing = awsJson(["cloudformation", "describe-stacks", "--stack-name", config.stack]).Stacks[0];
-      if (existing && existing.StackStatus === "ROLLBACK_COMPLETE") {
-        console.log(`Stack ${config.stack} is in ROLLBACK_COMPLETE from a prior failed creation. Deleting dead stack before redeployment...`);
-        execFileSync("aws", ["cloudformation", "delete-stack", "--stack-name", config.stack]);
-        await sleep(15000);
+      const allStacks = awsJson(["cloudformation", "describe-stacks"]).Stacks || [];
+      for (const s of allStacks) {
+        const isTarget = s.StackName === config.stack || (s.StackName.startsWith(`${config.stack}-`) && s.StackName.endsWith("-CompanionStack"));
+        if (isTarget && s.StackStatus === "ROLLBACK_COMPLETE") {
+          console.log(`Stack ${s.StackName} is in ROLLBACK_COMPLETE from a prior failed creation. Deleting dead stack before redeployment...`);
+          execFileSync("aws", ["cloudformation", "delete-stack", "--stack-name", s.StackName]);
+          await sleep(20000);
+        }
       }
     } catch (_) {
-      // Stack does not exist yet, normal for first deploy
+      // Normal if no stacks exist yet
     }
 
     try {
