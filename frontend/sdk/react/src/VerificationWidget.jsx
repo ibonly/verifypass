@@ -1497,7 +1497,7 @@ function VerificationWidgetSession({
 
 if (!consented && !mobileHandoff) {
     return (
-      <div style={{ maxWidth: 420, margin: "0 auto", fontFamily: "system-ui", sans-serif }}>
+      <div style={{ maxWidth: 420, margin: "0 auto", fontFamily: "system-ui, sans-serif" }}>
         {theme.logoUrl && (
           <img src={theme.logoUrl} alt="" style={{ height: 32, marginBottom: 12 }} />
         )}
