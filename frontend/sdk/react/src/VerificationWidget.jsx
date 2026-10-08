@@ -34,7 +34,11 @@ const STEP_COPY = {
     facingMode: "user"
   },
   processing: { title: "Verifying…", hint: "This usually takes a few seconds." },
-  complete: { title: "Done", hint: "" }
+  complete: { title: "Done", hint: "" },
+  // Mobile handoff: the desktop shows a QR and waits for the phone to finish.
+  // No camera, no capture — the phone runs the hosted page and this widget
+  // resolves when the session reaches a terminal status.
+  mobile: { title: "Verify on your phone", hint: "Scan the QR code with your phone camera to continue.", facingMode: null }
 };
 
 // Document-step guide box: ID-1 card aspect (85.6×54mm), centered, matching
@@ -267,7 +271,13 @@ function VerificationWidgetSession({
   onError,
   onStepChange,
   /** Screen-flash liveness after the selfie (v7 1.1). Off only for tenants that opt out. */
-  screenFlash = true
+  screenFlash = true,
+  /** Mobile handoff: render a QR code the user scans with their phone, which
+   *  opens the hosted verification page in its browser and performs the
+   *  capture there. The desktop widget never acquires a camera in this mode;
+   *  it polls for the terminal result instead. The phone's user records their
+   *  own consent (the hosted page has its own consent gate). */
+  mobileHandoff = false
 }) {
   const { publicKey, baseUrl, faceModelUrl, landmarkModelUrl } = useVerifyPass();
   const videoRef = useRef(null);
@@ -331,6 +341,23 @@ function VerificationWidgetSession({
   const [canReissue, setCanReissue] = useState(false); // D3: "try a different movement" offer
   const [cameraPaused, setCameraPaused] = useState(false); // B5
   const [cameraEpoch, setCameraEpoch] = useState(0);       // bump to restart the camera effect
+  // Mobile handoff: the hosted URL the user's phone opens when it scans the QR.
+  // Built once (after getChallenge) and never re-derived — the token is
+  // single-session, so a stale copy is harmless, but re-encoding on every
+  // render would churn the QR image for no reason.
+  const [mobileUrl, setMobileUrl] = useState(null);
+  const [mobileError, setMobileError] = useState(null);
+  const [mobilePolling, setMobilePolling] = useState(false);
+  // Phases of the phone-side verification, surfaced so the user knows the
+  // phone is actually working (not just "waiting" forever).
+  const [mobilePhase, setMobilePhase] = useState("waiting"); // waiting | verifying | finalising
+  // Bumped by the "Retry" button. It is in the effect's deps so a failed
+  // poll (timeout/expired) can be restarted without aborting the shared
+  // client controller — the effect tears down its OWN child controller.
+  const [mobileRetryEpoch, setMobileRetryEpoch] = useState(0);
+  // QR image data-URL, generated lazily from mobileUrl by the `qrcode`
+  // package so the normal desktop flow never bundles it.
+  const [qrDataUrl, setQrDataUrl] = useState(null);
   // Document step: has the ID actually entered the frame? (drives the hint)
   const [docSeen, setDocSeen] = useState(false);
   // Document step: does the change-region look like a CARD? (straight edges)
@@ -378,7 +405,10 @@ function VerificationWidgetSession({
       setActions(challengeActions);
       let flow;
       try {
-        flow = createFlow(verificationType, { documentBack: needsDocumentBack(documentTypes) });
+        flow = createFlow(verificationType, {
+          documentBack: needsDocumentBack(documentTypes),
+          mobileHandoff
+        });
       } catch (err) {
         setInitError("Unsupported verification workflow");
         onErrorRef.current?.(err);
@@ -390,9 +420,103 @@ function VerificationWidgetSession({
         setFlowState(s);
         if (onStepChangeRef.current) onStepChangeRef.current(s.step);
       });
+      // Mobile handoff: build the hosted URL the phone opens. The token lives
+      // in the URL fragment, so it never reaches any server — the QR is safe
+      // to display. Failure here is a config problem, not a session problem.
+      if (mobileHandoff) {
+        try {
+          setMobileUrl(client.getHostedUrl());
+        } catch (err) {
+          setMobileError(err.message || String(err));
+        }
+      }
     })();
     return () => { cancelled = true; client?.dispose(); off(); };
-  }, [baseUrl, publicKey, sessionId, sdkToken, initEpoch]);
+  }, [baseUrl, publicKey, sessionId, sdkToken, initEpoch, mobileHandoff]);
+
+  // Mobile handoff: the desktop shows a QR and waits for the phone to finish.
+  // The phone runs the hosted page in its browser — it records its OWN
+  // consent, uploads captures to the SAME session, and submits. This widget
+  // never acquires a camera in this mode; it just polls until terminal.
+  //
+  // The poll runs on a CHILD AbortController linked to the parent, so:
+  //   * unmount / session change (parent abort) cancels it, and
+  //   * "Retry" after a failed poll restarts it WITHOUT aborting the shared
+  //     client controller — which would kill the init effect and any later
+  //     step. The child is aborted in cleanup; the deps include
+  //     `mobileRetryEpoch` so a retry re-runs the effect.
+  useEffect(() => {
+    const client = clientRef.current;
+    const flow = flowRef.current;
+    if (!client || !flow || !mobileHandoff) return undefined;
+    if (flowState?.step !== "mobile") return undefined;
+    if (!mobileUrl) return undefined;
+
+    let cancelled = false;
+    const pollController = new AbortController();
+    const onParentAbort = () => { pollController.abort(); };
+    client.controller.signal.addEventListener("abort", onParentAbort, { once: true });
+
+    setMobilePolling(true);
+    setMobilePhase("waiting");
+    setMobileError(null);
+
+    const onTick = (s) => {
+      if (cancelled) return;
+      // Surface real progress to the user. The spinner alone reads as
+      // "waiting" forever; the copy tells them the phone is actually working.
+      // `created` → nothing has happened yet, `started` → the phone is
+      // uploading captures, `submitted` → the worker is finalising.
+      if (s.status === "started") setMobilePhase("verifying");
+      else if (s.status === "submitted") setMobilePhase("finalising");
+    };
+
+    const settle = (result) => {
+      if (cancelled) return;
+      setMobilePolling(false);
+      flow.finish(result);
+      if (onCompleteRef.current) onCompleteRef.current(result);
+    };
+
+    const fail = (err) => {
+      if (cancelled) return;
+      setMobilePolling(false);
+      flow.fail(err);
+      if (onErrorRef.current) onErrorRef.current(err);
+    };
+
+    client.waitForResult({
+      intervalMs: 2500,
+      timeoutMs: 10 * 60 * 1000, // 10 min — the session's own TTL is the real deadline
+      onTick,
+      signal: pollController.signal
+    }).then(settle).catch(fail);
+
+    return () => {
+      cancelled = true;
+      client.controller.signal.removeEventListener("abort", onParentAbort);
+      pollController.abort();
+    };
+  }, [mobileHandoff, flowState?.step, mobileUrl, mobileRetryEpoch]);
+
+  // Render the hosted URL as a QR code. Lazy-loaded so the normal desktop
+  // flow never bundles the `qrcode` package; the image is a data-URL, so it
+  // travels inline with the widget and needs no network request.
+  useEffect(() => {
+    if (!mobileUrl) { setQrDataUrl(null); return; }
+    let cancelled = false;
+    import("qrcode").then(async (QR) => {
+      try {
+        const dataUrl = await QR.toDataURL(mobileUrl, { errorCorrectionLevel: "M", margin: 2, width: 256 });
+        if (!cancelled) setQrDataUrl(dataUrl);
+      } catch (err) {
+        if (!cancelled) setMobileError(err.message || String(err));
+      }
+    }).catch((err) => {
+      if (!cancelled) setMobileError(err.message || String(err));
+    });
+    return () => { cancelled = true; };
+  }, [mobileUrl]);
 
   // camera lifecycle keyed on facingMode (not step) so same-camera transitions
   // like liveness → face keep the existing stream instead of restarting it.
@@ -1371,9 +1495,9 @@ function VerificationWidgetSession({
   const pillDisplay = showGuide ? (GUIDE_COPY[framingGuide] || "Position your face") : pillText;
   const ringColor = green ? "#059669" : "#E5E7EB";
 
-  if (!consented) {
+if (!consented && !mobileHandoff) {
     return (
-      <div style={{ maxWidth: 420, margin: "0 auto", fontFamily: "system-ui, sans-serif" }}>
+      <div style={{ maxWidth: 420, margin: "0 auto", fontFamily: "system-ui", sans-serif }}>
         {theme.logoUrl && (
           <img src={theme.logoUrl} alt="" style={{ height: 32, marginBottom: 12 }} />
         )}
@@ -1612,6 +1736,45 @@ ok ${debugInfo.ok} holding ${debugInfo.holding} wrongWay ${debugInfo.wrongWay} f
           }} />
           <style>{"@keyframes vp-spin { to { transform: rotate(360deg) } }"}</style>
           Checking liveness and matching your ID…
+        </div>
+      )}
+
+      {step === "mobile" && (
+        <div style={{ textAlign: "center", padding: "8px 0" }}>
+          <p style={{ margin: "0 0 16px", fontSize: 15, color: "#374151" }}>
+            Open your phone's camera app and point it at this QR code. It opens the verification page in your phone's browser.
+          </p>
+          {mobileUrl && (
+            <div style={{ display: "inline-flex", padding: 16, background: "#fff", borderRadius: 12, boxShadow: "0 2px 12px rgba(0,0,0,0.15)" }}>
+              {qrDataUrl ? (
+                <img src={qrDataUrl} alt="QR code — scan with your phone camera" width={256} height={256} />
+              ) : (
+                <div style={{ width: 256, height: 256, display: "flex", alignItems: "center", justifyContent: "center", color: "#6B7280", fontSize: 14 }}>
+                  Generating QR…
+                </div>
+              )}
+            </div>
+          )}
+          {mobileError && (
+            <p role="alert" style={{ color: "#DC2626", fontSize: 13, margin: "12px 0 0" }}>{mobileError}</p>
+          )}
+          {error && (
+            <p role="alert" style={{ color: "#DC2626", fontSize: 13, margin: "12px 0 0", textAlign: "center" }}>
+              {error.message}{" "}
+              <button onClick={() => { setMobileError(null); flowRef.current.retry(); setMobileRetryEpoch((e) => e + 1); }} style={{ textDecoration: "underline", background: "none", border: 0, color: "inherit", cursor: "pointer" }}>
+                Retry
+              </button>
+            </p>
+          )}
+          <p aria-live="polite" role="status" style={{ margin: "16px 0 0", fontSize: 14, color: "#6B7280" }}>
+            {mobilePhase === "verifying" ? "Verifying on your phone — this usually takes a few seconds"
+              : mobilePhase === "finalising" ? "Finalising your verification on your phone…"
+              : "Scan the code above to begin"}
+          </p>
+          {mobilePolling && (
+            <div style={{ width: 32, height: 32, margin: "12px auto 0", borderRadius: "50%", border: `3px solid ${primary}`, borderTopColor: "transparent", animation: "vp-spin 0.8s linear infinite" }} />
+          )}
+          <style>{"@keyframes vp-spin { to { transform: rotate(360deg) } }"}</style>
         </div>
       )}
 

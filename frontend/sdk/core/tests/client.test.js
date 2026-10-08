@@ -146,3 +146,68 @@ test("waitForResult times out with SESSION_EXPIRED", async () => {
     (e) => e.code === "SESSION_EXPIRED"
   );
 });
+
+test("waitForResult honours an explicit signal (caller-scoped, not the shared parent)", async () => {
+  // A child controller lets a caller restart polling on retry WITHOUT
+  // aborting the shared parent — which would kill the init effect.
+  const fetch = mockFetch((n) =>
+    n < 2 ? { body: { success: true, status: "submitted" } } : { body: { success: true, status: "approved", sessionId: "vps_1" } }
+  );
+  const client = new VerifyPassClient({ ...BASE, fetchImpl: fetch });
+  const child = new AbortController();
+  const result = await client.waitForResult({ intervalMs: 1, signal: child.signal });
+  assert.equal(result.status, "approved");
+  assert.equal(fetch.calls.length, 2);
+  // The parent is untouched — a later poll would still work.
+  assert.equal(client.controller.signal.aborted, false);
+});
+
+test("waitForResult aborts on its own signal without touching the parent", async () => {
+  const fetch = mockFetch(() => ({ body: { success: true, status: "submitted" } }));
+  const client = new VerifyPassClient({ ...BASE, fetchImpl: fetch });
+  const child = new AbortController();
+  child.abort();
+  await assert.rejects(
+    () => client.waitForResult({ intervalMs: 1, timeoutMs: 10000, signal: child.signal }),
+    (e) => /Verification cancelled/.test(e.message)
+  );
+  assert.equal(client.controller.signal.aborted, false);
+});
+
+test("getHostedUrl builds the hosted verification URL with the token in the fragment", async () => {
+  const fetch = mockFetch([{ body: {
+    success: true, verificationType: "ID_AND_FACE", livenessActions: ["turn_left"],
+    hostedBaseUrl: "https://verify.example.com", attemptId: "att_1"
+  }}]);
+  const client = new VerifyPassClient({ ...BASE, fetchImpl: fetch });
+  await client.getChallenge();
+  const url = client.getHostedUrl();
+  const u = new URL(url);
+  assert.equal(u.origin, "https://verify.example.com");
+  assert.equal(u.pathname, "/session/vps_1");
+  assert.equal(u.hash, "#t=sdk_tok");
+  // The token lives ONLY in the fragment — browsers drop fragments on
+  // requests, so it never reaches any server. Assert the server-sent
+  // portion (pathname + search) is free of the token.
+  const serverSent = `${u.origin}${u.pathname}${u.search}`;
+  assert.ok(!serverSent.includes("sdk_tok"), "token must not appear in the server-sent URL portion");
+  // No query string, no credentials, no fragment other than the token
+  assert.equal(u.search, "");
+  assert.equal(u.username, "");
+  assert.equal(u.password, "");
+});
+
+test("getHostedUrl rejects URLs with a query string or credentials", async () => {
+  const fetch = mockFetch([{ body: {
+    success: true, verificationType: "ID_AND_FACE", livenessActions: ["turn_left"],
+    hostedBaseUrl: "https://verify.example.com/?x=1", attemptId: "att_1"
+  }}]);
+  const client = new VerifyPassClient({ ...BASE, fetchImpl: fetch });
+  await client.getChallenge();
+  assert.throws(() => client.getHostedUrl(), /Invalid hosted verification URL/);
+});
+
+test("getHostedUrl throws before getChallenge has run", () => {
+  const client = new VerifyPassClient({ ...BASE, fetchImpl: mockFetch([]) });
+  assert.throws(() => client.getHostedUrl(), /Hosted verification URL is not configured/);
+});

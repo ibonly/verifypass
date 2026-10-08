@@ -31,6 +31,37 @@ The provider reads public Vite configuration by default. Explicit props override
 
 The API URL can be omitted for server-issued self-locating tokens. Explicit trusted API configuration takes precedence. Decoding a token's API URL does not authenticate the token: obtain tokens from your server, not arbitrary external input. HTTPS is required except on loopback development hosts. URLs containing credentials, queries or fragments are rejected. Existing build-time `VP_API_BASE` remains supported by the hosted/sample Vite configurations.
 
+## Mobile handoff (QR code)
+
+The widget can hand verification to the user's phone instead of running it on the desktop. Pass `mobileHandoff` to `<VerificationWidget>`:
+
+```jsx
+<VerificationWidget
+  sessionId={sessionId}
+  sdkToken={sdkToken}
+  mobileHandoff
+  onComplete={onComplete}
+/>
+```
+
+```js
+// Vanilla / CDN bundle (dist/verifypass.js)
+VerifyPass.init({
+  container: "#verification",
+  sessionId,
+  sdkToken,
+  mobileHandoff: true,
+  onComplete: (result) => { /* … */ },
+  onError: (error) => { /* … */ }
+});
+```
+
+The flow then becomes `mobile → processing → complete` for every verification type. The desktop shows a QR code the user scans with their phone camera; the phone opens the **hosted verification page** in its browser, records its own consent, and performs the capture there. The desktop never acquires a camera — it polls `/status` until the session reaches a terminal outcome, then calls `onComplete`.
+
+The QR payload is the hosted URL `<hostedBaseUrl>/session/<sessionId>#t=<sdkToken>`. The token lives in the URL fragment, so browsers never send it to any server — the QR is safe to display and screenshot. `getChallenge()` returns `hostedBaseUrl`, and `VerifyPassClient.getHostedUrl()` builds the URL in one place (validating it has no credentials, query, or fragment other than the token). The phone runs the same hosted page and upload endpoints the desktop would have, so no backend changes are needed.
+
+The phone's user records their own biometric consent; the desktop skips its consent gate in this mode. Two retry affordances remain on the desktop in handoff mode: a **Retry** link in the mobile step re-arms polling after a failed poll (no server call, so a transient network blip does not burn a retry attempt), and the result screen's **Try again** reopens the session server-side (audit-logged, attempt-capped) after a rejected, failed, or manual-review outcome. The vanilla bundle reports outcomes through `onComplete`; re-init for a fresh session.
+
 The sample application is a local integration harness. Its manually entered secret-key session-creation flow is not a production architecture. Build-time `VP_SECRET_KEY` injection has been removed; never deploy the harness as your customer verification experience.
 
 ## Hosting And Lifecycle

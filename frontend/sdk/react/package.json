@@ -8,7 +8,8 @@
   },
   "dependencies": {
     "@verifypass/sdk-core": "file:../core",
-    "onnxruntime-web": "^1.19.2"
+    "onnxruntime-web": "^1.19.2",
+    "qrcode": "^1.5.4"
   },
   "license": "UNLICENSED"
 }

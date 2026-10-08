@@ -157,7 +157,34 @@ class VerifyPassClient {
   async getChallenge() {
     const data = await this._get(`/v1/verification-sessions/${this.sessionId}/challenge`);
     this.attemptId = data.attemptId; this.flashSequence = data.flashSequence;
+    this.hostedBaseUrl = data.hostedBaseUrl || null;
     return data;
+  }
+
+  /**
+   * Build the hosted verification URL the user's phone opens when it scans the
+   * mobile-handoff QR. The token lives in the URL FRAGMENT — browsers never
+   * send fragments to any server, so the credential stays out of access logs
+   * and referrers, exactly like the hosted page already relies on.
+   *
+   * The URL is re-derived here (rather than returned by the server) so the
+   * desktop widget controls the payload shape. `hostedBaseUrl` comes from
+   * `getChallenge()`; if it is missing the caller may pass an explicit
+   * override. Throws on anything that would put the token in the wire.
+   * @returns {string}
+   */
+  getHostedUrl(hostedBaseUrl = null) {
+    const base = hostedBaseUrl || this.hostedBaseUrl;
+    if (typeof base !== "string" || !base) throw new Error("Hosted verification URL is not configured — call getChallenge() first");
+    const url = new URL(base);
+    const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+    if ((url.protocol !== "https:" && !(url.protocol === "http:" && loopback))
+        || url.username || url.password || url.search || url.hash) {
+      throw new Error("Invalid hosted verification URL — must be HTTPS (HTTP only on localhost) with no credentials, query or fragment");
+    }
+    url.pathname = `${url.pathname.replace(/\/$/, "")}/session/${encodeURIComponent(this.sessionId)}`;
+    url.hash = `t=${encodeURIComponent(this.sdkToken)}`;
+    return url.href;
   }
 
   /**
@@ -247,15 +274,22 @@ class VerifyPassClient {
    * Transient failures (network errors, 5xx, 429, timeouts) are retried
    * until the overall deadline; only definitive API answers (401/403/404 —
    * bad token, revoked key, unknown session) abort immediately.
+   *
+   * `signal` lets a caller scope this poll to its OWN lifecycle instead of
+   * the shared parent controller. The mobile handoff widget needs exactly
+   * that: it restarts polling on "Retry" without aborting the whole client
+   * (which would kill the init effect and any later step). When omitted the
+   * default behaviour is unchanged — everything polls against the parent.
    */
-  async waitForResult({ intervalMs = 2500, timeoutMs = 120000, onTick } = {}) {
+  async waitForResult({ intervalMs = 2500, timeoutMs = 120000, onTick, signal } = {}) {
     if (!Number.isFinite(intervalMs) || intervalMs <= 0 || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
       throw new Error("Polling interval and timeout must be positive finite numbers");
     }
+    const pollSignal = signal || this.controller.signal;
     const deadline = Date.now() + timeoutMs;
     let lastError = null;
     for (;;) {
-      if (this.controller.signal.aborted) throw new Error("Verification cancelled");
+      if (pollSignal.aborted) throw new Error("Verification cancelled");
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw lastError || new VerifyPassApiError("SESSION_EXPIRED", "Timed out waiting for result", 408);
       let status;
@@ -278,11 +312,10 @@ class VerifyPassClient {
         throw lastError || new VerifyPassApiError("SESSION_EXPIRED", "Timed out waiting for result", 408);
       }
       await new Promise((resolve, reject) => {
-        const signal = this.controller.signal;
         const abort = () => { clearTimeout(timer); reject(new Error("Verification cancelled")); };
-        const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, Math.min(intervalMs, Math.max(0, deadline - Date.now())));
-        signal.addEventListener("abort", abort, { once: true });
-        if (signal.aborted) abort();
+        const timer = setTimeout(() => { pollSignal.removeEventListener("abort", abort); resolve(); }, Math.min(intervalMs, Math.max(0, deadline - Date.now())));
+        pollSignal.addEventListener("abort", abort, { once: true });
+        if (pollSignal.aborted) abort();
       });
     }
   }

@@ -14,6 +14,7 @@ exports.readPublicConfig = require("./config").readPublicConfig;
 exports.createFlow = flow.createFlow;
 exports.needsDocumentBack = flow.needsDocumentBack;
 exports.STEP_SEQUENCES = flow.STEP_SEQUENCES;
+exports.MOBILE_HANDOFF_SEQUENCES = flow.MOBILE_HANDOFF_SEQUENCES;
 exports.TERMINAL_STATUSES = flow.TERMINAL_STATUSES;
 exports.toGrayscale = quality.toGrayscale;
 exports.laplacianVariance = quality.laplacianVariance;
