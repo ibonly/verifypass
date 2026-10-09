@@ -41,16 +41,20 @@ export default function App() {
   const [secretKey, setSecretKey] = useState("");
   const [customerRef, setCustomerRef] = useState("");
   const [verificationType, setVerificationType] = useState("FACE_ONLY");
+  const [mobileHandoff, setMobileHandoff] = useState(false);
   const [session, setSession] = useState(null);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const [cameraState, setCameraState] = useState("pending"); // pending | granted | denied | unsupported
-  const widgetBaseUrl = API_BASE;
 
   // Request camera permission as soon as the page loads (not at capture time).
   // Once granted, the widget's camera starts later without a second prompt.
   useEffect(() => {
+    if (mobileHandoff) {
+      setCameraState("pending");
+      return undefined;
+    }
     let stream = null;
     let cancelled = false;
     const md = typeof navigator !== "undefined" ? navigator.mediaDevices : null;
@@ -66,7 +70,7 @@ export default function App() {
       })
       .catch(() => { if (!cancelled) setCameraState("denied"); });
     return () => { cancelled = true; if (stream) stream.getTracks().forEach((t) => t.stop()); };
-  }, []);
+  }, [mobileHandoff]);
 
   async function startSession(e) {
     e.preventDefault();
@@ -155,6 +159,20 @@ export default function App() {
                 <option value="ID_ONLY">ID only (document)</option>
               </select>
 
+              <label style={{ display: "flex", gap: 8, alignItems: "flex-start", marginTop: 12, fontSize: 14, color: "#374151" }}>
+                <input
+                  type="checkbox"
+                  checked={mobileHandoff}
+                  onChange={(e) => setMobileHandoff(e.target.checked)}
+                  style={{ marginTop: 3 }}
+                />
+                <span>
+                  Verify on my phone (show QR code)
+                  <br />
+                  <small style={{ color: "#6B7280" }}>The phone opens the hosted verification page and performs the capture.</small>
+                </span>
+              </label>
+
               {error && <p style={{ color: "#DC2626", fontSize: 14 }}>{error}</p>}
 
               <button type="submit" disabled={busy || !secretKey.trim()} style={{
@@ -178,10 +196,11 @@ export default function App() {
               <br />
               Widget API is using <code>{API_BASE}</code>.
             </div>
-            <VerifyPassProvider publicKey={PUBLIC_KEY} baseUrl={widgetBaseUrl} faceModelUrl={import.meta.env.VITE_VP_FACE_MODEL_URL || DEFAULT_FACE_MODEL_URL}>
+            <VerifyPassProvider publicKey={PUBLIC_KEY} faceModelUrl={import.meta.env.VITE_VP_FACE_MODEL_URL || DEFAULT_FACE_MODEL_URL}>
               <VerificationWidget
                 sessionId={session.sessionId}
                 sdkToken={session.sdkToken}
+                mobileHandoff={mobileHandoff}
                 onComplete={(r) => setResult(r)}
                 onStepChange={(s) => {
                   // a retry reset the flow — clear the stale result

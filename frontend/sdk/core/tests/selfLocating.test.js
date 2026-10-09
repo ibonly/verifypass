@@ -29,14 +29,16 @@ test("client is self-locating: no baseUrl needed with a v1 token", () => {
   assert.equal(c.baseUrl, "https://api.prod.verifypass.com");
 });
 
-test("explicit baseUrl overrides the token (dev proxies)", () => {
-  const c = new VerifyPassClient({
-    sessionId: "vps_1",
-    sdkToken: v1Token("https://api.prod.verifypass.com"),
-    baseUrl: "http://localhost:3000",
-    fetchImpl: noFetch
-  });
-  assert.equal(c.baseUrl, "http://localhost:3000");
+test("explicit baseUrl must match a self-locating credential", () => {
+  assert.throws(
+    () => new VerifyPassClient({
+      sessionId: "vps_1",
+      sdkToken: v1Token("https://api.prod.verifypass.com"),
+      baseUrl: "http://localhost:3000",
+      fetchImpl: noFetch
+    }),
+    /does not match the credential issuer/
+  );
 });
 
 test("legacy token without baseUrl fails with a clear error", () => {

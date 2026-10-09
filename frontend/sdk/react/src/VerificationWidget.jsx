@@ -4,7 +4,7 @@ import {
   startCamera, stopCamera, captureFrame, captureGuideFrame,
   grabAnalysisFrame, grabSquareFrame, grabFixedFrame, frameMotion, toGrayscale, meanBrightness, laplacianVariance,
   createFramingStabilizer, createActionDetector, bandMotion, createDocumentGate, isDominantFace, isFrontalPose,
-  nextVideoFrame, isReferencePose, frontalRefFromSamples, FLASH, flashCropRect
+  nextVideoFrame, isReferencePose, frontalRefFromSamples, FLASH, flashCropRect, pollingTimeoutForExpiry
 } from "@verifypass/sdk-core";
 import { useVerifyPass } from "./VerifyPassProvider";
 import { createFaceDetector } from "./faceDetector";
@@ -270,6 +270,7 @@ function VerificationWidgetSession({
   onComplete,
   onError,
   onStepChange,
+  onTelemetry,
   /** Screen-flash liveness after the selfie (v7 1.1). Off only for tenants that opt out. */
   screenFlash = true,
   /** Mobile handoff: render a QR code the user scans with their phone, which
@@ -298,9 +299,11 @@ function VerificationWidgetSession({
   const onErrorRef = useRef(onError);
   const onStepChangeRef = useRef(onStepChange);
   const onCompleteRef = useRef(onComplete);
+  const onTelemetryRef = useRef(onTelemetry);
   onErrorRef.current = onError;
   onStepChangeRef.current = onStepChange;
   onCompleteRef.current = onComplete;
+  onTelemetryRef.current = onTelemetry;
 
   const [flowState, setFlowState] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -346,6 +349,8 @@ function VerificationWidgetSession({
   // single-session, so a stale copy is harmless, but re-encoding on every
   // render would churn the QR image for no reason.
   const [mobileUrl, setMobileUrl] = useState(null);
+  const [mobileExpiresAt, setMobileExpiresAt] = useState(null);
+  const [mobileHandoffExpiresAt, setMobileHandoffExpiresAt] = useState(null);
   const [mobileError, setMobileError] = useState(null);
   const [mobilePolling, setMobilePolling] = useState(false);
   // Phases of the phone-side verification, surfaced so the user knows the
@@ -355,6 +360,8 @@ function VerificationWidgetSession({
   // poll (timeout/expired) can be restarted without aborting the shared
   // client controller — the effect tears down its OWN child controller.
   const [mobileRetryEpoch, setMobileRetryEpoch] = useState(0);
+  const [qrRetryEpoch, setQrRetryEpoch] = useState(0);
+  const [mobileLinkStatus, setMobileLinkStatus] = useState(null);
   // QR image data-URL, generated lazily from mobileUrl by the `qrcode`
   // package so the normal desktop flow never bundles it.
   const [qrDataUrl, setQrDataUrl] = useState(null);
@@ -380,11 +387,13 @@ function VerificationWidgetSession({
       try {
         client = new VerifyPassClient({ baseUrl, publicKey, sessionId, sdkToken });
         clientRef.current = client;
-        const c = await client.getChallenge();
+        const c = await client.getChallenge({ mobileHandoff });
         if (cancelled) return;
         verificationType = c.verificationType || "ID_AND_FACE";
         challengeActions = Array.isArray(c.livenessActions) ? c.livenessActions : [];
         documentTypes = Array.isArray(c.documentTypes) ? c.documentTypes : [];
+        setMobileExpiresAt(c.expiresAt || null);
+        setMobileHandoffExpiresAt(c.handoffExpiresAt || null);
         // Rehydrate attempt state — a refresh mid-retry must not reset the
         // counter or hide the manual-upload option the server already granted.
         if (typeof c.attempts === "number") {
@@ -420,9 +429,9 @@ function VerificationWidgetSession({
         setFlowState(s);
         if (onStepChangeRef.current) onStepChangeRef.current(s.step);
       });
-      // Mobile handoff: build the hosted URL the phone opens. The token lives
-      // in the URL fragment, so it never reaches any server — the QR is safe
-      // to display. Failure here is a config problem, not a session problem.
+      // Build the hosted URL with the short-lived, one-time handoff token.
+      // The fragment stays out of HTTP requests, but remains sensitive until
+      // the phone claims it. Failure here is a configuration problem.
       if (mobileHandoff) {
         try {
           setMobileUrl(client.getHostedUrl());
@@ -487,7 +496,7 @@ function VerificationWidgetSession({
 
     client.waitForResult({
       intervalMs: 2500,
-      timeoutMs: 10 * 60 * 1000, // 10 min — the session's own TTL is the real deadline
+      timeoutMs: pollingTimeoutForExpiry(mobileExpiresAt),
       onTick,
       signal: pollController.signal
     }).then(settle).catch(fail);
@@ -497,7 +506,7 @@ function VerificationWidgetSession({
       client.controller.signal.removeEventListener("abort", onParentAbort);
       pollController.abort();
     };
-  }, [mobileHandoff, flowState?.step, mobileUrl, mobileRetryEpoch]);
+  }, [mobileHandoff, flowState?.step, mobileUrl, mobileExpiresAt, mobileRetryEpoch]);
 
   // Render the hosted URL as a QR code. Lazy-loaded so the normal desktop
   // flow never bundles the `qrcode` package; the image is a data-URL, so it
@@ -505,17 +514,39 @@ function VerificationWidgetSession({
   useEffect(() => {
     if (!mobileUrl) { setQrDataUrl(null); return; }
     let cancelled = false;
+    setQrDataUrl(null);
     import("qrcode").then(async (QR) => {
       try {
         const dataUrl = await QR.toDataURL(mobileUrl, { errorCorrectionLevel: "M", margin: 2, width: 256 });
-        if (!cancelled) setQrDataUrl(dataUrl);
+        if (!cancelled) {
+          setQrDataUrl(dataUrl);
+          setMobileError(null);
+        }
       } catch (err) {
-        if (!cancelled) setMobileError(err.message || String(err));
+        if (!cancelled) {
+          setMobileError("Unable to generate the QR code. Retry or copy the secure link.");
+          onTelemetryRef.current?.({ type: "mobile_handoff_qr_failed", stage: "encode", errorName: err?.name || "Error" });
+        }
       }
     }).catch((err) => {
-      if (!cancelled) setMobileError(err.message || String(err));
+      if (!cancelled) {
+        setMobileError("Unable to load the QR generator. Retry or copy the secure link.");
+        onTelemetryRef.current?.({ type: "mobile_handoff_qr_failed", stage: "load", errorName: err?.name || "Error" });
+      }
     });
     return () => { cancelled = true; };
+  }, [mobileUrl, qrRetryEpoch]);
+
+  const copyMobileLink = useCallback(async () => {
+    if (!mobileUrl) return;
+    try {
+      await navigator.clipboard.writeText(mobileUrl);
+      setMobileLinkStatus("Secure link copied. Treat it like a password.");
+      onTelemetryRef.current?.({ type: "mobile_handoff_link_copied" });
+    } catch (err) {
+      setMobileLinkStatus("Could not copy the link. Open it in a new tab instead.");
+      onTelemetryRef.current?.({ type: "mobile_handoff_copy_failed", errorName: err?.name || "Error" });
+    }
   }, [mobileUrl]);
 
   // camera lifecycle keyed on facingMode (not step) so same-camera transitions
@@ -1757,6 +1788,29 @@ ok ${debugInfo.ok} holding ${debugInfo.holding} wrongWay ${debugInfo.wrongWay} f
           )}
           {mobileError && (
             <p role="alert" style={{ color: "#DC2626", fontSize: 13, margin: "12px 0 0" }}>{mobileError}</p>
+          )}
+          {mobileUrl && (
+            <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap", marginTop: 12 }}>
+              {!qrDataUrl && mobileError && (
+                <button type="button" onClick={() => setQrRetryEpoch((e) => e + 1)} style={{ padding: "8px 12px", borderRadius: 8, border: `1px solid ${primary}`, background: "#fff", color: primary, cursor: "pointer" }}>
+                  Retry QR code
+                </button>
+              )}
+              <button type="button" onClick={copyMobileLink} style={{ padding: "8px 12px", borderRadius: 8, border: `1px solid ${primary}`, background: "#fff", color: primary, cursor: "pointer" }}>
+                Copy secure link
+              </button>
+              <a href={mobileUrl} target="_blank" rel="noopener noreferrer" style={{ padding: "8px 12px", borderRadius: 8, border: `1px solid ${primary}`, color: primary, textDecoration: "none" }}>
+                Open on this device
+              </a>
+            </div>
+          )}
+          {mobileLinkStatus && <p role="status" style={{ margin: "8px 0 0", fontSize: 12, color: "#6B7280" }}>{mobileLinkStatus}</p>}
+          {mobileUrl && (
+            <p style={{ margin: "10px 0 0", fontSize: 12, color: "#6B7280" }}>
+              This code and link are private, expire shortly, and can be claimed once. Do not share or screenshot them.
+              {mobileHandoffExpiresAt ? ` Code expires ${new Date(mobileHandoffExpiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.` : ""}
+              {mobileExpiresAt ? ` Session expires ${new Date(mobileExpiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.` : ""}
+            </p>
           )}
           {error && (
             <p role="alert" style={{ color: "#DC2626", fontSize: 13, margin: "12px 0 0", textAlign: "center" }}>

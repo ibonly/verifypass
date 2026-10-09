@@ -71,7 +71,7 @@ function sdkOrHostedAuth(req, res, next) {
   }
   return (async () => {
     const { getDb } = require("../lib/db");
-    const { verifySdkToken } = require("../services/sessionService");
+    const { verifySessionSdkToken } = require("../services/sessionService");
     const sessionUid = req.params.sessionId;
     // Header first (v5 A5): a token in the query string lands in access,
     // proxy and CDN logs. Query stays accepted for one release for older
@@ -85,7 +85,7 @@ function sdkOrHostedAuth(req, res, next) {
 
     const db = getDb();
     const session = await db.verificationSession.findFirst({ where: { sessionUid } });
-    if (!session || !session.sdkTokenHash || !verifySdkToken(sessionUid, token, session.sdkTokenHash)) {
+    if (!verifySessionSdkToken(session, token)) {
       throw new AppError("INVALID_API_KEY");
     }
     const tenant = await db.tenant.findFirst({ where: { id: session.tenantId } });

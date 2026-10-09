@@ -117,6 +117,10 @@ model VerificationSession {
   callbackUrl       String?       @map("callback_url")
   metadata          Json?
   sdkTokenHash      String?       @map("sdk_token_hash")
+  mobileSdkTokenHash String?      @map("mobile_sdk_token_hash")
+  handoffTokenHash  String?       @map("handoff_token_hash")
+  handoffExpiresAt  DateTime?     @map("handoff_expires_at")
+  handoffClaimedAt  DateTime?     @map("handoff_claimed_at")
   attemptId         String?       @map("attempt_id")
   attemptNumber     Int           @default(1) @map("attempt_number")
   reissueCount      Int           @default(0) @map("reissue_count")

@@ -1,10 +1,10 @@
-import { useMemo, useState } from "react";
-import { VerifyPassProvider, VerificationWidget } from "@verifypass/react";
+import { useEffect, useMemo, useState } from "react";
+import { VerifyPassProvider, VerificationWidget, claimMobileHandoff } from "@verifypass/react";
 
 /**
  * Hosted verification page (PRD Use Case 5).
- * URL shape: /session/<sessionId>#t=<sdkToken>&r=<redirectUrl>
- * The token lives in the fragment — never sent to any server or logged.
+ * Direct URL: /session/<sessionId>#t=<sdkToken>&r=<redirectUrl>
+ * Mobile handoff URL: /session/<sessionId>#h=<oneTimeHandoffToken>
  */
 function parseLocation() {
   const m = window.location.pathname.match(/\/session\/(vps_[A-Za-z0-9]+)/);
@@ -12,15 +12,44 @@ function parseLocation() {
   return {
     sessionId: m ? m[1] : null,
     sdkToken: frag.get("t"),
+    handoffToken: frag.get("h"),
     redirectUrl: frag.get("r")
   };
 }
 
 export default function App() {
-  const { sessionId, sdkToken, redirectUrl } = useMemo(parseLocation, []);
+  const location = useMemo(parseLocation, []);
+  const { sessionId, handoffToken, redirectUrl } = location;
+  const storageKey = sessionId ? `vp-mobile-token:${sessionId}` : null;
+  const [sdkToken, setSdkToken] = useState(() => {
+    if (location.sdkToken) return location.sdkToken;
+    try { return storageKey ? sessionStorage.getItem(storageKey) : null; } catch (_) { return null; }
+  });
   const [fatal, setFatal] = useState(null);
+  const [claiming, setClaiming] = useState(!!handoffToken && !sdkToken);
 
-  if (!sessionId || !sdkToken) {
+  useEffect(() => {
+    if (!sessionId || !handoffToken || sdkToken) return;
+    let cancelled = false;
+    setClaiming(true);
+    claimMobileHandoff({
+      sessionId,
+      handoffToken,
+      baseUrl: __VP_API_BASE__ || undefined
+    }).then((result) => {
+      if (cancelled) return;
+      try { sessionStorage.setItem(storageKey, result.sdkToken); } catch (_) {}
+      history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+      setSdkToken(result.sdkToken);
+    }).catch((error) => {
+      if (!cancelled) setFatal(error);
+    }).finally(() => {
+      if (!cancelled) setClaiming(false);
+    });
+    return () => { cancelled = true; };
+  }, [sessionId, handoffToken, sdkToken, storageKey]);
+
+  if (!sessionId || (!sdkToken && !handoffToken)) {
     return (
       <Center>
         <h2>Invalid verification link</h2>
@@ -63,10 +92,16 @@ export default function App() {
         <p style={{ color: "#6B7280" }}>
           {fatal.code === "SESSION_EXPIRED"
             ? "This verification session has expired. Please restart from the app that sent you here."
-            : "We couldn't find this verification session."}
+            : fatal.code === "INVALID_API_KEY"
+              ? "This mobile handoff link is invalid, expired, or has already been used."
+              : "We couldn't find this verification session."}
         </p>
       </Center>
     );
+  }
+
+  if (claiming || !sdkToken) {
+    return <Center><p role="status">Opening secure mobile verification…</p></Center>;
   }
 
   return (

@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "description": "VerifyPass verification widget for React",
   "main": "src/index.js",
+  "scripts": {
+    "build": "npm --prefix ../../verify-page run build",
+    "test": "npm --prefix ../../verify-page run test:sdk"
+  },
   "peerDependencies": {
     "react": ">=17"
   },

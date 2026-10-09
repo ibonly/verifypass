@@ -3,7 +3,7 @@
 // The CDN entry embeds the same hosted workflow as the React integration.
 // Consent, camera capture, document backs, challenge guidance and retries
 // therefore share one implementation.
-const { VerifyPassClient, createFlow } = require("@verifypass/sdk-core");
+const { VerifyPassClient, createFlow, pollingTimeoutForExpiry } = require("@verifypass/sdk-core");
 const instances = new WeakMap();
 
 // Copy for the mobile-handoff step. The desktop shows a QR and waits;
@@ -33,7 +33,7 @@ const MOBILE_STYLE = {
 function init(opts = {}) {
   const {
     container, sessionId, sdkToken, publicKey, baseUrl,
-    onComplete, onError,
+    onComplete, onError, onTelemetry,
     /** Mobile handoff: show a QR code the user scans with their phone,
      *  which opens the hosted verification page in its browser. The
      *  desktop widget never acquires a camera in this mode — it polls
@@ -73,11 +73,11 @@ function init(opts = {}) {
     instance.destroy = () => { baseDestroy(); settleReady(); };
 
     try {
-      const challenge = await client.getChallenge();
+      const challenge = await client.getChallenge({ mobileHandoff });
       if (disposed) return;
 
       if (mobileHandoff) {
-        await runMobileHandoff(client, root, challenge, onComplete, onError, settleReady, () => disposed);
+        await runMobileHandoff(client, root, challenge, onComplete, onError, onTelemetry, settleReady, () => disposed);
         await readyGate;
         return;
       }
@@ -113,10 +113,10 @@ function init(opts = {}) {
 // controller until the phone-side verification reaches a terminal
 // outcome. `settleReady` resolves `instance.ready` on success; a
 // recoverable poll failure leaves it pending and surfaces a Retry button.
-async function runMobileHandoff(client, root, challenge, onComplete, onError, settleReady, isDisposed) {
+async function runMobileHandoff(client, root, challenge, onComplete, onError, onTelemetry, settleReady, isDisposed) {
   const flow = createFlow(challenge.verificationType || "ID_AND_FACE", { mobileHandoff: true });
-  // The sdkToken lives in the URL FRAGMENT, so browsers never send it to
-  // any server — the QR is safe to display and screenshot.
+  // The short-lived, one-time handoff credential stays out of HTTP requests,
+  // but the QR remains sensitive until the phone claims it.
   const mobileUrl = client.getHostedUrl();
 
   const wrap = document.createElement("div");
@@ -142,13 +142,56 @@ async function runMobileHandoff(client, root, challenge, onComplete, onError, se
   retry.type = "button";
   retry.textContent = MOBILE_COPY.retry;
   retry.hidden = true;
-  wrap.append(title, hint, image, status, retry);
+  const actions = document.createElement("div");
+  Object.assign(actions.style, { display: "flex", gap: "8px", justifyContent: "center", flexWrap: "wrap", marginBottom: "10px" });
+  const copy = document.createElement("button");
+  Object.assign(copy.style, MOBILE_STYLE.retry);
+  copy.type = "button";
+  copy.textContent = "Copy secure link";
+  const open = document.createElement("a");
+  Object.assign(open.style, MOBILE_STYLE.retry, { color: "#111827", textDecoration: "none" });
+  open.href = mobileUrl;
+  open.target = "_blank";
+  open.rel = "noopener noreferrer";
+  open.textContent = "Open on this device";
+  const qrRetry = document.createElement("button");
+  Object.assign(qrRetry.style, MOBILE_STYLE.retry);
+  qrRetry.type = "button";
+  qrRetry.textContent = "Retry QR code";
+  qrRetry.hidden = true;
+  const security = document.createElement("p");
+  Object.assign(security.style, { fontSize: "12px", color: "#6B7280", margin: "0 0 12px" });
+  security.textContent = `This code and link are private, expire shortly, and can be claimed once. Do not share or screenshot them.${challenge.handoffExpiresAt ? ` Code expires ${new Date(challenge.handoffExpiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.` : ""}${challenge.expiresAt ? ` Session expires ${new Date(challenge.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.` : ""}`;
+  actions.append(copy, open, qrRetry);
+  wrap.append(title, hint, image, actions, security, status, retry);
   root.replaceChildren(wrap);
 
-  // Render the QR lazily so the `qrcode` package is only pulled into the
-  // page for handoff mode — the embedded iframe path never loads it.
-  const QR = await import("qrcode");
-  image.src = await QR.toDataURL(mobileUrl, { errorCorrectionLevel: "M", margin: 2, width: 256 });
+  const renderQr = async () => {
+    qrRetry.hidden = true;
+    image.removeAttribute("src");
+    status.textContent = "Generating QR code…";
+    try {
+      const QR = await import("qrcode");
+      image.src = await QR.toDataURL(mobileUrl, { errorCorrectionLevel: "M", margin: 2, width: 256 });
+      status.textContent = MOBILE_COPY.waiting;
+    } catch (err) {
+      status.textContent = "Unable to generate the QR code. Retry or copy the secure link.";
+      qrRetry.hidden = false;
+      onTelemetry?.({ type: "mobile_handoff_qr_failed", stage: "encode", errorName: err?.name || "Error" });
+    }
+  };
+  qrRetry.addEventListener("click", renderQr);
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(mobileUrl);
+      status.textContent = "Secure link copied. Treat it like a password.";
+      onTelemetry?.({ type: "mobile_handoff_link_copied" });
+    } catch (err) {
+      status.textContent = "Could not copy the link. Open it in a new tab instead.";
+      onTelemetry?.({ type: "mobile_handoff_copy_failed", errorName: err?.name || "Error" });
+    }
+  });
+  await renderQr();
   if (isDisposed()) return;
 
   // Polling runs on a CHILD AbortController linked to the parent:
@@ -171,7 +214,7 @@ async function runMobileHandoff(client, root, challenge, onComplete, onError, se
     retry.hidden = true;
     client.waitForResult({
       intervalMs: 2500,
-      timeoutMs: 10 * 60 * 1000, // the session's own TTL is the real deadline
+      timeoutMs: pollingTimeoutForExpiry(challenge.expiresAt),
       onTick: (s) => {
         if (isDisposed()) return;
         // Surface real progress: `started` → the phone is uploading

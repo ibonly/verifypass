@@ -10,7 +10,14 @@ const assert = require("node:assert/strict");
 const { setDb } = require("../src/lib/db");
 const { createMockDb } = require("./helpers/mockDb");
 const { tenantScope } = require("../src/middleware/tenantScope");
-const { createSession, signSdkToken, verifySdkToken } = require("../src/services/sessionService");
+const {
+  createSession,
+  signSdkToken,
+  verifySdkToken,
+  verifySessionSdkToken,
+  issueHandoffToken,
+  claimHandoffToken
+} = require("../src/services/sessionService");
 const config = require("../src/config");
 
 function scopeFor(tenant) {
@@ -74,4 +81,28 @@ test("legacy raw tokens still verify (hash covers whatever string was issued)", 
   const legacy = "sdk_legacyrandomtoken123";
   const hash = crypto.createHmac("sha256", config.sdkTokenSecret).update(`vps_L.${legacy}`).digest("hex");
   assert.equal(verifySdkToken("vps_L", legacy, hash), true);
+});
+
+test("mobile handoff tokens are short-lived, single-use, and issue a separate mobile credential", async (t) => {
+  const db = createMockDb();
+  setDb(db);
+  t.after(() => setDb(null));
+  const tenant = await db.tenant.create({ data: { tenantUid: "tnt_handoff", companyName: "T", status: "active" } });
+  const scope = scopeFor(tenant);
+  const created = await createSession(scope, {}, false);
+  const session = await scope.sessions.findByUid(created.sessionId);
+  const handoff = await issueHandoffToken(scope, session);
+
+  assert.match(handoff.token, /^vph_v1_[A-Za-z0-9_-]+$/);
+  assert.ok(new Date(handoff.expiresAt) <= new Date(session.expiresAt));
+
+  const claimed = await claimHandoffToken(db, created.sessionId, handoff.token);
+  assert.match(claimed.sdkToken, /^sdk_v1_[A-Za-z0-9_-]+$/);
+  const updated = await scope.sessions.findByUid(created.sessionId);
+  assert.equal(verifySessionSdkToken(updated, created.sdkToken), true);
+  assert.equal(verifySessionSdkToken(updated, claimed.sdkToken), true);
+  await assert.rejects(
+    () => claimHandoffToken(db, created.sessionId, handoff.token),
+    (error) => error.code === "INVALID_API_KEY"
+  );
 });

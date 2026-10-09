@@ -56,9 +56,15 @@ VerifyPass.init({
 });
 ```
 
+Both integrations accept `onTelemetry(event)` for handoff UX diagnostics. Events contain only a fixed event type, failure stage, and error class; URLs, session IDs, and credentials are never included. Supported handoff events are `mobile_handoff_qr_failed`, `mobile_handoff_link_copied`, and `mobile_handoff_copy_failed`.
+
 The flow then becomes `mobile → processing → complete` for every verification type. The desktop shows a QR code the user scans with their phone camera; the phone opens the **hosted verification page** in its browser, records its own consent, and performs the capture there. The desktop never acquires a camera — it polls `/status` until the session reaches a terminal outcome, then calls `onComplete`.
 
-The QR payload is the hosted URL `<hostedBaseUrl>/session/<sessionId>#t=<sdkToken>`. The token lives in the URL fragment, so browsers never send it to any server — the QR is safe to display and screenshot. `getChallenge()` returns `hostedBaseUrl`, and `VerifyPassClient.getHostedUrl()` builds the URL in one place (validating it has no credentials, query, or fragment other than the token). The phone runs the same hosted page and upload endpoints the desktop would have, so no backend changes are needed.
+The QR payload is the hosted URL `<hostedBaseUrl>/session/<sessionId>#h=<handoffToken>`. The handoff token is separate from the desktop SDK credential, expires after five minutes (or when the session expires, whichever comes first), and can be claimed once. Claiming it issues a mobile-only SDK credential while the desktop retains its credential for status polling. The hosted page removes the token from the address bar after claiming it and keeps the mobile credential in session storage for same-tab refreshes.
+
+The fragment is not included in HTTP requests or normal server access logs, but the QR and copied link are still bearer credentials until claimed. Treat them like passwords: do not share, screenshot, log, or send them to analytics. The widget exposes a copy-link and open-on-this-device fallback, labels the credential as private, and allows QR generation to be retried.
+
+`getChallenge()` returns `hostedBaseUrl`, `handoffToken`, `handoffExpiresAt`, and the session `expiresAt`. `VerifyPassClient.getHostedUrl()` builds the URL in one place and rejects credentials, queries, fragments, insecure non-loopback URLs, and missing handoff credentials. Polling follows the server-provided session expiry instead of a shorter client-only timeout.
 
 The phone's user records their own biometric consent; the desktop skips its consent gate in this mode. Two retry affordances remain on the desktop in handoff mode: a **Retry** link in the mobile step re-arms polling after a failed poll (no server call, so a transient network blip does not burn a retry attempt), and the result screen's **Try again** reopens the session server-side (audit-logged, attempt-capped) after a rejected, failed, or manual-review outcome. The vanilla bundle reports outcomes through `onComplete`; re-init for a fresh session.
 
@@ -69,7 +75,8 @@ The sample application is a local integration harness. Its manually entered secr
 - Serve the hosted page, models and WASM asset over HTTPS. Serve deep links such as `/session/vps_...` through the application entry point, but do not rewrite missing model or WASM files to HTML.
 - Allow the trusted API origin in CSP `connect-src`; configure backend CORS for the actual application origin. Permit only required scripts, models and frames. Test the WASM CSP requirements in your target browsers.
 - Cross-origin embeds require camera permission delegation through the embedding page's Permissions Policy. Do not serve the Vite development server in production.
-- Keep `hostedBaseUrl` under operator control: the iframe receives a short-lived token in its fragment. Protocol validation is not a domain allowlist.
+- Keep `hostedBaseUrl` under operator control: hosted URLs carry short-lived credentials in their fragments. Protocol validation is not a domain allowlist.
+- A self-locating credential and an explicitly configured API URL must identify the same API deployment. Mismatches fail closed instead of sending a valid credential to the wrong environment.
 - Call `destroy()` on vanilla embeds and `dispose()` on direct clients at teardown. React handles camera/client/model cleanup and remounts when the session, token, API base or public key changes.
 - Browser callbacks are UI notifications, not proof of verification. Confirm outcomes through your backend or verified webhooks before granting access.
 - Standard detector/landmark filenames use pinned checksums. Custom model filenames need an explicit digest when using the core cache API; use trusted immutable assets. Downloads default to 15 seconds and 32 MiB; the widget cancels model startup after 12 seconds.

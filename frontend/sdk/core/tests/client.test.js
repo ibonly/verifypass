@@ -3,7 +3,12 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { VerifyPassClient } = require("../src/client");
+const {
+  VerifyPassClient,
+  claimMobileHandoff,
+  parseHandoffToken,
+  pollingTimeoutForExpiry
+} = require("../src/client");
 
 function mockFetch(responses) {
   const calls = [];
@@ -138,12 +143,12 @@ test("waitForResult polls until terminal status", async () => {
   assert.deepEqual(ticks, ["submitted", "submitted", "approved"]);
 });
 
-test("waitForResult times out with SESSION_EXPIRED", async () => {
+test("waitForResult distinguishes a local polling timeout from server expiry", async () => {
   const fetch = mockFetch(() => ({ body: { success: true, status: "submitted" } }));
   const client = new VerifyPassClient({ ...BASE, fetchImpl: fetch });
   await assert.rejects(
     () => client.waitForResult({ intervalMs: 1, timeoutMs: 5 }),
-    (e) => e.code === "SESSION_EXPIRED"
+    (e) => e.code === "POLLING_TIMEOUT"
   );
 });
 
@@ -177,15 +182,15 @@ test("waitForResult aborts on its own signal without touching the parent", async
 test("getHostedUrl builds the hosted verification URL with the token in the fragment", async () => {
   const fetch = mockFetch([{ body: {
     success: true, verificationType: "ID_AND_FACE", livenessActions: ["turn_left"],
-    hostedBaseUrl: "https://verify.example.com", attemptId: "att_1"
+    hostedBaseUrl: "https://verify.example.com", handoffToken: "vph_test", attemptId: "att_1"
   }}]);
   const client = new VerifyPassClient({ ...BASE, fetchImpl: fetch });
-  await client.getChallenge();
+  await client.getChallenge({ mobileHandoff: true });
   const url = client.getHostedUrl();
   const u = new URL(url);
   assert.equal(u.origin, "https://verify.example.com");
   assert.equal(u.pathname, "/session/vps_1");
-  assert.equal(u.hash, "#t=sdk_tok");
+  assert.equal(u.hash, "#h=vph_test");
   // The token lives ONLY in the fragment — browsers drop fragments on
   // requests, so it never reaches any server. Assert the server-sent
   // portion (pathname + search) is free of the token.
@@ -195,19 +200,45 @@ test("getHostedUrl builds the hosted verification URL with the token in the frag
   assert.equal(u.search, "");
   assert.equal(u.username, "");
   assert.equal(u.password, "");
+  assert.ok(fetch.calls[0].url.endsWith("/challenge?handoff=1"));
 });
 
 test("getHostedUrl rejects URLs with a query string or credentials", async () => {
   const fetch = mockFetch([{ body: {
     success: true, verificationType: "ID_AND_FACE", livenessActions: ["turn_left"],
-    hostedBaseUrl: "https://verify.example.com/?x=1", attemptId: "att_1"
+    hostedBaseUrl: "https://verify.example.com/?x=1", handoffToken: "vph_test", attemptId: "att_1"
   }}]);
   const client = new VerifyPassClient({ ...BASE, fetchImpl: fetch });
-  await client.getChallenge();
+  await client.getChallenge({ mobileHandoff: true });
   assert.throws(() => client.getHostedUrl(), /Invalid hosted verification URL/);
 });
 
 test("getHostedUrl throws before getChallenge has run", () => {
   const client = new VerifyPassClient({ ...BASE, fetchImpl: mockFetch([]) });
   assert.throws(() => client.getHostedUrl(), /Hosted verification URL is not configured/);
+});
+
+test("self-locating SDK tokens reject a mismatched explicit API URL", () => {
+  const payload = Buffer.from(JSON.stringify({ u: "https://issuer.example", t: "random" })).toString("base64url");
+  assert.throws(
+    () => new VerifyPassClient({ ...BASE, baseUrl: "https://other.example", sdkToken: `sdk_v1_${payload}`, fetchImpl: mockFetch([]) }),
+    /does not match the credential issuer/
+  );
+});
+
+test("claimMobileHandoff exchanges a self-locating one-time token", async () => {
+  const payload = Buffer.from(JSON.stringify({ u: "https://api.test", t: "random" })).toString("base64url");
+  const handoffToken = `vph_v1_${payload}`;
+  const fetch = mockFetch([{ body: { success: true, sessionId: "vps_1", sdkToken: "sdk_mobile" } }]);
+  const result = await claimMobileHandoff({ sessionId: "vps_1", handoffToken, fetchImpl: fetch });
+  assert.equal(result.sdkToken, "sdk_mobile");
+  assert.equal(fetch.calls[0].url, "https://api.test/v1/verification-sessions/vps_1/handoff/claim");
+  assert.deepEqual(JSON.parse(fetch.calls[0].opts.body), { handoffToken });
+  assert.equal(parseHandoffToken(handoffToken).baseUrl, "https://api.test");
+});
+
+test("pollingTimeoutForExpiry follows the server deadline with grace", () => {
+  const timeout = pollingTimeoutForExpiry(new Date(Date.now() + 2000).toISOString(), 99, 500);
+  assert.ok(timeout >= 2400 && timeout <= 2500);
+  assert.equal(pollingTimeoutForExpiry("invalid", 1234), 1234);
 });

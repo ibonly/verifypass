@@ -7,6 +7,7 @@ const config = require("../config");
 
 const { addOutbox, flushOutbox } = require("./outbox");
 const VERIFICATION_TYPES = ["ID_AND_FACE", "FACE_ONLY", "ID_ONLY"];
+const HANDOFF_TTL_MS = 5 * 60 * 1000;
 
 function validateCreatePayload(body) {
   const errors = [];
@@ -37,7 +38,7 @@ function validateCreatePayload(body) {
   if (errors.length) throw new AppError("VALIDATION_ERROR", "Request validation failed", { errors });
 }
 
-function signSdkToken(sessionUid, publicApiUrl = config.apiPublicUrl) {
+function signSessionToken(sessionUid, prefix, publicApiUrl = config.apiPublicUrl) {
   // Self-locating v1 token: embeds this deployment's public API origin so the
   // browser SDK derives its endpoint from the token alone — the environment
   // (sandbox/production/self-hosted) travels with the credential, and the
@@ -45,9 +46,32 @@ function signSdkToken(sessionUid, publicApiUrl = config.apiPublicUrl) {
   // string, so the embedded origin is tamper-evident.
   const raw = crypto.randomBytes(24).toString("base64url");
   const payload = Buffer.from(JSON.stringify({ u: publicApiUrl, t: raw })).toString("base64url");
-  const token = `sdk_v1_${payload}`;
+  const token = `${prefix}_v1_${payload}`;
   const tokenHash = crypto.createHmac("sha256", config.sdkTokenSecret).update(`${sessionUid}.${token}`).digest("hex");
   return { token, tokenHash };
+}
+
+function signSdkToken(sessionUid, publicApiUrl = config.apiPublicUrl) {
+  return signSessionToken(sessionUid, "sdk", publicApiUrl);
+}
+
+function signHandoffToken(sessionUid, publicApiUrl = config.apiPublicUrl) {
+  return signSessionToken(sessionUid, "vph", publicApiUrl);
+}
+
+function tokenApiUrl(token) {
+  const match = /^[a-z]+_v1_([A-Za-z0-9_-]+)$/.exec(String(token || ""));
+  if (!match) return null;
+  try {
+    const value = JSON.parse(Buffer.from(match[1], "base64url").toString("utf8")).u;
+    const url = new URL(value);
+    const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+    if ((url.protocol !== "https:" && !(url.protocol === "http:" && loopback))
+        || url.username || url.password || url.search || url.hash) return null;
+    return url.href.replace(/\/+$/, "");
+  } catch (_) {
+    return null;
+  }
 }
 
 function verifySdkToken(sessionUid, token, tokenHash) {
@@ -58,6 +82,57 @@ function verifySdkToken(sessionUid, token, tokenHash) {
   // timingSafeEqual throws on length mismatch — guard it for a clean 401
   if (a.length !== b.length) return false;
   return crypto.timingSafeEqual(a, b);
+}
+
+function verifySessionSdkToken(session, token) {
+  if (!session || !token) return false;
+  return verifySdkToken(session.sessionUid, token, session.sdkTokenHash)
+    || verifySdkToken(session.sessionUid, token, session.mobileSdkTokenHash);
+}
+
+async function issueHandoffToken(scopedDb, session, publicApiUrl = config.apiPublicUrl) {
+  if (!session || !["created", "started"].includes(session.status)) {
+    throw new AppError("VALIDATION_ERROR", "Mobile handoff is unavailable for this session");
+  }
+  const now = Date.now();
+  const sessionExpiry = session.expiresAt ? new Date(session.expiresAt).getTime() : now + HANDOFF_TTL_MS;
+  if (!Number.isFinite(sessionExpiry) || sessionExpiry <= now) throw new AppError("SESSION_EXPIRED");
+  const { token, tokenHash } = signHandoffToken(session.sessionUid, publicApiUrl);
+  const handoffExpiresAt = new Date(Math.min(sessionExpiry, now + HANDOFF_TTL_MS));
+  await scopedDb.sessions.update(session.sessionUid, {
+    handoffTokenHash: tokenHash,
+    handoffExpiresAt,
+    handoffClaimedAt: null
+  });
+  return { token, expiresAt: handoffExpiresAt.toISOString() };
+}
+
+async function claimHandoffToken(db, sessionUid, handoffToken) {
+  const session = await db.verificationSession.findFirst({ where: { sessionUid } });
+  if (!session) throw new AppError("SESSION_NOT_FOUND");
+  const now = new Date();
+  if (!session.handoffTokenHash
+      || !verifySdkToken(sessionUid, handoffToken, session.handoffTokenHash)
+      || session.handoffClaimedAt
+      || !session.handoffExpiresAt
+      || new Date(session.handoffExpiresAt) <= now) {
+    throw new AppError("INVALID_API_KEY", "Invalid or expired mobile handoff");
+  }
+  if (!["created", "started"].includes(session.status)
+      || (session.expiresAt && new Date(session.expiresAt) <= now)) {
+    throw new AppError("SESSION_EXPIRED");
+  }
+  const { token, tokenHash } = signSdkToken(sessionUid);
+  const claimed = await db.verificationSession.updateMany({
+    where: { sessionUid, handoffTokenHash: session.handoffTokenHash, handoffClaimedAt: null },
+    data: {
+      mobileSdkTokenHash: tokenHash,
+      handoffClaimedAt: now,
+      handoffTokenHash: null
+    }
+  });
+  if (claimed.count !== 1) throw new AppError("INVALID_API_KEY", "Mobile handoff was already claimed");
+  return { success: true, sessionId: sessionUid, sdkToken: token };
 }
 
 /** Create a verification session for the authenticated tenant (PRD §9.3/§12.1). */
@@ -233,7 +308,7 @@ async function reissueChallenge(scopedDb, sessionUid, sdkToken, { excludeActions
 }
 function validateAttempt(session, sdkToken, attemptId) {
   if (!session) throw new AppError("SESSION_NOT_FOUND");
-  if (!sdkToken || !verifySdkToken(session.sessionUid, sdkToken, session.sdkTokenHash)) throw new AppError("INVALID_API_KEY");
+  if (!verifySessionSdkToken(session, sdkToken)) throw new AppError("INVALID_API_KEY");
   if (session.attemptId && attemptId !== session.attemptId) {
     throw new AppError("VALIDATION_ERROR", attemptId
       ? "Attempt changed; reload the verification"
@@ -339,7 +414,7 @@ async function recordConsent(scopedDb, sessionUid, sdkToken, { copyVersion = nul
   return scopedDb.transaction(async scope => {
     const session = await scope.sessions.findByUid(sessionUid);
     if (!session) throw new AppError("SESSION_NOT_FOUND");
-    if (!sdkToken || !verifySdkToken(sessionUid, sdkToken, session.sdkTokenHash)) throw new AppError("INVALID_API_KEY");
+    if (!verifySessionSdkToken(session, sdkToken)) throw new AppError("INVALID_API_KEY");
     if (session.consentAt) return { success: true, sessionId: sessionUid, consentAt: new Date(session.consentAt).toISOString(), alreadyRecorded: true };
     const consentAt = new Date();
     const consentMeta = { copyVersion: typeof copyVersion === "string" ? copyVersion.slice(0,128) : null, ip: req ? String(req.ip || String(req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.socket?.remoteAddress || "").slice(0,64) : null, userAgent: req ? String(req.headers["user-agent"] || "").slice(0,512) : null };
@@ -350,8 +425,9 @@ async function recordConsent(scopedDb, sessionUid, sdkToken, { copyVersion = nul
 }
 
 module.exports = {
-  createSession, getSession, signSdkToken, verifySdkToken, validateCreatePayload, attachDeviceInfo,
+  createSession, getSession, signSdkToken, signHandoffToken, tokenApiUrl, verifySdkToken, verifySessionSdkToken,
+  issueHandoffToken, claimHandoffToken, validateCreatePayload, attachDeviceInfo,
   submitSession, validateAttempt, retrySession, RETRY_MAX_ATTEMPTS, RETRY_MANUAL_UPLOAD_AFTER,
   reissueChallenge, REISSUE_MAX_PER_SESSION, beginChallenge,
-  recordConsent
+  recordConsent, HANDOFF_TTL_MS
 };

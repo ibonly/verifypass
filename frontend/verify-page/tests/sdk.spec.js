@@ -27,6 +27,93 @@ test("initialization errors remain visible and retry recovers", async ({ page })
   expect(errors).toEqual([]);
 });
 
+test("mobile handoff claims a one-time token and removes it from the address bar", async ({ page }) => {
+  await page.goto("/");
+  const apiOrigin = new URL(page.url()).origin;
+  const payload = Buffer.from(JSON.stringify({ u: apiOrigin, t: "handoff" })).toString("base64url");
+  const handoffToken = `vph_v1_${payload}`;
+  let claims = 0;
+  await page.route("**/handoff/claim", route => {
+    claims++;
+    expect(route.request().postDataJSON()).toEqual({ handoffToken });
+    return route.fulfill({ json: { success: true, sessionId: "vps_mobile", sdkToken: "sdk_mobile" } });
+  });
+  await page.route("**/challenge", route => route.fulfill({ json: challenge }));
+  await page.goto(`/session/vps_mobile#h=${handoffToken}`);
+  await expect(page.getByRole("heading", { name: "Consent required" })).toBeVisible();
+  expect(claims).toBe(1);
+  expect(new URL(page.url()).hash).toBe("");
+  expect(await page.evaluate(() => sessionStorage.getItem("vp-mobile-token:vps_mobile"))).toBe("sdk_mobile");
+});
+
+test("mobile handoff offers QR, copy, open, privacy, and expiry controls without desktop consent", async ({ page }) => {
+  const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+  await page.route("**/challenge*", route => route.fulfill({ json: {
+    ...challenge,
+    hostedBaseUrl: page.url().replace(/\/$/, ""),
+    handoffToken: "vph_test_handoff",
+    handoffExpiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+    expiresAt
+  } }));
+  await page.route("**/status", route => route.fulfill({ json: { success: true, status: "created" } }));
+  await page.goto("/");
+  await page.evaluate(async (entry) => {
+    const React = (await import("/node_modules/.vite/deps/react.js")).default;
+    const { createRoot } = (await import("/node_modules/.vite/deps/react-dom_client.js")).default;
+    const { VerifyPassProvider, VerificationWidget } = await import(entry);
+    const element = document.createElement("div");
+    document.body.replaceChildren(element);
+    createRoot(element).render(React.createElement(VerifyPassProvider, {
+      baseUrl: location.origin,
+      publicKey: "vp_pub_example",
+      faceModelUrl: null
+    }, React.createElement(VerificationWidget, {
+      sessionId: "vps_mobile_ui",
+      sdkToken: "sdk_browser",
+      mobileHandoff: true
+    })));
+  }, sdkEntry);
+  await expect(page.getByRole("img", { name: /QR code/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Copy secure link" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Open on this device" })).toHaveAttribute("href", /#h=vph_test_handoff$/);
+  await expect(page.getByText(/Do not share or screenshot/)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Consent required" })).toHaveCount(0);
+});
+
+test("QR generation failure exposes recovery and emits token-free telemetry", async ({ page }) => {
+  await page.route("**/node_modules/.vite/deps/qrcode*", route => route.abort());
+  await page.route("**/challenge*", route => route.fulfill({ json: {
+    ...challenge,
+    hostedBaseUrl: page.url().replace(/\/$/, ""),
+    handoffToken: "vph_secret_not_for_telemetry",
+    expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString()
+  } }));
+  await page.route("**/status", route => route.fulfill({ json: { success: true, status: "created" } }));
+  await page.goto("/");
+  await page.evaluate(async (entry) => {
+    const React = (await import("/node_modules/.vite/deps/react.js")).default;
+    const { createRoot } = (await import("/node_modules/.vite/deps/react-dom_client.js")).default;
+    const { VerifyPassProvider, VerificationWidget } = await import(entry);
+    window.qrTelemetry = [];
+    const element = document.createElement("div");
+    document.body.replaceChildren(element);
+    createRoot(element).render(React.createElement(VerifyPassProvider, {
+      baseUrl: location.origin,
+      publicKey: "vp_pub_example",
+      faceModelUrl: null
+    }, React.createElement(VerificationWidget, {
+      sessionId: "vps_qr_failure",
+      sdkToken: "sdk_browser",
+      mobileHandoff: true,
+      onTelemetry: (event) => window.qrTelemetry.push(event)
+    })));
+  }, sdkEntry);
+  await expect(page.getByRole("button", { name: "Retry QR code" })).toBeVisible();
+  const telemetry = await page.evaluate(() => window.qrTelemetry);
+  expect(telemetry[0]).toMatchObject({ type: "mobile_handoff_qr_failed" });
+  expect(JSON.stringify(telemetry)).not.toContain("vph_secret_not_for_telemetry");
+});
+
 test("manual ID uploads preserve front and back and submit once", async ({ page }) => {
   await mockApi(page);
   const sides = [];
