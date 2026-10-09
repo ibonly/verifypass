@@ -26,6 +26,11 @@ jobs:
           cache: npm
           cache-dependency-path: backend/package-lock.json
       - run: npm ci
+        env:
+          # onnxruntime-node@1.27.0's postinstall downloads CUDA EP binaries from
+          # api.nuget.org on linux/x64. The runner has no egress to that host, so
+          # the CPU runtime (already bundled) is all the worker needs.
+          ONNXRUNTIME_NODE_INSTALL: skip
       - run: npm run prisma:generate
       - run: npm test
       - run: npm run prisma:validate

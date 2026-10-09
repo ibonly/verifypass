@@ -36,6 +36,11 @@ jobs:
           node-version: 22
       - run: node deploy/config.cjs
       - run: npm ci --prefix backend && npm run prisma:generate --prefix backend
+        env:
+          # onnxruntime-node@1.27.0's postinstall downloads CUDA EP binaries from
+          # api.nuget.org on linux/x64; the runner has no egress to that host
+          # and the worker is CPU-only, so skip the CUDA download.
+          ONNXRUNTIME_NODE_INSTALL: skip
       - run: node backend/scripts/fetch-models.js
       - name: Install SAM before acquiring deployment credentials
         run: pipx install aws-sam-cli==1.145.2

@@ -7,8 +7,9 @@ FROM public.ecr.aws/lambda/nodejs:22@sha256:b9dd86c58dc96886e635d317aaef3b809846
 COPY . ${LAMBDA_TASK_ROOT}/
 
 # onnxruntime-node / sharp resolve their linux-x64 binaries in this image.
+# The CPU runtime is bundled; skip the CUDA EP download (no GPU in Lambda).
 RUN cd ${LAMBDA_TASK_ROOT} && \
-    npm ci && \
+    ONNXRUNTIME_NODE_INSTALL=skip npm ci && \
     ./node_modules/.bin/prisma generate --schema prisma/schema.prisma && \
     npm prune --omit=dev
 
