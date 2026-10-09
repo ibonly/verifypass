@@ -31,11 +31,31 @@ The provider reads public Vite configuration by default. Explicit props override
 
 The API URL can be omitted for server-issued self-locating tokens. Explicit trusted API configuration takes precedence. Decoding a token's API URL does not authenticate the token: obtain tokens from your server, not arbitrary external input. HTTPS is required except on loopback development hosts. URLs containing credentials, queries or fragments are rejected. Existing build-time `VP_API_BASE` remains supported by the hosted/sample Vite configurations.
 
+## Consent and screen flash
+
+The widget gates capture behind a single consent statement, recorded server-side together with a `copyVersion` string so audits know exactly which wording the user accepted. Overriding `consentCopy` therefore means you own the audit trail for that wording.
+
+The screen-flash liveness step has no separate opt-in checkbox. It is disclosed inside the one consent statement, and it is skipped automatically for users whose browser reports `prefers-reduced-motion: reduce` — that is the photosensitivity escape hatch, and the capture is still reviewable without the flash. Tenants that must disable the step outright pass `screenFlash={false}`.
+
+Changing the shipped consent wording requires bumping `CONSENT_COPY_VERSION` in the widget; the current value is `2026-10-09.1`.
+
 ## Mobile handoff (QR code)
 
-The widget can hand verification to the user's phone instead of running it on the desktop. Pass `mobileHandoff` to `<VerificationWidget>`:
+The widget can hand verification to the user's phone instead of running it on the desktop. `mobileHandoff` on `<VerificationWidget>` is tri-state:
+
+| Value | Behaviour |
+| --- | --- |
+| omitted | The widget decides. The consent screen shows a **Show QR code** call to action, and the QR screen offers **Use this device instead**. |
+| `true` | QR handoff only; the desktop consent gate is skipped entirely. |
+| `false` | This device only; no QR option is shown. |
+
+Omitting the prop is the drop-in default: an integration that only mounts the widget gets the phone option with no code changes.
 
 ```jsx
+{/* Drop-in: the user chooses on the consent screen. */}
+<VerificationWidget sessionId={sessionId} sdkToken={sdkToken} onComplete={onComplete} />
+
+{/* Force the QR handoff. */}
 <VerificationWidget
   sessionId={sessionId}
   sdkToken={sdkToken}
@@ -43,6 +63,8 @@ The widget can hand verification to the user's phone instead of running it on th
   onComplete={onComplete}
 />
 ```
+
+Pass `mobileHandoff={false}` on any surface that is itself the capture device — the hosted verification page does this so a scanned QR cannot re-issue another single-use handoff token for a session already being captured.
 
 ```js
 // Vanilla / CDN bundle (dist/verifypass.js)

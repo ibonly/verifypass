@@ -186,10 +186,10 @@ const RESULT_REASON_LABELS = {
 };
 
 
-const DEFAULT_CONSENT_COPY = "I consent to VerifyPass capturing and processing my ID images, my selfie, short video frames of my head movements, and my device and camera details (such as camera type and browser) to verify my identity and prevent fraud. This includes biometric processing. Images are stored securely for the period set by the organisation that requested this verification, then deleted.";
+const DEFAULT_CONSENT_COPY = "I consent to VerifyPass capturing and processing my ID images, my selfie, short video frames of my head movements, and my device and camera details (such as camera type and browser) to verify my identity and prevent fraud. This includes biometric processing. The check may briefly change my screen colour a few times; this is skipped automatically if my device asks for reduced motion. Images are stored securely for the period set by the organisation that requested this verification, then deleted.";
 // Bump when the consent wording changes — recorded server-side with each
 // consent so audits know WHICH text the user accepted.
-const CONSENT_COPY_VERSION = "2026-09-04.1"; // v5 E3: processing scope now names liveness frames + device/camera metadata + retention
+const CONSENT_COPY_VERSION = "2026-10-09.1"; // screen-flash disclosure folded into the single consent statement (separate opt-in removed)
 const FACE_FOCUS_MIN = 12;
 
 function cropImageData(imageData, box, padRatio = 0.12) {
@@ -262,6 +262,23 @@ export function VerificationWidget(props) {
   const sessionKey = JSON.stringify([props.sessionId, props.sdkToken, baseUrl, publicKey]);
   return <div data-vp-widget><style>{"@media (prefers-reduced-motion: reduce) { [data-vp-widget] * { animation: none !important; transition: none !important; } }"}</style><VerificationWidgetSession key={sessionKey} {...props} /></div>;
 }
+function usePrefersReducedMotion() {
+  const [reduced, setReduced] = useState(false);
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return undefined;
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    setReduced(mq.matches);
+    const onChange = (e) => setReduced(e.matches);
+    if (typeof mq.addEventListener === "function") {
+      mq.addEventListener("change", onChange);
+      return () => mq.removeEventListener("change", onChange);
+    }
+    mq.addListener(onChange);
+    return () => mq.removeListener(onChange);
+  }, []);
+  return reduced;
+}
+
 function VerificationWidgetSession({
   sessionId,
   sdkToken,
@@ -277,8 +294,13 @@ function VerificationWidgetSession({
    *  opens the hosted verification page in its browser and performs the
    *  capture there. The desktop widget never acquires a camera in this mode;
    *  it polls for the terminal result instead. The phone's user records their
-   *  own consent (the hosted page has its own consent gate). */
-  mobileHandoff = false
+   *  own consent (the hosted page has its own consent gate).
+   *
+   *  Tri-state, so integrations get the QR option with zero code changes:
+   *    true      — QR handoff only.
+   *    false     — this device only.
+   *    undefined — the widget offers "Show QR code" on the consent screen. */
+  mobileHandoff
 }) {
   const { publicKey, baseUrl, faceModelUrl, landmarkModelUrl } = useVerifyPass();
   const videoRef = useRef(null);
@@ -327,9 +349,13 @@ function VerificationWidgetSession({
   const [debugInfo, setDebugInfo] = useState(null);
   // Screen-flash overlay colour ([r,g,b]) while the flash sequence runs; null otherwise.
   const [flashColor, setFlashColor] = useState(null);
-  const [allowFlash, setAllowFlash] = useState(false);
+  // Screen flash is disclosed in the single consent statement (there is no
+  // separate opt-in checkbox any more). Users who ask for reduced motion are
+  // the photosensitivity escape hatch: the sequence is skipped for them, and
+  // the capture is still reviewable without it.
+  const reducedMotion = usePrefersReducedMotion();
   const screenFlashRef = useRef(false);
-  screenFlashRef.current = screenFlash && allowFlash;
+  screenFlashRef.current = screenFlash && !reducedMotion;
   // Framing stabilizer persists ACROSS liveness actions so the next action
   // doesn't pay a fresh lock-in ("Center your face" between every action).
   const livenessStabRef = useRef(null);
@@ -344,6 +370,12 @@ function VerificationWidgetSession({
   const [canReissue, setCanReissue] = useState(false); // D3: "try a different movement" offer
   const [cameraPaused, setCameraPaused] = useState(false); // B5
   const [cameraEpoch, setCameraEpoch] = useState(0);       // bump to restart the camera effect
+  // Handoff mode resolution. When the host app omits `mobileHandoff` the
+  // widget owns the decision and surfaces it on the consent screen, so a
+  // plain <VerificationWidget /> drop-in gets the QR option for free.
+  const allowsHandoffChoice = mobileHandoff === undefined;
+  const [handoffSelected, setHandoffSelected] = useState(false);
+  const handoffEnabled = allowsHandoffChoice ? handoffSelected : !!mobileHandoff;
   // Mobile handoff: the hosted URL the user's phone opens when it scans the QR.
   // Built once (after getChallenge) and never re-derived — the token is
   // single-session, so a stale copy is harmless, but re-encoding on every
@@ -387,7 +419,7 @@ function VerificationWidgetSession({
       try {
         client = new VerifyPassClient({ baseUrl, publicKey, sessionId, sdkToken });
         clientRef.current = client;
-        const c = await client.getChallenge({ mobileHandoff });
+        const c = await client.getChallenge({ mobileHandoff: handoffEnabled });
         if (cancelled) return;
         verificationType = c.verificationType || "ID_AND_FACE";
         challengeActions = Array.isArray(c.livenessActions) ? c.livenessActions : [];
@@ -416,7 +448,7 @@ function VerificationWidgetSession({
       try {
         flow = createFlow(verificationType, {
           documentBack: needsDocumentBack(documentTypes),
-          mobileHandoff
+          mobileHandoff: handoffEnabled
         });
       } catch (err) {
         setInitError("Unsupported verification workflow");
@@ -432,7 +464,7 @@ function VerificationWidgetSession({
       // Build the hosted URL with the short-lived, one-time handoff token.
       // The fragment stays out of HTTP requests, but remains sensitive until
       // the phone claims it. Failure here is a configuration problem.
-      if (mobileHandoff) {
+      if (handoffEnabled) {
         try {
           setMobileUrl(client.getHostedUrl());
         } catch (err) {
@@ -441,7 +473,7 @@ function VerificationWidgetSession({
       }
     })();
     return () => { cancelled = true; client?.dispose(); off(); };
-  }, [baseUrl, publicKey, sessionId, sdkToken, initEpoch, mobileHandoff]);
+  }, [baseUrl, publicKey, sessionId, sdkToken, initEpoch, handoffEnabled]);
 
   // Mobile handoff: the desktop shows a QR and waits for the phone to finish.
   // The phone runs the hosted page in its browser — it records its OWN
@@ -457,7 +489,7 @@ function VerificationWidgetSession({
   useEffect(() => {
     const client = clientRef.current;
     const flow = flowRef.current;
-    if (!client || !flow || !mobileHandoff) return undefined;
+    if (!client || !flow || !handoffEnabled) return undefined;
     if (flowState?.step !== "mobile") return undefined;
     if (!mobileUrl) return undefined;
 
@@ -506,7 +538,7 @@ function VerificationWidgetSession({
       client.controller.signal.removeEventListener("abort", onParentAbort);
       pollController.abort();
     };
-  }, [mobileHandoff, flowState?.step, mobileUrl, mobileExpiresAt, mobileRetryEpoch]);
+  }, [handoffEnabled, flowState?.step, mobileUrl, mobileExpiresAt, mobileRetryEpoch]);
 
   // Render the hosted URL as a QR code. Lazy-loaded so the normal desktop
   // flow never bundles the `qrcode` package; the image is a data-URL, so it
@@ -1526,7 +1558,7 @@ function VerificationWidgetSession({
   const pillDisplay = showGuide ? (GUIDE_COPY[framingGuide] || "Position your face") : pillText;
   const ringColor = green ? "#059669" : "#E5E7EB";
 
-if (!consented && !mobileHandoff) {
+if (!consented && !handoffEnabled) {
     return (
       <div style={{ maxWidth: 420, margin: "0 auto", fontFamily: "system-ui, sans-serif" }}>
         {theme.logoUrl && (
@@ -1538,10 +1570,6 @@ if (!consented && !mobileHandoff) {
           <input type="checkbox" checked={consentChecked} onChange={(e) => setConsentChecked(e.target.checked)} style={{ marginTop: 3 }} />
           <span>{consentCopy}</span>
         </label>
-        {screenFlash && <label style={{ display: "block", margin: "12px 0" }}>
-          <input type="checkbox" checked={allowFlash} onChange={e => setAllowFlash(e.target.checked)} />
-          Allow a short sequence of changing screen colours. Leave this unchecked if flashing light causes discomfort; verification can be reviewed without it.
-        </label>}
         <button
           type="button"
           onClick={async () => {
@@ -1560,6 +1588,32 @@ if (!consented && !mobileHandoff) {
         >
           Continue
         </button>
+        {/* Phone handoff is offered here, before consent, because the phone
+            records its OWN consent on the hosted page — ticking the box on
+            this device first would capture a consent nobody acts on. */}
+        {allowsHandoffChoice && (
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "16px 0 12px", color: "#9CA3AF", fontSize: 12 }}>
+              <span style={{ flex: 1, height: 1, background: "#E5E7EB" }} />
+              or
+              <span style={{ flex: 1, height: 1, background: "#E5E7EB" }} />
+            </div>
+            <button
+              type="button"
+              onClick={() => { setFeedback(null); setMobileError(null); setHandoffSelected(true); }}
+              style={{
+                width: "100%", padding: "12px 0", borderRadius: 8,
+                background: "#fff", color: primary, border: `2px solid ${primary}`,
+                fontSize: 16, fontWeight: 600, cursor: "pointer"
+              }}
+            >
+              Show QR code
+            </button>
+            <p style={{ margin: "8px 0 0", fontSize: 13, color: "#6B7280", textAlign: "center", lineHeight: 1.4 }}>
+              Scan it with your phone and finish there. You'll give consent on your phone.
+            </p>
+          </>
+        )}
       </div>
     );
   }
@@ -1827,6 +1881,15 @@ ok ${debugInfo.ok} holding ${debugInfo.holding} wrongWay ${debugInfo.wrongWay} f
           </p>
           {mobilePolling && (
             <div style={{ width: 32, height: 32, margin: "12px auto 0", borderRadius: "50%", border: `3px solid ${primary}`, borderTopColor: "transparent", animation: "vp-spin 0.8s linear infinite" }} />
+          )}
+          {allowsHandoffChoice && (
+            <button
+              type="button"
+              onClick={() => { setMobileUrl(null); setMobileError(null); setQrDataUrl(null); setHandoffSelected(false); }}
+              style={{ display: "block", margin: "16px auto 0", background: "none", border: 0, color: primary, fontSize: 13, textDecoration: "underline", cursor: "pointer" }}
+            >
+              Use this device instead
+            </button>
           )}
           <style>{"@keyframes vp-spin { to { transform: rotate(360deg) } }"}</style>
         </div>

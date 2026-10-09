@@ -115,6 +115,10 @@ export default function App() {
         sdkToken={sdkToken}
         onComplete={handleComplete}
         onError={handleError}
+        // This page IS the capture device (it is what a scanned QR opens), so
+        // it must never offer a further handoff — that would re-issue a
+        // single-use handoff token against a session already being captured.
+        mobileHandoff={false}
       />
     </VerifyPassProvider>
   );

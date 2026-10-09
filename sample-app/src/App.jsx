@@ -167,9 +167,9 @@ export default function App() {
                   style={{ marginTop: 3 }}
                 />
                 <span>
-                  Verify on my phone (show QR code)
+                  Go straight to the QR code (verify on my phone)
                   <br />
-                  <small style={{ color: "#6B7280" }}>The phone opens the hosted verification page and performs the capture.</small>
+                  <small style={{ color: "#6B7280" }}>Leave this unchecked to see the widget's own "Show QR code" option on the consent screen.</small>
                 </span>
               </label>
 
@@ -200,7 +200,7 @@ export default function App() {
               <VerificationWidget
                 sessionId={session.sessionId}
                 sdkToken={session.sdkToken}
-                mobileHandoff={mobileHandoff}
+                mobileHandoff={mobileHandoff ? true : undefined}
                 onComplete={(r) => setResult(r)}
                 onStepChange={(s) => {
                   // a retry reset the flow — clear the stale result

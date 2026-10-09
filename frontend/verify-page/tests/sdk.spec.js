@@ -114,6 +114,45 @@ test("QR generation failure exposes recovery and emits token-free telemetry", as
   expect(JSON.stringify(telemetry)).not.toContain("vph_secret_not_for_telemetry");
 });
 
+test("omitting mobileHandoff puts a QR call to action on the consent screen and allows switching back", async ({ page }) => {
+  await page.route("**/challenge*", route => route.fulfill({ json: {
+    ...challenge,
+    hostedBaseUrl: page.url().replace(/\/$/, ""),
+    handoffToken: "vph_test_choice",
+    expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString()
+  } }));
+  await page.route("**/status", route => route.fulfill({ json: { success: true, status: "created" } }));
+  await page.goto("/");
+  await page.evaluate(async (entry) => {
+    const React = (await import("/node_modules/.vite/deps/react.js")).default;
+    const { createRoot } = (await import("/node_modules/.vite/deps/react-dom_client.js")).default;
+    const { VerifyPassProvider, VerificationWidget } = await import(entry);
+    const element = document.createElement("div");
+    document.body.replaceChildren(element);
+    createRoot(element).render(React.createElement(VerifyPassProvider, {
+      baseUrl: location.origin,
+      publicKey: "vp_pub_example",
+      faceModelUrl: null
+    }, React.createElement(VerificationWidget, {
+      sessionId: "vps_choice",
+      sdkToken: "sdk_browser"
+      // mobileHandoff deliberately omitted — the drop-in integration case.
+    })));
+  }, sdkEntry);
+  await expect(page.getByRole("heading", { name: "Consent required" })).toBeVisible();
+  // The separate screen-flash opt-in is gone; its disclosure lives in the single consent statement.
+  await expect(page.getByRole("checkbox")).toHaveCount(1);
+  await expect(page.getByText(/changing screen colours/)).toHaveCount(0);
+  await expect(page.getByText(/change my screen colour/)).toBeVisible();
+
+  await page.getByRole("button", { name: "Show QR code" }).click();
+  await expect(page.getByRole("img", { name: /QR code/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Consent required" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Use this device instead" }).click();
+  await expect(page.getByRole("heading", { name: "Consent required" })).toBeVisible();
+});
+
 test("manual ID uploads preserve front and back and submit once", async ({ page }) => {
   await mockApi(page);
   const sides = [];
