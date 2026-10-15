@@ -9,6 +9,13 @@ const faceDetectMath = require("./faceDetectMath");
 
 exports.VerifyPassClient = client.VerifyPassClient;
 exports.VerifyPassApiError = client.VerifyPassApiError;
+const controller = require("./controller");
+exports.createVerificationController = controller.createVerificationController;
+exports.LIVENESS_FRAME_BUDGET = controller.LIVENESS_FRAME_BUDGET;
+const errors = require("./errors");
+exports.VerifyPassError = errors.VerifyPassError;
+exports.toVerifyPassError = errors.toVerifyPassError;
+exports.CAMERA_ERROR_CODES = errors.CAMERA_ERROR_CODES;
 exports.parseSdkToken = client.parseSdkToken;
 exports.parseHandoffToken = client.parseHandoffToken;
 exports.claimMobileHandoff = client.claimMobileHandoff;

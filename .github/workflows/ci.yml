@@ -51,8 +51,8 @@ jobs:
         with:
           node-version: 22
       - run: node --test frontend/sdk/core/tests/*.test.js
-      - run: npm ci --prefix frontend/sdk/react
-      - run: npm ci --prefix frontend/sdk/js && npm run build --prefix frontend/sdk/js
+      - run: npm ci --prefix frontend/sdk/react && npm run check:dist --prefix frontend/sdk/react
+      - run: npm ci --prefix frontend/sdk/js && npm test --prefix frontend/sdk/js && npm run check:dist --prefix frontend/sdk/js
       - run: npm ci --prefix frontend/dashboard && npm test --prefix frontend/dashboard && npm run build --prefix frontend/dashboard
       - run: npm ci --prefix frontend/verify-page
       - run: frontend/verify-page/node_modules/.bin/playwright install --with-deps chromium
@@ -91,8 +91,8 @@ jobs:
           test -n "$VITE_VP_API_BASE" || { echo "prod API_PUBLIC_URL is not visible to the CI artifact job. Store API_PUBLIC_URL in the prod environment variables."; exit 1; }
           node -e 'const url = new URL(process.env.VITE_VP_API_BASE); if (url.protocol !== "https:") throw new Error("prod API_PUBLIC_URL must be https");'
       - run: node --test frontend/sdk/core/tests/*.test.js
-      - run: npm ci --prefix frontend/sdk/react
-      - run: npm ci --prefix frontend/sdk/js && npm run build --prefix frontend/sdk/js
+      - run: npm ci --prefix frontend/sdk/react && npm run check:dist --prefix frontend/sdk/react
+      - run: npm ci --prefix frontend/sdk/js && npm test --prefix frontend/sdk/js && npm run check:dist --prefix frontend/sdk/js
       - run: npm ci --prefix frontend/dashboard && npm test --prefix frontend/dashboard && npm run build --prefix frontend/dashboard
       - run: npm ci --prefix frontend/verify-page
       - run: frontend/verify-page/node_modules/.bin/playwright install --with-deps chromium

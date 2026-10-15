@@ -26,7 +26,8 @@ function readPublicConfig(env = {}) {
     baseUrl: baseUrl ? validateApiBase(baseUrl) : null,
     publicKey: validatePublicKey(publicKey),
     faceModelUrl: env.VITE_VP_FACE_MODEL_URL || null,
-    landmarkModelUrl: env.VITE_VP_LANDMARK_MODEL_URL || undefined
+    landmarkModelUrl: env.VITE_VP_LANDMARK_MODEL_URL || undefined,
+    ortWasmUrl: env.VITE_VP_ORT_WASM_URL || undefined
   };
 }
 

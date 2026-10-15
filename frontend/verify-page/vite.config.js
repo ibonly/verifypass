@@ -2,13 +2,14 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
+import { verifyPassSdkAssets } from "./sdkAssets.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, __dirname, ["VITE_VP_", "VP_API_BASE"]);
   return {
-  plugins: [react()],
+  plugins: [react(), verifyPassSdkAssets({ root: __dirname })],
   resolve: {
     alias: {
       "@verifypass/sdk-core": path.resolve(__dirname, "../sdk/core/src/index.js"),

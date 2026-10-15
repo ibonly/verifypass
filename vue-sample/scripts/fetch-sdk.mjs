@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Installs the VerifyPass React SDK the way an external integrator would: by
+// Installs the VerifyPass browser SDK the way an external integrator would: by
 // downloading it from the public GitHub repository, never by reaching into the
 // monorepo's working tree.
 //
@@ -24,16 +24,12 @@ const REF = process.env.VERIFYPASS_SDK_REF || "main";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const vendorDir = path.join(root, "vendor", "verifypass");
-const modelsDir = path.join(root, "public", "models");
 
-// `core` and `react` must stay siblings: @verifypass/react depends on
-// "@verifypass/sdk-core": "file:../core".
+// The browser SDK is self-contained (bundled runtime, hosted models/WASM),
+// so one package and no model files are needed.
 const PACKAGES = [
-  { from: "frontend/sdk/core", to: path.join(vendorDir, "core"), entries: ["package.json", "src"] },
-  { from: "frontend/sdk/react", to: path.join(vendorDir, "react"), entries: ["package.json", "src"] }
+  { from: "frontend/sdk/js", to: path.join(vendorDir, "js"), entries: ["package.json", "dist", "types", "index.d.ts", "element.d.ts"] }
 ];
-const MODELS = ["fr_detect.onnx", "fr_landmark.onnx"];
-const MODELS_FROM = "sample-app/public/models";
 
 if (!/^[\w.-]+\/[\w.-]+$/.test(REPO)) throw new Error(`Invalid VERIFYPASS_SDK_REPO: ${REPO}`);
 if (!/^[\w./-]+$/.test(REF)) throw new Error(`Invalid VERIFYPASS_SDK_REF: ${REF}`);
@@ -63,10 +59,7 @@ async function main() {
 
     // GitHub archives are rooted at "<repo>-<sha>/"; extract only what we need.
     const prefix = `${REPO.split("/")[1]}-${sha}`;
-    const members = [
-      ...PACKAGES.map((p) => `${prefix}/${p.from}`),
-      ...MODELS.map((m) => `${prefix}/${MODELS_FROM}/${m}`)
-    ];
+    const members = PACKAGES.map((p) => `${prefix}/${p.from}`);
     execFileSync("tar", ["-xzf", archive, "-C", work, ...members], { stdio: "inherit" });
     const src = path.join(work, prefix);
 
@@ -74,26 +67,22 @@ async function main() {
     for (const pkg of PACKAGES) {
       await mkdir(pkg.to, { recursive: true });
       for (const entry of pkg.entries) {
-        await cp(path.join(src, pkg.from, entry), path.join(pkg.to, entry), { recursive: true });
+        // Some entries are absent in refs older than the self-contained SDK.
+        await cp(path.join(src, pkg.from, entry), path.join(pkg.to, entry), { recursive: true })
+          .catch((err) => { if (err.code !== "ENOENT") throw err; });
       }
     }
 
-    await mkdir(modelsDir, { recursive: true });
-    for (const model of MODELS) {
-      await cp(path.join(src, MODELS_FROM, model), path.join(modelsDir, model));
-    }
-
-    const react = JSON.parse(await readFile(path.join(vendorDir, "react", "package.json"), "utf8"));
+    const pkg = JSON.parse(await readFile(path.join(vendorDir, "js", "package.json"), "utf8"));
     await writeFile(path.join(vendorDir, "SOURCE.json"), JSON.stringify({
       repository: `https://github.com/${REPO}`,
       ref: REF,
       commit: sha,
-      packages: { "@verifypass/react": react.version },
+      packages: { "@verifypass/sdk-js": pkg.version },
       fetchedAt: new Date().toISOString()
     }, null, 2) + "\n");
 
-    console.log(`Vendored @verifypass/react ${react.version} + @verifypass/sdk-core into vendor/verifypass`);
-    console.log(`Copied ${MODELS.join(", ")} into public/models`);
+    console.log(`Vendored @verifypass/sdk-js ${pkg.version} into vendor/verifypass`);
   } finally {
     await rm(work, { recursive: true, force: true });
   }

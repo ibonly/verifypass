@@ -3,7 +3,7 @@
 // The CDN entry embeds the same hosted workflow as the React integration.
 // Consent, camera capture, document backs, challenge guidance and retries
 // therefore share one implementation.
-const { VerifyPassClient, createFlow, pollingTimeoutForExpiry } = require("@verifypass/sdk-core");
+const { VerifyPassClient, createFlow, pollingTimeoutForExpiry, toVerifyPassError } = require("@verifypass/sdk-core");
 const instances = new WeakMap();
 
 // Copy for the mobile-handoff step. The desktop shows a QR and waits;
@@ -102,7 +102,7 @@ function init(opts = {}) {
       settleReady(); // init failed — don't leave `ready` hanging
       loading.textContent = error.message || "Unable to load verification";
       root.replaceChildren(loading);
-      onError?.(error);
+      onError?.(toVerifyPassError(error, "INIT_FAILED"));
     }
   })();
   instance.ready = ready;
@@ -235,7 +235,7 @@ async function runMobileHandoff(client, root, challenge, onComplete, onError, on
       flow.fail(err);
       status.textContent = err.message || MOBILE_COPY.failed;
       retry.hidden = false;
-      onError?.(err);
+      onError?.(toVerifyPassError(err));
       // `ready` stays pending — the in-widget Retry is the recovery path.
     });
   };

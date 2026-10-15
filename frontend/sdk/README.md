@@ -1,6 +1,6 @@
 # VerifyPass SDK
 
-The SDK contains a framework-independent capture/client package (`core`), a React widget (`react`), and a hosted iframe entry point (`js`). Verification decisions remain server-authoritative.
+The SDK contains a framework-independent capture/client package with a headless controller (`core`), a React widget and hook (`react`), and self-contained browser bundles: the `<verifypass-liveness>` web component, the hosted embed and the headless API (`js`). Verification decisions remain server-authoritative.
 
 ## Public Application Configuration
 
@@ -31,13 +31,56 @@ The provider reads public Vite configuration by default. Explicit props override
 
 The API URL can be omitted for server-issued self-locating tokens. Explicit trusted API configuration takes precedence. Decoding a token's API URL does not authenticate the token: obtain tokens from your server, not arbitrary external input. HTTPS is required except on loopback development hosts. URLs containing credentials, queries or fragments are rejected. Existing build-time `VP_API_BASE` remains supported by the hosted/sample Vite configurations.
 
+## Integration options
+
+Pick one. None of them needs model files, WASM configuration, bundler plugins, React (except option 2) or an API relay. The face models and the ONNX Runtime WASM are served by the hosted verification origin (`HOSTED_BASE_URL`), verified against pinned SHA-256 digests, and cached in the browser. The browser SDK API routes accept CORS from any origin; they authenticate with the per-session token header, never cookies.
+
+1. **Web component, any framework or plain HTML.** `@verifypass/sdk-js` ships self-contained bundles with zero runtime dependencies.
+
+   ```html
+   <script src="https://<hosted-origin>/sdk/v1/verifypass-liveness.js"></script>
+   <!-- or: import "@verifypass/sdk-js/element"; -->
+   <verifypass-liveness session-id="vps_…" sdk-token="sdk_v1_…" primary-color="#0F766E"></verifypass-liveness>
+   <script>
+     const el = document.querySelector("verifypass-liveness");
+     el.addEventListener("vp-complete", (e) => confirmOnServer(e.detail.sessionId));
+     el.addEventListener("vp-error", (e) => console.warn(e.detail.code, e.detail.message));
+   </script>
+   ```
+
+   Attributes: `session-id` and `sdk-token` (required). Optional: `public-key`, `base-url`, `mobile-handoff` (`true` = QR only, `false` = this device only, absent = user chooses), `screen-flash="false"`, `primary-color`, `logo-url`, `consent-copy`, `theme` and `copy` (JSON, also settable as properties), `face-model-url` / `landmark-model-url` (`off` disables), `ort-wasm-url`. Events: `vp-complete`, `vp-error`, `vp-step-change`, `vp-telemetry`. They bubble and cross the shadow boundary. Vue needs `compilerOptions.isCustomElement: (t) => t.startsWith("verifypass-")`. Angular needs `CUSTOM_ELEMENTS_SCHEMA`. A playground is served at `/sdk/v1/playground.html`.
+
+2. **React.** `@verifypass/react` ships prebuilt ESM (`dist/index.mjs`, no JSX), so webpack, Next.js, Rollup and Vite consume it as-is. `<VerifyPassProvider>` is optional.
+
+   ```jsx
+   <VerificationWidget sessionId={id} sdkToken={token} theme={{ primaryColor: "#0F766E" }} copy={{ consent: { title: "Before we start" } }} onComplete={…} onError={…} />
+   ```
+
+3. **Headless React.** `useVerification(props)` returns the full state machine (step, framing guidance, liveness phase, handoff QR) and actions (`capture`, `recordConsent`, `retry`, …). Bind `videoRef` to your own `<video>` and render any UI. `<VerificationWidget>` is built on it.
+
+4. **Headless, any framework.** `createVerificationController({ sessionId, sdkToken, onComplete, onError })` from `@verifypass/sdk-core` or `@verifypass/sdk-js` owns the session lifecycle: challenge, consent, liveness frame budget, uploads, submit and polling, retry, reissue and mobile handoff. `subscribe(fn)` delivers state. You supply frames through `runCapture((capture) => capture.document(base64) | capture.livenessFrame(…) | capture.face(…))`. `createFaceDetector` and `runCaptureLoop` provide the same auto-capture engine the widget uses.
+
+5. **Hosted embed.** `VerifyPass.init({ container, sessionId, sdkToken })` (`dist/verifypass.js`) embeds the hosted page in an iframe or shows a QR handoff.
+
+**Theming.** All colours, the font and the radius are `--vp-*` CSS custom properties: `--vp-primary`, `--vp-on-primary`, `--vp-surface`, `--vp-text`, `--vp-muted`, `--vp-subtle`, `--vp-border`, `--vp-success`, `--vp-warning`, `--vp-danger`, `--vp-pill-bg`, `--vp-font`, `--vp-radius`. Set them on any ancestor (they inherit into the shadow root), or pass `theme` (`primaryColor`, `onPrimaryColor`, `surfaceColor`, `backgroundColor`, `textColor`, `mutedColor`, `borderColor`, `successColor`, `warningColor`, `dangerColor`, `fontFamily`, `borderRadius`, `logoUrl`).
+
+**Text and localisation.** Every string lives in `DEFAULT_COPY`. Pass a partial `copy` object to override any of it; entries that take arguments accept a string or a function. Overriding the consent statement makes you responsible for its audit trail.
+
+**Types.** All three packages ship TypeScript declarations. `@verifypass/sdk-js` types are self-contained.
+
+**Errors.** Every `onError` / `vp-error` receives a `VerifyPassError` with a stable `code`, a readable `message` and the original error as `cause`. API errors keep their server code (for example `SESSION_EXPIRED`). Client codes: `CAMERA_PERMISSION_DENIED`, `CAMERA_NOT_FOUND`, `CAMERA_IN_USE`, `CAMERA_UNSUPPORTED`, `CAMERA_ERROR`, `NETWORK_ERROR`, `REQUEST_TIMEOUT`, `POLLING_TIMEOUT`, `INVALID_RESPONSE`, `INIT_FAILED`, `UNSUPPORTED_WORKFLOW`, `CAPTURE_FAILED`, `UNKNOWN_ERROR`. If the face model cannot load, capture falls back to motion detection, a `face_model_load_failed` telemetry event is emitted, and the console warns once.
+
+**CSP.** Allow the API and hosted origins in `connect-src`, add `'wasm-unsafe-eval'` to `script-src`, and add the hosted origin to `script-src` when loading the CDN bundle.
+
+**Building.** `dist/` of `react` and `js` is committed because the SDK is installed from git. After changing SDK source, run `npm run build --prefix frontend/sdk/react` and `npm run build --prefix frontend/sdk/js`. `npm test` fails when either `dist/` is stale, or when the pinned ONNX Runtime version or WASM checksum (`react/src/assets.js`) drifts from the installed package. The monorepo apps alias `@verifypass/react` to `src/`. Asset precedence for the detector: explicit URL, then the bundler asset (Vite builds of `src/`), then the hosted origin.
+
 ## Consent and screen flash
 
 The widget gates capture behind a single consent statement, recorded server-side together with a `copyVersion` string so audits know exactly which wording the user accepted. Overriding `consentCopy` therefore means you own the audit trail for that wording.
 
 The screen-flash liveness step has no separate opt-in checkbox. It is disclosed inside the one consent statement, and it is skipped automatically for users whose browser reports `prefers-reduced-motion: reduce` — that is the photosensitivity escape hatch, and the capture is still reviewable without the flash. Tenants that must disable the step outright pass `screenFlash={false}`.
 
-Changing the shipped consent wording requires bumping `CONSENT_COPY_VERSION` in the widget; the current value is `2026-10-09.1`.
+Changing the shipped consent wording requires bumping `CONSENT_COPY_VERSION` in `react/src/copy.js`; the current value is `2026-10-09.1`.
 
 ## Mobile handoff (QR code)
 
@@ -101,7 +144,7 @@ The sample application is a local integration harness. Its manually entered secr
 - A self-locating credential and an explicitly configured API URL must identify the same API deployment. Mismatches fail closed instead of sending a valid credential to the wrong environment.
 - Call `destroy()` on vanilla embeds and `dispose()` on direct clients at teardown. React handles camera/client/model cleanup and remounts when the session, token, API base or public key changes.
 - Browser callbacks are UI notifications, not proof of verification. Confirm outcomes through your backend or verified webhooks before granting access.
-- Standard detector/landmark filenames use pinned checksums. Custom model filenames need an explicit digest when using the core cache API; use trusted immutable assets. Downloads default to 15 seconds and 32 MiB; the widget cancels model startup after 12 seconds.
+- Standard detector/landmark filenames use pinned checksums. Custom model filenames need an explicit digest when using the core cache API; use trusted immutable assets. Downloads default to 15 seconds and 32 MiB; the widget cancels model startup after 12 seconds (30 seconds when the WASM comes from the hosted origin, since its first download is ~3.7 MB gzipped).
 
 ## Validation
 

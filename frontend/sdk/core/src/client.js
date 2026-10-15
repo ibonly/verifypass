@@ -2,12 +2,11 @@
 
 const { TERMINAL_STATUSES } = require("./flow");
 const { validateApiBase, validatePublicKey } = require("./config");
+const { VerifyPassError } = require("./errors");
 
-class VerifyPassApiError extends Error {
+class VerifyPassApiError extends VerifyPassError {
   constructor(code, message, http) {
-    super(message);
-    this.code = code;
-    this.http = http;
+    super(code, message, { http });
   }
 }
 

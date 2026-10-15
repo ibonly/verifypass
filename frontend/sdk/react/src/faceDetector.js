@@ -15,20 +15,31 @@ import {
   poseFromLandmarks, exprFromLandmarks, landmarkInputFromImageData, LANDMARK_INPUT
 } from "@verifypass/sdk-core";
 import ortWasmUrl from "onnxruntime-web/ort-wasm-simd-threaded.wasm?url";
+import { ORT_WASM_SHA256, hostedOrtWasmUrl } from "./assets";
 
 let ortPromise = null;
-function loadOrt() {
+/** True when a bundler resolved the WASM asset (Vite builds of src/). */
+export const hasBundledOrtWasm = !!ortWasmUrl;
+// WASM source, first match wins: host-supplied wasmUrl → bundler-resolved
+// asset (Vite builds of src/) → the hosted VerifyPass origin (prebuilt dist:
+// fetched through the checksum-verified model cache) → ORT's own resolution.
+function loadOrt(wasmUrl, assetBaseUrl) {
   if (!ortPromise) {
     // Use the WASM bundle entry so Vite serves the runtime assets locally.
     // Depending on a CDN here can leave the UI stuck on "Loading face model..."
     // when the network blocks jsDelivr or runs offline.
-    ortPromise = import("onnxruntime-web/wasm").then((ort) => {
+    ortPromise = import("onnxruntime-web/wasm").then(async (ort) => {
       // Vite serves unknown routes as index.html in dev. Give ONNX Runtime the
       // real hashed asset URL so it never guesses a path and compiles HTML as WASM.
-      ort.env.wasm.wasmPaths = { wasm: ortWasmUrl };
+      const url = wasmUrl || ortWasmUrl;
+      const hosted = !url && hostedOrtWasmUrl(assetBaseUrl);
+      if (url) ort.env.wasm.wasmPaths = { wasm: url };
+      else if (hosted) ort.env.wasm.wasmBinary = await fetchWithCache(hosted, { sha256: ORT_WASM_SHA256, timeoutMs: 30000 });
       // B4: two WASM threads on capable devices (needs cross-origin isolation
       // for SharedArrayBuffer; ORT falls back to 1 thread silently otherwise)
-      try { ort.env.wasm.numThreads = (globalThis.crossOriginIsolated && typeof navigator !== "undefined" && navigator.hardwareConcurrency > 2) ? 2 : 1; } catch (_) { /* noop */ }
+      // Threads spawn workers from ORT's own script URL, which prebuilt/IIFE
+      // bundles don't have — the hosted-binary path stays single-threaded.
+      try { ort.env.wasm.numThreads = (!hosted && globalThis.crossOriginIsolated && typeof navigator !== "undefined" && navigator.hardwareConcurrency > 2) ? 2 : 1; } catch (_) { /* noop */ }
       return ort;
     }).catch(err => { ortPromise = null; throw err; });
   }
@@ -47,13 +58,15 @@ export function defaultLandmarkUrl(modelUrl) {
  * @param {object} [opts]
  * @param {string|ArrayBuffer|null} [opts.landmarkUrl] fr_landmark.onnx (null = geometry only)
  * @param {object} [opts.framing] assessFraming overrides ({minRatio, maxRatio, centerTol})
+ * @param {string} [opts.ortWasmUrl] onnxruntime-web WASM URL (first load wins)
+ * @param {string} [opts.assetBaseUrl] hosted VerifyPass origin serving the WASM when no URL is given
  * @returns {Promise<{detect(imageData):Promise<object>, hasLandmarks:boolean, dispose():void}>}
  */
 export async function createFaceDetector(modelUrl, opts = {}) {
   const landmarkUrl = opts.landmarkUrl === undefined ? defaultLandmarkUrl(modelUrl) : opts.landmarkUrl;
   const framing = opts.framing || {};
   const [ort, modelBuffer, lmBuffer] = await Promise.all([
-    loadOrt(),
+    loadOrt(opts.ortWasmUrl, opts.assetBaseUrl),
     typeof modelUrl === "string" ? fetchWithCache(modelUrl, { signal: opts.signal }) : modelUrl,
     landmarkUrl ? (typeof landmarkUrl === "string" ? fetchWithCache(landmarkUrl, { signal: opts.signal }).catch(() => null) : landmarkUrl) : null
   ]);
