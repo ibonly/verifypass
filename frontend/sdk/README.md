@@ -1,10 +1,99 @@
 # VerifyPass SDK
 
-The SDK contains a framework-independent capture/client package with a headless controller (`core`), a React widget and hook (`react`), and self-contained browser bundles: the `<verifypass-liveness>` web component, the hosted embed and the headless API (`js`). Verification decisions remain server-authoritative.
+The fastest browser integration is the `<verifypass-liveness>` web component. The SDK also includes a React widget (`@verifypass/react`), a headless controller (`@verifypass/sdk-core`), and a hosted iframe embed (`@verifypass/sdk-js`). Verification decisions remain server-authoritative.
 
-## Public Application Configuration
+## Quick start: web component
 
-Put public settings in the consuming Vite application's `.env`, for example `frontend/verify-page/.env` or `sample-app/.env`. Use `frontend/.env.example` as the template; the shared frontend directory is not the Vite environment root. Restart development or rebuild production after changing these values.
+You need a VerifyPass **secret key** on your server, a deployed VerifyPass **API origin**, and a **hosted verification origin** that serves `/sdk/v1/verifypass-liveness.js`. Use HTTPS for the page and both origins; `localhost` is suitable for local camera testing.
+
+### 1. Create a session on your server
+
+After authenticating your user, call VerifyPass with your secret key. Return only `sessionId` and `sdkToken` to the browser. The following Express handlers assume your app supplies `requireUser`, `req.user.id`, and two database helpers: `saveVerificationSessionOwner(sessionId, userId)` and `sessionBelongsToUser(sessionId, userId)`.
+
+```js
+const apiBase = process.env.VERIFYPASS_API_BASE; // e.g. https://api.example.com
+const secretKey = process.env.VERIFYPASS_SECRET_KEY; // vp_sec_...; server only
+
+app.post("/api/verification-sessions", requireUser, async (req, res) => {
+  const upstream = await fetch(`${apiBase}/v1/verification-sessions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${secretKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      customerReference: String(req.user.id),
+      verificationType: "ID_AND_FACE" // or FACE_ONLY / ID_ONLY
+    })
+  });
+  if (!upstream.ok) return res.status(502).json({ error: "Could not start verification" });
+  const { sessionId, sdkToken } = await upstream.json();
+  await saveVerificationSessionOwner(sessionId, req.user.id);
+  res.json({ sessionId, sdkToken });
+});
+
+app.get("/api/verification-sessions/:id/result", requireUser, async (req, res) => {
+  if (!(await sessionBelongsToUser(req.params.id, req.user.id))) return res.sendStatus(404);
+  const upstream = await fetch(
+    `${apiBase}/v1/verification-sessions/${encodeURIComponent(req.params.id)}/result`,
+    { headers: { Authorization: `Bearer ${secretKey}` } }
+  );
+  if (!upstream.ok) return res.status(502).json({ error: "Could not read verification result" });
+  res.json(await upstream.json());
+});
+```
+
+Set `VERIFYPASS_API_BASE` and `VERIFYPASS_SECRET_KEY` in your **server** environment. Implement the two database helpers against your user and session records. Never send the secret key to the browser.
+
+### 2. Mount the widget in your page
+
+Load the bundle from your hosted verification origin. The session token tells the SDK which API to use, so a normal integration needs no browser API URL or public key.
+
+```html
+<script src="https://<hosted-verification-origin>/sdk/v1/verifypass-liveness.js"></script>
+<button id="start-verification">Verify identity</button>
+<div id="verification"></div>
+<p id="verification-message" role="status"></p>
+<script>
+  document.querySelector("#start-verification").addEventListener("click", async () => {
+    const message = document.querySelector("#verification-message");
+    try {
+      const response = await fetch("/api/verification-sessions", { method: "POST" });
+      if (!response.ok) throw new Error("Could not start verification");
+      const { sessionId, sdkToken } = await response.json();
+
+      const widget = document.createElement("verifypass-liveness");
+      widget.setAttribute("session-id", sessionId);
+      widget.setAttribute("sdk-token", sdkToken);
+      widget.addEventListener("vp-complete", async () => {
+        const resultResponse = await fetch(
+          `/api/verification-sessions/${encodeURIComponent(sessionId)}/result`
+        );
+        if (!resultResponse.ok) {
+          message.textContent = "Could not confirm the result. Please try again.";
+          return;
+        }
+        const result = await resultResponse.json();
+        message.textContent = `Verification status: ${result.status}`;
+      });
+      widget.addEventListener("vp-error", (event) => {
+        message.textContent = event.detail.message;
+      });
+      document.querySelector("#verification").replaceChildren(widget);
+    } catch (error) {
+      message.textContent = error.message;
+    }
+  });
+</script>
+```
+
+The `vp-complete` event is a UI notification. Grant access only after your server confirms an `approved` result (or receives and verifies a webhook); `manual_review` is not approval. The widget handles capture, consent, upload, polling, retries, and optional phone QR handoff.
+
+**Using a bundler?** Import `@verifypass/sdk-js/element` instead of loading the script. These packages are currently installed from this repository or a vendored copy; they are not published to npm. See the [standalone Vue sample](../../vue-sample/README.md) for a complete external install and server integration. For React, see [React integration](#integration-options) below.
+
+## Optional public application configuration
+
+For custom API routing or model hosting, put public settings in the consuming Vite application's `.env`, for example `frontend/verify-page/.env` or `sample-app/.env`. The quick start above does not require them. Use `frontend/.env.example` as the template; the shared frontend directory is not the Vite environment root. Restart development or rebuild production after changing these values.
 
 ```dotenv
 VITE_VP_API_BASE=https://api.example.com
