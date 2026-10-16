@@ -738,6 +738,7 @@ test("60-percent boundary: pipeline decision → outbox → signed selfie webhoo
     const { db, tenant, session } = await seed({ type: "FACE_ONLY", withId: false,
       settings: { thresholds: { liveness: { autoApprove: c.threshold ?? 0.6, challengePassApproves: c.challengePassApproves === true } } }
     });
+    session.customerReference = "caller-boundary";
     const dir = path.dirname(db.evidenceFile.rows[0].storagePath);
     t.after(() => fs.rm(dir, { recursive: true, force: true }));
     tenant.webhookUrl = "https://receiver.example/hook";
@@ -783,11 +784,18 @@ test("60-percent boundary: pipeline decision → outbox → signed selfie webhoo
     const request = received[before];
     assert.equal(verifyWebhookSignature(request.body, request.headers, tenant.webhookSecret), true);
     const body = JSON.parse(request.body);
-    assert.deepEqual(Object.keys(body).sort(), ["createdAt", "event", "selfieBase64", "sessionId", "status"]);
+    assert.deepEqual(Object.keys(body).sort(), expectedEvent === "verification.approved"
+      ? ["createdAt", "event", "selfieUrl", "sessionId", "status", "userSessionId"]
+      : ["createdAt", "event", "selfieBase64", "sessionId", "status"]);
     assert.equal(body.event, expectedEvent);
     assert.equal(body.status, out.status);
     assert.equal(body.sessionId, session.sessionUid);
-    assert.deepEqual(Buffer.from(body.selfieBase64, "base64"), plain);
+    if (expectedEvent === "verification.approved") {
+      assert.equal(body.userSessionId, "caller-boundary");
+      assert.equal(new URL(body.selfieUrl).pathname, `/v1/dashboard/evidence/${selfie.id}/image`);
+    } else {
+      assert.deepEqual(Buffer.from(body.selfieBase64, "base64"), plain);
+    }
     assert.equal(db.webhookDelivery.rows[0].lastStatusCode, 204);
     await sendWebhook(hooks[0].payload, deps);
     assert.equal(received.length, before + 1, "outbox redelivery must not POST the same event twice");

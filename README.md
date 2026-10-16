@@ -113,6 +113,7 @@ See [Webhook analysis and repair](WEBHOOK_ANALYSIS.md) for the delivery architec
 confirmed defects, implemented fixes, receiver contract, test evidence and rollout steps.
 The dashboard Webhooks page includes **Send test webhook** to verify a saved endpoint.
 An approved verification with a passed liveness check sends `verification.approved`; a rejected verification with a failed liveness check sends `verification.failed` (with payload `status: "rejected"`, the session decision). Each event is tied to that attempt's stored result. ID-only sessions and missing or reviewable liveness results do not send automatic verification webhooks. The explicit `webhook.test` button remains available for endpoint diagnostics.
+Approved events include `userSessionId` from the session's `customerReference` and a 15-minute signed `selfieUrl`; see the [SDK webhook payload guide](frontend/sdk/README.md#approved-webhook-payload). The selfie is no longer inlined in approved webhook bodies.
 
 ## SDK / API contract notes (policy v2)
 

@@ -89,6 +89,23 @@ Load the bundle from your hosted verification origin. The session token tells th
 
 The `vp-complete` event is a UI notification. Grant access only after your server confirms an `approved` result (or receives and verifies a webhook); `manual_review` is not approval. The widget handles capture, consent, upload, polling, retries, and optional phone QR handoff.
 
+### Approved webhook payload
+
+Set `customerReference` to your application's user or session ID when creating the verification session. Approved webhooks return that value as `userSessionId`, alongside the VerifyPass `sessionId`:
+
+```json
+{
+  "event": "verification.approved",
+  "sessionId": "vps_...",
+  "userSessionId": "your-user-or-session-id",
+  "status": "approved",
+  "createdAt": "2026-10-16T15:02:00.000Z",
+  "selfieUrl": "https://<api-origin>/v1/dashboard/evidence/<evidence-id>/image?token=<signed-token>"
+}
+```
+
+Verify the webhook signature before trusting the result. Fetch `selfieUrl` from your server promptly: its bearer token expires after 15 minutes, and the image is served only while the evidence is retained. The URL is regenerated on delivery retries, so consume the URL from the current request. New approved events contain `selfieUrl` instead of `selfieBase64`; do not log or expose the URL to the browser. `userSessionId` is `null` if no `customerReference` was supplied. Failed liveness sends `verification.failed` with `status: "rejected"`; the explicit test button sends `webhook.test`.
+
 **Using a bundler?** Import `@verifypass/sdk-js/element` instead of loading the script. These packages are currently installed from this repository or a vendored copy; they are not published to npm. See the [standalone Vue sample](../../vue-sample/README.md) for a complete external install and server integration. For React, see [React integration](#integration-options) below.
 
 ## Optional public application configuration

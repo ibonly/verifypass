@@ -7,6 +7,8 @@
 const crypto = require("crypto");
 const { webhookHeaders } = require("@verifypass/shared");
 const { hasLivenessStatus } = require("../services/webhookEligibility");
+const { signEvidenceAccess } = require("../services/evidenceStore");
+const config = require("../config");
 
 
 const { validateWebhookTarget, isPrivateIp } = require("../lib/webhookTarget");
@@ -169,6 +171,7 @@ async function createDelivery({ tenantId, sessionUid, event, eventUid: suppliedE
   const body = {
     event,
     sessionId: sessionUid || null,
+    ...(event === "verification.approved" ? { userSessionId: snapshot?.customerReference ?? session?.customerReference ?? null } : {}),
     status: snapshot?.status || session?.status || (event.startsWith("verification.") ? event.slice("verification.".length) : null),
     createdAt: snapshot?.createdAt || (session?.createdAt ? new Date(session.createdAt).toISOString() : null),
     // Internal reference only: image bytes stay in encrypted evidence storage,
@@ -198,6 +201,22 @@ async function serializeDelivery(delivery, db) {
   const payload = delivery.payload;
   // Previously created deliveries retain their original retry contract.
   if (payload?._selfie?.version !== 1) return JSON.stringify(payload);
+  const approved = delivery.event === "verification.approved";
+  if (approved) {
+    if (!payload._selfie.evidenceId) throw new Error("Webhook selfie evidence is unavailable");
+    const session = await db.verificationSession.findFirst({ where: { id: delivery.sessionId, tenantId: delivery.tenantId } });
+    if (!session) throw new Error("Webhook selfie session is unavailable");
+    const file = await db.evidenceFile.findFirst({ where: {
+      id: payload._selfie.evidenceId, sessionId: session.id, fileType: "selfie",
+      ...(payload._selfie.attemptId ? { attemptId: payload._selfie.attemptId } : { OR: [{ attemptId: null }, { attemptId: { isSet: false } }] })
+    } });
+    if (!file) throw new Error("Webhook selfie evidence is unavailable");
+    const { token } = signEvidenceAccess(String(file.id), { tenantId: String(delivery.tenantId) });
+    const selfieUrl = `${config.apiPublicUrl}/v1/dashboard/evidence/${encodeURIComponent(file.id)}/image?token=${encodeURIComponent(token)}`;
+    return JSON.stringify({ event: payload.event, sessionId: payload.sessionId,
+      userSessionId: payload.userSessionId ?? session.customerReference ?? null,
+      status: payload.status, createdAt: payload.createdAt, selfieUrl });
+  }
   let selfieBase64 = null;
   if (payload._selfie.evidenceId) {
     const session = await db.verificationSession.findFirst({ where: { id: delivery.sessionId, tenantId: delivery.tenantId } });
@@ -213,7 +232,8 @@ async function serializeDelivery(delivery, db) {
     }
     selfieBase64 = bytes.toString("base64");
   }
-  return JSON.stringify({ event: payload.event, sessionId: payload.sessionId, status: payload.status, createdAt: payload.createdAt, selfieBase64 });
+  return JSON.stringify({ event: payload.event, sessionId: payload.sessionId,
+    status: payload.status, createdAt: payload.createdAt, selfieBase64 });
 }
 
 module.exports = { sendWebhook, validateWebhookTarget, isPrivateIp, RETRY_SCHEDULE_SECONDS, MAX_ATTEMPTS };
