@@ -106,6 +106,8 @@ Set `customerReference` to your application's user or session ID when creating t
 
 Verify the webhook signature before trusting the result. Fetch `selfieUrl` from your server promptly: its bearer token expires after 15 minutes, and the image is served only while the evidence is retained. The URL is regenerated on delivery retries, so consume the URL from the current request. New approved events contain `selfieUrl` instead of `selfieBase64`; do not log or expose the URL to the browser. `userSessionId` is `null` if no `customerReference` was supplied. Failed liveness sends `verification.failed` with `status: "rejected"`; the explicit test button sends `webhook.test`.
 
+Retries of older approved deliveries are upgraded when the original verification result identifies its consumed selfie. If that evidence is unavailable, the delivery is marked `skipped` instead of forwarding an incomplete or mismatched image.
+
 **Using a bundler?** Import `@verifypass/sdk-js/element` instead of loading the script. These packages are currently installed from this repository or a vendored copy; they are not published to npm. See the [standalone Vue sample](../../vue-sample/README.md) for a complete external install and server integration. For React, see [React integration](#integration-options) below.
 
 ## Optional public application configuration

@@ -77,6 +77,19 @@ async function sendWebhook(payload, deps = {}) {
     return { skipped: true };
   }
 
+  // Deliveries created before selfie references were persisted have only the
+  // four public fields. Rebuild one only when its original result names the
+  // consumed selfie; never use the session's current attempt on a retry.
+  if (delivery.event === "verification.approved" && delivery.payload?._selfie?.version !== 1) {
+    if (!await upgradeLegacyApprovedDelivery(delivery, db)) {
+      await db.webhookDelivery.updateMany({ where: { id: delivery.id }, data: {
+        status: "skipped", nextAttemptAt: null,
+        lastError: "Legacy approved delivery cannot be matched to its original selfie"
+      } });
+      return { skipped: true, reason: "legacy approved delivery has no pinned selfie" };
+    }
+  }
+
   if (allowedEvents[delivery.event]) {
     const attemptId = delivery.payload?._selfie?.attemptId ?? payload.attemptId ?? null;
     const eligible = delivery.sessionId && await hasLivenessStatus(db, delivery.sessionId, attemptId, allowedEvents[delivery.event]);
@@ -144,6 +157,41 @@ async function sendWebhook(payload, deps = {}) {
   return { delivered: false, attempts, exhausted };
 }
 
+async function upgradeLegacyApprovedDelivery(delivery, db) {
+  if (!delivery.sessionId || !delivery.createdAt) return false;
+  const session = await db.verificationSession.findFirst({ where: { id: delivery.sessionId, tenantId: delivery.tenantId } });
+  if (!session || delivery.payload?.sessionId !== session.sessionUid || delivery.payload?.status !== "approved") return false;
+  const createdAt = new Date(delivery.createdAt);
+  if (!Number.isFinite(createdAt.getTime())) return false;
+  const results = await db.verificationResult.findMany({
+    where: { sessionId: session.id, createdAt: { lte: createdAt } },
+    orderBy: { createdAt: "desc" }, take: 1
+  });
+  const result = results[0];
+  const sameCurrentAttempt = (session.attemptId || null) === (result?.attemptId || null);
+  const manuallyApproved = session.status === "approved" && sameCurrentAttempt && session.completedAt && new Date(session.completedAt) <= createdAt;
+  const approved = result?.rawResult?.decision?.status === "approved" || manuallyApproved;
+  if (!approved || result.livenessStatus !== "passed") return false;
+  const consumedIds = result.rawResult?.consumedEvidenceIds;
+  if (!Array.isArray(consumedIds) || !consumedIds.length) return false;
+  const selfies = await db.evidenceFile.findMany({
+    where: {
+      id: { in: consumedIds.map(String) }, sessionId: session.id, fileType: "selfie",
+      ...(result.attemptId ? { attemptId: result.attemptId } : { OR: [{ attemptId: null }, { attemptId: { isSet: false } }] })
+    },
+    orderBy: { createdAt: "desc" }, take: 1
+  });
+  if (!selfies[0]) return false;
+  const upgraded = {
+    ...delivery.payload,
+    userSessionId: session.customerReference ?? null,
+    _selfie: { version: 1, evidenceId: selfies[0].id, attemptId: result.attemptId || null }
+  };
+  await db.webhookDelivery.updateMany({ where: { id: delivery.id }, data: { payload: upgraded } });
+  delivery.payload = upgraded;
+  return true;
+}
+
 async function createDelivery({ tenantId, sessionUid, event, eventUid: suppliedEventUid, attemptId, snapshot }, { db, now }) {
   // tenantId travels through job payloads as a string — MongoDB ObjectId ids
   // are strings end to end, no coercion needed.
@@ -199,13 +247,23 @@ async function createDelivery({ tenantId, sessionUid, event, eventUid: suppliedE
 
 async function serializeDelivery(delivery, db) {
   const payload = delivery.payload;
-  // Previously created deliveries retain their original retry contract.
+  // An approved event must never fall through to the legacy four-field body,
+  // including when a queued delivery predates the selfie URL contract.
+  if (delivery.event === "verification.approved" && (
+    payload?._selfie?.version !== 1 ||
+    payload.event !== delivery.event ||
+    payload.status !== "approved" ||
+    !payload.sessionId ||
+    !payload.createdAt
+  )) throw new Error("Approved webhook payload is incomplete");
+  // Failed and explicit test events retain their existing body contract.
   if (payload?._selfie?.version !== 1) return JSON.stringify(payload);
   const approved = delivery.event === "verification.approved";
   if (approved) {
     if (!payload._selfie.evidenceId) throw new Error("Webhook selfie evidence is unavailable");
     const session = await db.verificationSession.findFirst({ where: { id: delivery.sessionId, tenantId: delivery.tenantId } });
     if (!session) throw new Error("Webhook selfie session is unavailable");
+    if (payload.sessionId !== session.sessionUid) throw new Error("Approved webhook session does not match delivery");
     const file = await db.evidenceFile.findFirst({ where: {
       id: payload._selfie.evidenceId, sessionId: session.id, fileType: "selfie",
       ...(payload._selfie.attemptId ? { attemptId: payload._selfie.attemptId } : { OR: [{ attemptId: null }, { attemptId: { isSet: false } }] })

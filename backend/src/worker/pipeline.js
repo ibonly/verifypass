@@ -598,8 +598,7 @@ async function finalize(db, session, { decision, resultRow, dispatch, assertActi
         completedAt: decision.status === "manual_review" ? null : new Date().toISOString(),
         serviceId: session.sessionUid,
         selfieId: selfieId || null,
-        selfieIds: selfieIds || [],
-        minimalPayload: decision.status === "approved"
+        selfieIds: selfieIds || []
       }
     });
     assertActive?.();

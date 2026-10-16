@@ -180,8 +180,7 @@ router.post("/:sessionId/decision", reviewers, requireTenant, tenantScope, async
           completedAt: new Date().toISOString(),
           serviceId: session.sessionUid,
           selfieId,
-          selfieIds,
-          minimalPayload: decision === "approved"
+          selfieIds
         }
       });
     }

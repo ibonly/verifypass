@@ -94,7 +94,6 @@ test("approved path: result persisted, session approved, webhook enqueued", asyn
   assert.equal(jobs[0].payload.snapshot.serviceId, "vps_PIPE1");
   assert.ok(Array.isArray(jobs[0].payload.snapshot.selfieIds));
   assert.ok(jobs[0].payload.snapshot.selfieIds.length > 0);
-  assert.equal(jobs[0].payload.snapshot.minimalPayload, true);
 });
 
 test("spoof: rejected with LIVENESS_FAILED, risk audit logged and webhook queued", async () => {
