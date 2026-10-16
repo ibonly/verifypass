@@ -6,6 +6,7 @@
 
 const crypto = require("crypto");
 const { webhookHeaders } = require("@verifypass/shared");
+const { hasLivenessStatus } = require("../services/webhookEligibility");
 
 
 const { validateWebhookTarget, isPrivateIp } = require("../lib/webhookTarget");
@@ -46,8 +47,9 @@ async function sendWebhook(payload, deps = {}) {
     db.jobQueue.create({ data: { type, payload: jobPayload, status: "pending", runAfter, maxAttempts } }));
 
   // Fence old queued events too, not only newly generated outcomes.
-  if (!payload.deliveryId && payload.event !== "verification.approved" && payload.event !== "webhook.test") {
-    return { skipped: true, reason: "only approved verifications send webhooks" };
+  const allowedEvents = { "verification.approved": "passed", "verification.failed": "failed" };
+  if (!payload.deliveryId && !allowedEvents[payload.event] && payload.event !== "webhook.test") {
+    return { skipped: true, reason: "no deliverable liveness outcome" };
   }
 
   let delivery;
@@ -61,16 +63,27 @@ async function sendWebhook(payload, deps = {}) {
   }
 
   if (delivery.status === "delivered") return { skipped: true };
-  if (delivery.event !== "verification.approved" && delivery.event !== "webhook.test") {
+  if (!allowedEvents[delivery.event] && delivery.event !== "webhook.test") {
     await db.webhookDelivery.updateMany({ where: { id: delivery.id }, data: {
-      status: "skipped", nextAttemptAt: null, lastError: "Only approved verifications send webhooks"
+      status: "skipped", nextAttemptAt: null, lastError: "No deliverable liveness outcome"
     } });
-    return { skipped: true, reason: "only approved verifications send webhooks" };
+    return { skipped: true, reason: "no deliverable liveness outcome" };
   }
   const tenant = await db.tenant.findFirst({ where: { id: delivery.tenantId } });
   if (!tenant?.webhookUrl || !tenant?.webhookSecret) {
     await db.webhookDelivery.updateMany({ where: { id: delivery.id }, data: { status: "failed", lastError: "webhook not configured" } });
     return { skipped: true };
+  }
+
+  if (allowedEvents[delivery.event]) {
+    const attemptId = delivery.payload?._selfie?.attemptId ?? payload.attemptId ?? null;
+    const eligible = delivery.sessionId && await hasLivenessStatus(db, delivery.sessionId, attemptId, allowedEvents[delivery.event]);
+    if (!eligible) {
+      await db.webhookDelivery.updateMany({ where: { id: delivery.id }, data: {
+        status: "skipped", nextAttemptAt: null, lastError: "Liveness result does not match event"
+      } });
+      return { skipped: true, reason: "liveness result does not match event" };
+    }
   }
 
   const attempts = (delivery.attempts || 0) + 1;
@@ -156,7 +169,7 @@ async function createDelivery({ tenantId, sessionUid, event, eventUid: suppliedE
   const body = {
     event,
     sessionId: sessionUid || null,
-    status: snapshot?.status || (event.startsWith("verification.") ? event.slice("verification.".length) : session?.status) || null,
+    status: snapshot?.status || session?.status || (event.startsWith("verification.") ? event.slice("verification.".length) : null),
     createdAt: snapshot?.createdAt || (session?.createdAt ? new Date(session.createdAt).toISOString() : null),
     // Internal reference only: image bytes stay in encrypted evidence storage,
     // rather than being copied into the queue or delivery log indefinitely.

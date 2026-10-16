@@ -29,6 +29,7 @@ async function seed(db, { webhookUrl = "https://client.example/hook", webhookSec
       customerReference: "CUST-9", completedAt: new Date()
     }
   });
+  await db.verificationResult.create({ data: { sessionId: session.id, livenessStatus: "passed" } });
   return { tenant, session };
 }
 
@@ -151,12 +152,80 @@ test("tenant without webhook config: skipped, no delivery row", async () => {
   assert.equal((await db.webhookDelivery.findMany({})).length, 0);
 });
 
+test("approved deliveries with non-passed or missing liveness never reach HTTP, including retries", async () => {
+  for (const livenessStatus of ["review", "failed", null]) {
+    const db = createMockDb();
+    const { tenant, session } = await seed(db);
+    db.verificationResult.rows[0].livenessStatus = livenessStatus;
+    const fetch = mockFetch(() => ({ status: 200 }));
+    const deps = { db, fetchImpl: fetch, validateTarget: async () => {} };
+    const first = await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid, event: "verification.approved" }, deps);
+    const delivery = db.webhookDelivery.rows[0];
+    assert.equal(first.skipped, true);
+    assert.equal(delivery.status, "skipped");
+    assert.equal(delivery.attempts, 0);
+    assert.equal(delivery.nextAttemptAt, null);
+    await sendWebhook({ deliveryId: delivery.id }, deps);
+    assert.equal(fetch.calls.length, 0);
+  }
+});
+
+test("failed liveness delivers a signed verification.failed event and retains the test webhook", async () => {
+  const db = createMockDb();
+  const { tenant, session } = await seed(db);
+  db.verificationResult.rows[0].livenessStatus = "failed";
+  session.status = "rejected";
+  const fetch = mockFetch(() => ({ status: 200 }));
+  const deps = { db, fetchImpl: fetch, validateTarget: async () => {} };
+  const result = await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid, event: "verification.failed" }, deps);
+  assert.equal(result.delivered, true);
+  assert.equal(fetch.calls[0].opts.headers["X-Verifypass-Event"], "verification.failed");
+  assert.deepEqual(JSON.parse(fetch.calls[0].opts.body), {
+    event: "verification.failed", sessionId: session.sessionUid, status: "rejected",
+    createdAt: session.createdAt.toISOString(), selfieBase64: null
+  });
+  assert.equal(verifyWebhookSignature(fetch.calls[0].opts.body, fetch.calls[0].opts.headers, tenant.webhookSecret), true);
+  const testDelivery = await db.webhookDelivery.create({ data: {
+    tenantId: tenant.id, event: "webhook.test", status: "pending", attempts: 0,
+    payload: { event: "webhook.test", sessionId: null, status: "test", createdAt: new Date().toISOString(), selfieBase64: null }
+  } });
+  assert.equal((await sendWebhook({ deliveryId: testDelivery.id }, deps)).delivered, true);
+  assert.equal(fetch.calls.length, 2);
+});
+
+test("failed delivery requires failed liveness from the same attempt", async () => {
+  for (const livenessStatus of ["passed", "review", null]) {
+    const db = createMockDb();
+    const { tenant, session } = await seed(db);
+    db.verificationResult.rows[0].livenessStatus = livenessStatus;
+    const fetch = mockFetch(() => ({ status: 200 }));
+    const result = await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid, event: "verification.failed" },
+      { db, fetchImpl: fetch, validateTarget: async () => {} });
+    assert.equal(result.skipped, true);
+    assert.equal(fetch.calls.length, 0);
+  }
+});
+
+test("an approved webhook cannot use a passed result from another attempt", async () => {
+  const db = createMockDb();
+  const { tenant, session } = await seed(db);
+  session.attemptId = "current";
+  const fetch = mockFetch(() => ({ status: 200 }));
+  const out = await sendWebhook({
+    tenantId: tenant.id, sessionUid: session.sessionUid, event: "verification.approved",
+    snapshot: { attemptId: "current", status: "approved" }
+  }, { db, fetchImpl: fetch, validateTarget: async () => {} });
+  assert.equal(out.skipped, true);
+  assert.equal(fetch.calls.length, 0);
+});
+
 test("outbox webhook snapshots survive retries and redelivery reuses the event ID", async () => {
   const db=createMockDb();
   const {tenant,session}=await seed(db);
   session.status="submitted";
   const fetch=mockFetch(()=>({status:200}));
   const payload={tenantId:tenant.id,sessionUid:session.sessionUid,event:"verification.approved",eventUid:"evt_fixed",snapshot:{status:"approved",riskLevel:"high",attempt:1,attemptId:"old"}};
+  await db.verificationResult.create({ data: { sessionId: session.id, attemptId: "old", livenessStatus: "passed" } });
   await sendWebhook(payload,{db,fetchImpl:fetch,validateTarget:async()=>{}});
   await sendWebhook(payload,{db,fetchImpl:fetch,validateTarget:async()=>{}});
   assert.equal(fetch.calls.length,1);
@@ -183,6 +252,7 @@ test("encrypted selfie is delivered as base64, signed, and remains pinned across
   const { tenant, session } = await seed(db);
   const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", "base64");
   const selfie = await addSelfie(db, session, t, { attemptId: "original", bytes });
+  await db.verificationResult.create({ data: { sessionId: session.id, attemptId: "original", livenessStatus: "passed" } });
   await addSelfie(db, session, t, { attemptId: "original", fileType: "liveness_frame" });
   const http = require("node:http");
   const { once } = require("node:events");
@@ -225,6 +295,7 @@ test("selfie selection isolates session and attempt; no document or frame fallba
   const db = createMockDb();
   const { tenant, session } = await seed(db);
   session.attemptId = "current";
+  await db.verificationResult.create({ data: { sessionId: session.id, attemptId: "current", livenessStatus: "passed" } });
   await addSelfie(db, session, t, { attemptId: "old" });
   const frame = await addSelfie(db, session, t, { attemptId: "current", fileType: "liveness_frame" });
   const foreign = await addSelfie(db, { ...session, id: "other-session" }, t, { attemptId: "current" });
@@ -304,15 +375,17 @@ test("all five advertised delays are used, including the final 12-hour retry", a
   assert.equal(db.webhookDelivery.rows[0].status, "exhausted");
 });
 
-test("ID_ONLY events never include an image, even when stray selfie evidence exists", async t => {
+test("ID_ONLY events never send a webhook, even when stray selfie evidence exists", async t => {
   const db = createMockDb();
   const { tenant, session } = await seed(db);
   session.verificationType = "ID_ONLY";
+  db.verificationResult.rows[0].livenessStatus = null;
   await addSelfie(db, session, t);
   const fetch = mockFetch(() => ({ status: 200 }));
   await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid, event: "verification.approved" },
     { db, fetchImpl: fetch, validateTarget: async () => {} });
-  assert.equal(JSON.parse(fetch.calls[0].opts.body).selfieBase64, null);
+  assert.equal(fetch.calls.length, 0);
+  assert.equal(db.webhookDelivery.rows[0].status, "skipped");
 });
 
 test("newest selfie in the same attempt is selected when no pinned ID is supplied", async t => {
@@ -339,12 +412,12 @@ test("explicit legacy attempt in an old event never selects a newer attempt's se
   assert.equal(JSON.parse(fetch.calls[0].opts.body).selfieBase64, null);
 });
 
-test("only approved verification events reach the receiver, including old delivery retries", async () => {
+test("unrelated verification events never reach the receiver, including old delivery retries", async () => {
   const db = createMockDb();
   const { tenant, session } = await seed(db);
   const fetch = mockFetch(() => ({ status: 200 }));
   const deps = { db, fetchImpl: fetch, validateTarget: async () => {} };
-  for (const status of ["rejected", "manual_review", "failed", "expired"]) {
+  for (const status of ["rejected", "manual_review", "expired"]) {
     const event = `verification.${status}`;
     const fresh = await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid, event }, deps);
     assert.equal(fresh.skipped, true);

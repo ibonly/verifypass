@@ -97,7 +97,7 @@ test("approved path: result persisted, session approved, webhook enqueued", asyn
   assert.equal(jobs[0].payload.snapshot.minimalPayload, true);
 });
 
-test("spoof: rejected with LIVENESS_FAILED, risk audit logged", async () => {
+test("spoof: rejected with LIVENESS_FAILED, risk audit logged and webhook queued", async () => {
   const { db, session } = await seed();
   const out = await runVerification(
     { sessionUid: "vps_PIPE1" },
@@ -113,7 +113,8 @@ test("spoof: rejected with LIVENESS_FAILED, risk audit logged", async () => {
   assert.equal(audits[0].riskEvent, true);
 
   const jobs = await db.jobQueue.findMany({ where: { type: "send_webhook" } });
-  assert.equal(jobs.length, 0);
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].payload.event, "verification.failed");
 });
 
 test("borderline match: manual_review, no completedAt", async () => {
@@ -148,6 +149,16 @@ test("ID_ONLY: verifies WITHOUT a selfie — document-only signals", async () =>
   assert.equal(r.faceMatchStatus, null);
   assert.equal(r.documentStatus, "valid");
   assert.equal(r.extractedData.fullName, "ADEBAYO JOHN");
+  assert.equal(db.outbox.rows.filter(o => o.type === "send_webhook").length, 0);
+});
+
+test("FACE_ONLY approval with passed liveness queues a verification webhook", async () => {
+  const { db, session } = await seed({ type: "FACE_ONLY", withId: false });
+  const out = await runVerification({ sessionUid: session.sessionUid }, { db, provider: stubProvider(), evidenceKey: KEY });
+  assert.equal(out.status, "approved");
+  const result = await db.verificationResult.findFirst({ where: { sessionId: session.id } });
+  assert.equal(result.livenessStatus, "passed");
+  assert.equal(db.outbox.rows.filter(o => o.type === "send_webhook").length, 1);
 });
 
 test("ID_ONLY: ignores stored liveness challenge because no selfie is required", async () => {
@@ -351,14 +362,14 @@ test("liveness auto-approve (default): a selfie in the old review band approves,
   assert.ok(hook.payload.snapshot.waivedReasonCodes.includes("LIVENESS_BORDERLINE"));
 });
 
-test("rejected outcomes persist the decision without enqueueing a webhook", async () => {
+test("failed liveness persists the rejection and enqueues a failed webhook", async () => {
   const { db, session } = await seed();
   const provider = stubProvider();
   provider.checkLiveness = async () => ({ score: 0.2, faceCount: 1 });
   const out = await runVerification({ sessionUid: session.sessionUid }, { db, provider, evidenceKey: KEY });
   assert.equal(out.status, "rejected", `got ${out.reasonCodes}`);
   const hook = db.outbox.rows.find((o) => o.type === "send_webhook");
-  assert.equal(hook, undefined);
+  assert.equal(hook.payload.event, "verification.failed");
 });
 
 test("tenant thresholds from settings are applied", async () => {
@@ -738,10 +749,13 @@ test("60-percent boundary: pipeline decision → outbox → signed selfie webhoo
     const out = await runVerification({ sessionUid: session.sessionUid }, { db, provider, evidenceKey: KEY });
     assert.equal(out.status === "approved", c.approved, JSON.stringify(out));
     assert.equal(db.verificationResult.rows[0].livenessScore, c.score);
+    const livenessStatus = db.verificationResult.rows[0].livenessStatus;
+    const expectedEvent = out.status === "approved" && livenessStatus === "passed" ? "verification.approved"
+      : out.status === "rejected" && livenessStatus === "failed" ? "verification.failed" : null;
     const hooks = db.jobQueue.rows.filter(j => j.type === "send_webhook");
-    assert.equal(hooks.length, c.approved ? 1 : 0);
-    assert.equal(db.outbox.rows.filter(o => o.type === "send_webhook").length, c.approved ? 1 : 0);
-    if (!c.approved) return;
+    assert.equal(hooks.length, expectedEvent ? 1 : 0);
+    assert.equal(db.outbox.rows.filter(o => o.type === "send_webhook").length, expectedEvent ? 1 : 0);
+    if (!expectedEvent) return;
     if (c.configured === false) {
       tenant.webhookUrl = null;
       const before = received.length;
@@ -770,12 +784,12 @@ test("60-percent boundary: pipeline decision → outbox → signed selfie webhoo
     assert.equal(verifyWebhookSignature(request.body, request.headers, tenant.webhookSecret), true);
     const body = JSON.parse(request.body);
     assert.deepEqual(Object.keys(body).sort(), ["createdAt", "event", "selfieBase64", "sessionId", "status"]);
-    assert.equal(body.event, "verification.approved");
-    assert.equal(body.status, "approved");
+    assert.equal(body.event, expectedEvent);
+    assert.equal(body.status, out.status);
     assert.equal(body.sessionId, session.sessionUid);
     assert.deepEqual(Buffer.from(body.selfieBase64, "base64"), plain);
     assert.equal(db.webhookDelivery.rows[0].lastStatusCode, 204);
     await sendWebhook(hooks[0].payload, deps);
-    assert.equal(received.length, before + 1, "outbox redelivery must not POST the approved event twice");
+    assert.equal(received.length, before + 1, "outbox redelivery must not POST the same event twice");
   });
 });

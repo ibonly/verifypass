@@ -9,6 +9,7 @@ const { tenantScope } = require("../middleware/tenantScope");
 const { getDb } = require("../lib/db");
 const { audit } = require("../services/auditLogger");
 const { enqueue } = require("../services/jobService");
+const { hasLivenessStatus } = require("../services/webhookEligibility");
 const email = require("../services/emailService");
 
 const router = Router();
@@ -162,9 +163,9 @@ router.post("/:sessionId/decision", reviewers, requireTenant, tenantScope, async
         const selfie = allSelfies.filter((e) => e.fileType === "selfie").sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
         selfieId = selfie ? String(selfie.id) : (selfieIds[0] || null);
       }
-      // Only approvals notify the receiver, matching the automatic path.
+      // Only approvals backed by a passed liveness result notify the receiver.
       // Keep the decision snapshot bound to this review attempt.
-      if (decision === "approved") await enqueue("send_webhook", {
+      if (decision === "approved" && await hasLivenessStatus(db, session.id, session.attemptId, "passed")) await enqueue("send_webhook", {
         tenantId: String(req.tenant.id),
         sessionUid: session.sessionUid,
         attemptId: session.attemptId || null,

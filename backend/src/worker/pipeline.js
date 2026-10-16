@@ -578,11 +578,12 @@ async function finalize(db, session, { decision, resultRow, dispatch, assertActi
     if (!claimed.count) return false;
     await tx.verificationResult.create({ data: { sessionId: session.id, attemptId: session.attemptId || null, ...resultRow, rawResult: JSON.parse(JSON.stringify({ ...resultRow.rawResult, decision: { status: decision.status, riskLevel: decision.riskLevel, reasonCodes: decision.reasonCodes, ...(decision.waivedReasonCodes?.length ? { waivedReasonCodes: decision.waivedReasonCodes, livenessWaiver: decision.livenessWaiver || null } : {}) } })) } });
     await tx.auditLog.create({ data: { tenantId: session.tenantId, sessionId: session.id, actorType: "system", action: "verification.decided", metadata: { attemptId: session.attemptId || null, status: decision.status, reasonCodes: decision.reasonCodes }, riskEvent: decision.riskLevel !== "low" } });
-    if (decision.status === "approved") await addOutbox(tx, "send_webhook", {
+    if ((decision.status === "approved" && resultRow.livenessStatus === "passed") ||
+        (decision.status === "rejected" && resultRow.livenessStatus === "failed")) await addOutbox(tx, "send_webhook", {
       tenantId: String(session.tenantId),
       sessionUid: session.sessionUid,
       attemptId: session.attemptId || null,
-      event: `verification.${decision.status}`,
+      event: resultRow.livenessStatus === "failed" ? "verification.failed" : "verification.approved",
       eventUid: `evt_${require("crypto").randomBytes(12).toString("hex")}`,
       snapshot: {
         customerReference: session.customerReference || null,
