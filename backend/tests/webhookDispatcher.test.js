@@ -53,6 +53,34 @@ test("approved payload contains the caller reference and a signed selfie URL", a
   assert.equal(body.selfieBase64, undefined);
 });
 
+test("structured lifecycle logs correlate sends and retries without exposing secrets", async () => {
+  const db = createMockDb();
+  const { tenant, session } = await seed(db, { webhookUrl: "https://client.example/hook?secret=DO_NOT_LOG" });
+  const entries = [];
+  const fetch = mockFetch(attempt => ({ status: attempt === 1 ? 503 : 204 }));
+  const deps = { db, fetchImpl: fetch, validateTarget: async () => {}, log: line => entries.push(JSON.parse(line)) };
+  await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid, event: "verification.approved" }, deps);
+  const delivery = db.webhookDelivery.rows[0];
+  await sendWebhook({ deliveryId: delivery.id }, deps);
+
+  assert.deepEqual(entries.filter(e => e.stage === "response_received").map(e => e.httpStatus), [503, 204]);
+  assert.deepEqual(entries.filter(e => e.stage === "request_sent").map(e => e.attempt), [1, 2]);
+  assert.equal(entries.some(e => e.stage === "retry_scheduled" && e.nextAttemptAt), true);
+  assert.equal(entries.at(-1).stage, "delivered");
+  assert.equal(entries.every(e => e.component === "webhook" && e.eventUid === delivery.eventUid && e.deliveryId === delivery.id), true);
+  const sent = entries.find(e => e.stage === "request_sent");
+  assert.deepEqual(sent.payloadFields, ["createdAt", "event", "selfieUrl", "sessionId", "status", "userSessionId"]);
+  assert.equal(sent.selfieUrlPresent, true);
+  assert.equal(sent.userSessionIdPresent, true);
+  assert.equal(sent.receiverOrigin, "https://client.example");
+  assert.match(sent.bodySha256, /^[a-f0-9]{64}$/);
+  const allLogs = JSON.stringify(entries);
+  assert.equal(allLogs.includes("DO_NOT_LOG"), false);
+  assert.equal(allLogs.includes("whsec_test"), false);
+  assert.equal(allLogs.includes("token="), false);
+  assert.equal(allLogs.includes("CUST-9"), false);
+});
+
 test("delivers signed webhook; receiver can verify signature", async () => {
   const db = createMockDb();
   const { tenant } = await seed(db);

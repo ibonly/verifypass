@@ -165,24 +165,32 @@ router.post("/:sessionId/decision", reviewers, requireTenant, tenantScope, async
       }
       // Only approvals backed by a passed liveness result notify the receiver.
       // Keep the decision snapshot bound to this review attempt.
-      if (decision === "approved" && await hasLivenessStatus(db, session.id, session.attemptId, "passed")) await enqueue("send_webhook", {
-        tenantId: String(req.tenant.id),
-        sessionUid: session.sessionUid,
-        attemptId: session.attemptId || null,
-        event: `verification.${decision}`,
-        snapshot: {
-          status: decision,
-          riskLevel: session.riskLevel || null,
-          decisionSource: "manual_review",
-          reasonCodes: session.decisionReason?.reasonCodes || [],
-          attempt: session.attemptNumber || 1,
+      if (decision === "approved" && await hasLivenessStatus(db, session.id, session.attemptId, "passed")) {
+        const eventUid = `evt_${require("crypto").randomBytes(12).toString("hex")}`;
+        await enqueue("send_webhook", {
+          tenantId: String(req.tenant.id),
+          sessionUid: session.sessionUid,
           attemptId: session.attemptId || null,
-          completedAt: new Date().toISOString(),
-          serviceId: session.sessionUid,
-          selfieId,
-          selfieIds
-        }
-      });
+          event: `verification.${decision}`,
+          eventUid,
+          snapshot: {
+            status: decision,
+            riskLevel: session.riskLevel || null,
+            decisionSource: "manual_review",
+            reasonCodes: session.decisionReason?.reasonCodes || [],
+            attempt: session.attemptNumber || 1,
+            attemptId: session.attemptId || null,
+            completedAt: new Date().toISOString(),
+            serviceId: session.sessionUid,
+            selfieId,
+            selfieIds
+          }
+        });
+        require("../services/webhookLog").logWebhook("event_queued", {
+          eventUid, tenantId: String(req.tenant.id), sessionId: session.sessionUid,
+          event: "verification.approved", trigger: "manual_review"
+        });
+      }
     }
 
     await audit({

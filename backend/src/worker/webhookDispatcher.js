@@ -8,6 +8,7 @@ const crypto = require("crypto");
 const { webhookHeaders } = require("@verifypass/shared");
 const { hasLivenessStatus } = require("../services/webhookEligibility");
 const { signEvidenceAccess } = require("../services/evidenceStore");
+const { logWebhook, requestSummary } = require("../services/webhookLog");
 const config = require("../config");
 
 
@@ -16,6 +17,14 @@ const { validateWebhookTarget, isPrivateIp } = require("../lib/webhookTarget");
 const RETRY_SCHEDULE_SECONDS = [60, 300, 1800, 7200, 43200];
 const MAX_ATTEMPTS = RETRY_SCHEDULE_SECONDS.length + 1;
 const TIMEOUT_MS = 10000;
+
+function failureReasonFor(error) {
+  if (/Webhook selfie|Approved webhook/.test(error?.message || "")) return "payload_or_evidence_unavailable";
+  if (error?.name === "TimeoutError" || error?.name === "AbortError") return "timeout";
+  const code = error?.cause?.code || error?.code;
+  if (["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ECONNRESET"].includes(code)) return code.toLowerCase();
+  return "request_error";
+}
 
 // C3: alert tenant admins when delivery is exhausted — the primary channel
 // (webhook) is the thing that broke, so email is the fallback. Throttled
@@ -42,6 +51,11 @@ function notifyWebhookExhausted(tenant, delivery, attempts, error) {
  */
 async function sendWebhook(payload, deps = {}) {
   const { db, fetchImpl, now = () => new Date(), enqueueJob } = deps;
+  const log = (stage, delivery, details = {}) => logWebhook(stage, {
+    eventUid: delivery?.eventUid, deliveryId: delivery?.id,
+    tenantId: delivery?.tenantId, sessionId: delivery?.payload?.sessionId,
+    event: delivery?.event, ...details
+  }, deps.log);
   const doFetch = fetchImpl || fetch;
   // Retry scheduling goes through the injected dispatch in Lambda/SQS
   // topologies; the polling worker keeps using job_queue rows.
@@ -51,29 +65,48 @@ async function sendWebhook(payload, deps = {}) {
   // Fence old queued events too, not only newly generated outcomes.
   const allowedEvents = { "verification.approved": "passed", "verification.failed": "failed" };
   if (!payload.deliveryId && !allowedEvents[payload.event] && payload.event !== "webhook.test") {
+    log("skipped", null, { tenantId: payload.tenantId, sessionId: payload.sessionUid,
+      event: payload.event, reason: "no_deliverable_liveness_outcome" });
     return { skipped: true, reason: "no deliverable liveness outcome" };
   }
 
   let delivery;
   if (payload.deliveryId) {
     delivery = await db.webhookDelivery.findFirst({ where: { id: payload.deliveryId } });
-    if (!delivery) throw new Error(`webhook delivery ${payload.deliveryId} not found`);
-    if (delivery.status === "delivered") return { skipped: true };
+    if (!delivery) {
+      log("delivery_missing", null, { deliveryId: payload.deliveryId });
+      throw new Error(`webhook delivery ${payload.deliveryId} not found`);
+    }
+    if (delivery.status === "delivered") {
+      log("duplicate_ignored", delivery, { status: "delivered" });
+      return { skipped: true };
+    }
   } else {
     delivery = await createDelivery(payload, { db, now });
-    if (!delivery) return { skipped: true, reason: "tenant has no webhook configured" };
+    if (!delivery) {
+      log("skipped", null, { tenantId: payload.tenantId, sessionId: payload.sessionUid,
+        event: payload.event, reason: "webhook_not_configured" });
+      return { skipped: true, reason: "tenant has no webhook configured" };
+    }
   }
 
-  if (delivery.status === "delivered") return { skipped: true };
+  if (delivery.status === "delivered") {
+    log("duplicate_ignored", delivery, { status: "delivered" });
+    return { skipped: true };
+  }
+  log("delivery_ready", delivery, { trigger: delivery.event === "webhook.test" ? "test" : payload.deliveryId ? "retry" : "new_event",
+    status: delivery.status, attempt: (delivery.attempts || 0) + 1 });
   if (!allowedEvents[delivery.event] && delivery.event !== "webhook.test") {
     await db.webhookDelivery.updateMany({ where: { id: delivery.id }, data: {
       status: "skipped", nextAttemptAt: null, lastError: "No deliverable liveness outcome"
     } });
+    log("skipped", delivery, { reason: "no_deliverable_liveness_outcome" });
     return { skipped: true, reason: "no deliverable liveness outcome" };
   }
   const tenant = await db.tenant.findFirst({ where: { id: delivery.tenantId } });
   if (!tenant?.webhookUrl || !tenant?.webhookSecret) {
     await db.webhookDelivery.updateMany({ where: { id: delivery.id }, data: { status: "failed", lastError: "webhook not configured" } });
+    log("skipped", delivery, { reason: "webhook_not_configured" });
     return { skipped: true };
   }
 
@@ -86,8 +119,10 @@ async function sendWebhook(payload, deps = {}) {
         status: "skipped", nextAttemptAt: null,
         lastError: "Legacy approved delivery cannot be matched to its original selfie"
       } });
+      log("skipped", delivery, { reason: "legacy_selfie_unavailable" });
       return { skipped: true, reason: "legacy approved delivery has no pinned selfie" };
     }
+    log("legacy_payload_upgraded", delivery);
   }
 
   if (allowedEvents[delivery.event]) {
@@ -97,35 +132,47 @@ async function sendWebhook(payload, deps = {}) {
       await db.webhookDelivery.updateMany({ where: { id: delivery.id }, data: {
         status: "skipped", nextAttemptAt: null, lastError: "Liveness result does not match event"
       } });
+      log("skipped", delivery, { reason: "liveness_result_mismatch" });
       return { skipped: true, reason: "liveness result does not match event" };
     }
   }
 
   const attempts = (delivery.attempts || 0) + 1;
+  log("attempt_started", delivery, { attempt: attempts });
 
   let statusCode = null;
   let error = null;
+  let failureReason = null;
   try {
     await (deps.validateTarget || validateWebhookTarget)(tenant.webhookUrl);
     const body = await serializeDelivery(delivery, db);
+    const headers = webhookHeaders(body, tenant.webhookSecret, { event: delivery.event });
+    const startedAt = Date.now();
+    log("request_sent", delivery, { attempt: attempts, receiverOrigin: new URL(tenant.webhookUrl).origin,
+      ...requestSummary(body) });
     const res = await doFetch(tenant.webhookUrl, {
       method: "POST",
       redirect: "error",
-      headers: webhookHeaders(body, tenant.webhookSecret, { event: delivery.event }),
+      headers,
       body,
       signal: AbortSignal.timeout(TIMEOUT_MS)
     });
     statusCode = res.status;
+    log("response_received", delivery, { attempt: attempts, httpStatus: statusCode,
+      durationMs: Date.now() - startedAt });
     if (res.status < 200 || res.status >= 300) error = `HTTP ${res.status}`;
+    if (error) failureReason = "non_2xx_response";
   } catch (err) {
     if (err.code === "WEBHOOK_TARGET_BLOCKED") {
       await db.webhookDelivery.updateMany({
         where: { id: delivery.id },
         data: { status: "failed", attempts, lastStatusCode: null, nextAttemptAt: null, lastError: `SSRF blocked: ${err.message}` }
       });
+      log("blocked", delivery, { attempt: attempts, reason: "webhook_target_blocked" });
       return { delivered: false, attempts, blocked: true, reason: err.message };
     }
     error = err.message;
+    failureReason = failureReasonFor(err);
   }
 
   if (!error) {
@@ -133,6 +180,7 @@ async function sendWebhook(payload, deps = {}) {
       where: { id: delivery.id },
       data: { status: "delivered", attempts, lastStatusCode: statusCode, lastError: null, deliveredAt: now(), nextAttemptAt: null }
     });
+    log("delivered", delivery, { attempt: attempts, httpStatus: statusCode });
     return { delivered: true, attempts };
   }
 
@@ -148,9 +196,14 @@ async function sendWebhook(payload, deps = {}) {
       nextAttemptAt: nextAt
     }
   });
+  log(exhausted ? "exhausted" : "attempt_failed", delivery, {
+    attempt: attempts, httpStatus: statusCode, reason: failureReason,
+    nextAttemptAt: nextAt?.toISOString() ?? null
+  });
   if (!exhausted) {
     // scheduling is managed here, not by generic job retry
     await dispatch("send_webhook", { deliveryId: delivery.id }, { runAfter: nextAt, maxAttempts: 1 });
+    log("retry_scheduled", delivery, { attempt: attempts + 1, nextAttemptAt: nextAt.toISOString() });
   } else {
     notifyWebhookExhausted(tenant, delivery, attempts, error || "unknown");
   }
