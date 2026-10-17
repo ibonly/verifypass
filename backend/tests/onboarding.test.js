@@ -139,7 +139,7 @@ test("admin config → queued test → real HTTP receiver → visible signed del
     let body = "";
     for await (const chunk of req) body += chunk;
     received.push({ body, headers: req.headers, method: req.method });
-    res.writeHead(204); res.end();
+    res.writeHead(200); res.end();
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -170,7 +170,7 @@ test("admin config → queued test → real HTTP receiver → visible signed del
   const log = await call("get", "/v1/dashboard/webhook-deliveries").expect(200);
   assert.deepEqual(log.body.tenant, { tenantUid: tenant.tenantUid, companyName: tenant.companyName });
   assert.equal(log.body.deliveries[0].status, "delivered");
-  assert.equal(log.body.deliveries[0].lastStatusCode, 204);
+  assert.equal(log.body.deliveries[0].lastStatusCode, 200);
   assert.equal(JSON.stringify(log.body).includes(config.body.secret), false);
   await call("post", `/v1/onboarding/webhooks/${queued.body.eventId}/retry`).send({}).expect(400);
 

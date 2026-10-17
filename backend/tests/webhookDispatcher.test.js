@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 
 const { verifyWebhookSignature } = require("@verifypass/shared");
 const { createMockDb } = require("./helpers/mockDb");
-const { sendWebhook, RETRY_SCHEDULE_SECONDS, MAX_ATTEMPTS } = require("../src/worker/webhookDispatcher");
+const { sendWebhook, APPROVED_RETRY_SECONDS, MAX_ATTEMPTS } = require("../src/worker/webhookDispatcher");
 
 function mockFetch(responder) {
   const calls = [];
@@ -13,7 +13,7 @@ function mockFetch(responder) {
     calls.push({ url, opts });
     const r = responder(calls.length, url, opts);
     if (r.throw) throw new Error(r.throw);
-    return { status: r.status ?? 200 };
+    return { status: r.status ?? 200, headers: { get: name => r.headers?.[name.toLowerCase()] ?? null } };
   };
   fn.calls = calls;
   return fn;
@@ -57,13 +57,13 @@ test("structured lifecycle logs correlate sends and retries without exposing sec
   const db = createMockDb();
   const { tenant, session } = await seed(db, { webhookUrl: "https://client.example/hook?secret=DO_NOT_LOG" });
   const entries = [];
-  const fetch = mockFetch(attempt => ({ status: attempt === 1 ? 503 : 204 }));
+  const fetch = mockFetch(attempt => ({ status: attempt === 1 ? 503 : 200 }));
   const deps = { db, fetchImpl: fetch, validateTarget: async () => {}, log: line => entries.push(JSON.parse(line)) };
   await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid, event: "verification.approved" }, deps);
   const delivery = db.webhookDelivery.rows[0];
   await sendWebhook({ deliveryId: delivery.id }, deps);
 
-  assert.deepEqual(entries.filter(e => e.stage === "response_received").map(e => e.httpStatus), [503, 204]);
+  assert.deepEqual(entries.filter(e => e.stage === "response_received").map(e => e.httpStatus), [503, 200]);
   assert.deepEqual(entries.filter(e => e.stage === "request_sent").map(e => e.attempt), [1, 2]);
   assert.equal(entries.some(e => e.stage === "retry_scheduled" && e.nextAttemptAt), true);
   assert.equal(entries.at(-1).stage, "delivered");
@@ -137,11 +137,49 @@ test("failure schedules retry with backoff; delivery row tracks state", async ()
   const delivery = (await db.webhookDelivery.findMany({}))[0];
   assert.equal(delivery.status, "failed");
   assert.equal(delivery.lastStatusCode, 500);
-  assert.equal(delivery.nextAttemptAt.getTime(), now.getTime() + RETRY_SCHEDULE_SECONDS[0] * 1000);
+  assert.equal(delivery.nextAttemptAt.getTime(), now.getTime() + APPROVED_RETRY_SECONDS[0] * 1000);
 
   const retryJobs = await db.jobQueue.findMany({ where: { type: "send_webhook" } });
   assert.equal(retryJobs.length, 1);
   assert.equal(retryJobs[0].payload.deliveryId, delivery.id);
+});
+
+test("HTTP 4xx is permanent and 204 is not an accepted delivery", async () => {
+  const db = createMockDb();
+  const { tenant, session } = await seed(db);
+  const fetch = mockFetch(attempt => ({ status: attempt === 1 ? 422 : 204 }));
+  const deps = { db, fetchImpl: fetch, validateTarget: async () => {} };
+  const rejected = await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid, event: "verification.approved" }, deps);
+  assert.equal(rejected.permanent, true);
+  assert.equal(db.jobQueue.rows.length, 0);
+  assert.equal(db.webhookDelivery.rows[0].nextAttemptAt, null);
+
+  const second = await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid,
+    event: "verification.approved", eventUid: "evt_204" }, deps);
+  assert.equal(second.delivered, false);
+  assert.equal(db.webhookDelivery.rows[1].status, "failed");
+  assert.equal(db.jobQueue.rows.length, 1);
+});
+
+test("503 Retry-After is used only inside the five-minute decision window", async () => {
+  const db = createMockDb();
+  const { tenant, session } = await seed(db);
+  let clock = new Date("2026-10-16T18:11:40Z");
+  session.completedAt = clock;
+  const fetch = mockFetch(() => ({ status: 503, headers: { "retry-after": "45" } }));
+  const deps = { db, fetchImpl: fetch, validateTarget: async () => {}, now: () => clock };
+  await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid, event: "verification.approved" }, deps);
+  assert.equal(db.webhookDelivery.rows[0].nextAttemptAt.getTime(), clock.getTime() + 45_000);
+
+  clock = new Date(session.completedAt.getTime() + 280_000);
+  const stopped = await sendWebhook({ deliveryId: db.webhookDelivery.rows[0].id }, deps);
+  assert.equal(stopped.exhausted, true);
+  assert.equal(db.webhookDelivery.rows[0].nextAttemptAt, null);
+  assert.equal(fetch.calls.length, 2);
+
+  clock = new Date(session.completedAt.getTime() + 301_000);
+  await sendWebhook({ deliveryId: db.webhookDelivery.rows[0].id }, deps);
+  assert.equal(fetch.calls.length, 2, "late jobs must not send an unusable selfie URL");
 });
 
 test("retries until exhausted after MAX_ATTEMPTS", async () => {
@@ -366,7 +404,7 @@ test("approved selfie URL is signed, readable, and pinned across retries", async
     let body = "";
     for await (const chunk of req) body += chunk;
     received.push({ body, headers: req.headers });
-    res.writeHead(received.length === 1 ? 503 : 204); res.end();
+    res.writeHead(received.length === 1 ? 503 : 200); res.end();
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -444,7 +482,7 @@ test("temporary DNS failure retries and later delivers the same event", async ()
   const db = createMockDb();
   const { tenant } = await seed(db);
   const { validateWebhookTarget } = require("../src/lib/webhookTarget");
-  const fetch = mockFetch(() => ({ status: 204 }));
+  const fetch = mockFetch(() => ({ status: 200 }));
   const out = await sendWebhook({ tenantId: tenant.id, sessionUid: "vps_WH1", event: "verification.approved" }, {
     db, fetchImpl: fetch,
     validateTarget: url => validateWebhookTarget(url, { resolve4: async () => { throw new Error("EAI_AGAIN"); } })
@@ -477,14 +515,14 @@ test("private targets are blocked permanently, with no HTTP call or retry", asyn
   assert.equal(db.webhookDelivery.rows[0].nextAttemptAt, null);
 });
 
-test("all five advertised delays are used, including the final 12-hour retry", async () => {
+test("approved retries use five short delays", async () => {
   const db = createMockDb();
   const { tenant } = await seed(db);
   const now = new Date("2026-09-15T12:00:00Z");
   const deps = { db, now: () => now, fetchImpl: mockFetch(() => ({ status: 503 })), validateTarget: async () => {} };
   await sendWebhook({ tenantId: tenant.id, sessionUid: "vps_WH1", event: "verification.approved" }, deps);
   for (let i = 1; i < 6; i++) await sendWebhook({ deliveryId: db.webhookDelivery.rows[0].id }, deps);
-  assert.deepEqual(db.jobQueue.rows.map(j => (j.runAfter - now) / 1000), [60, 300, 1800, 7200, 43200]);
+  assert.deepEqual(db.jobQueue.rows.map(j => (j.runAfter - now) / 1000), APPROVED_RETRY_SECONDS);
   assert.equal(db.webhookDelivery.rows[0].attempts, 6);
   assert.equal(db.webhookDelivery.rows[0].status, "exhausted");
 });

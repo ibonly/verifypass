@@ -1,6 +1,7 @@
 "use strict";
 
-// send_webhook job handler (PRD §9.11). Retry schedule: 1m, 5m, 30m, 2h, 12h.
+// send_webhook job handler (PRD §9.11). Approved events retry only while the
+// receiving application can still use the selfie (five minutes from decision).
 // Each attempt is recorded on the webhook_deliveries row; retries are new
 // queue jobs referencing the same delivery (idempotent, survives restarts).
 
@@ -15,6 +16,8 @@ const config = require("../config");
 const { validateWebhookTarget, isPrivateIp } = require("../lib/webhookTarget");
 
 const RETRY_SCHEDULE_SECONDS = [60, 300, 1800, 7200, 43200];
+const APPROVED_RETRY_SECONDS = [10, 20, 40, 60, 90];
+const APPROVED_DELIVERY_WINDOW_MS = 5 * 60 * 1000;
 const MAX_ATTEMPTS = RETRY_SCHEDULE_SECONDS.length + 1;
 const TIMEOUT_MS = 10000;
 
@@ -24,6 +27,20 @@ function failureReasonFor(error) {
   const code = error?.cause?.code || error?.code;
   if (["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ECONNRESET"].includes(code)) return code.toLowerCase();
   return "request_error";
+}
+
+function retryAfterSeconds(value, now) {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.max(1, Math.ceil(seconds));
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(1, Math.ceil((date - now.getTime()) / 1000)) : null;
+}
+
+function decisionDeadline(delivery) {
+  if (delivery.event !== "verification.approved") return null;
+  const decidedAt = Date.parse(delivery.payload?._decisionAt || delivery.createdAt);
+  return Number.isFinite(decidedAt) ? decidedAt + APPROVED_DELIVERY_WINDOW_MS : null;
 }
 
 // C3: alert tenant admins when delivery is exhausted — the primary channel
@@ -94,6 +111,18 @@ async function sendWebhook(payload, deps = {}) {
     log("duplicate_ignored", delivery, { status: "delivered" });
     return { skipped: true };
   }
+  if (delivery.lastStatusCode >= 400 && delivery.lastStatusCode < 500) {
+    log("skipped", delivery, { reason: "permanent_4xx_response" });
+    return { skipped: true, permanent: true };
+  }
+  const deadline = decisionDeadline(delivery);
+  if (deadline !== null && now().getTime() >= deadline) {
+    await db.webhookDelivery.updateMany({ where: { id: delivery.id }, data: {
+      status: "exhausted", nextAttemptAt: null, lastError: "Approved webhook delivery window expired"
+    } });
+    log("exhausted", delivery, { reason: "approved_delivery_window_expired" });
+    return { delivered: false, exhausted: true, reason: "approved delivery window expired" };
+  }
   log("delivery_ready", delivery, { trigger: delivery.event === "webhook.test" ? "test" : payload.deliveryId ? "retry" : "new_event",
     status: delivery.status, attempt: (delivery.attempts || 0) + 1 });
   if (!allowedEvents[delivery.event] && delivery.event !== "webhook.test") {
@@ -143,6 +172,7 @@ async function sendWebhook(payload, deps = {}) {
   let statusCode = null;
   let error = null;
   let failureReason = null;
+  let retryAfter = null;
   try {
     await (deps.validateTarget || validateWebhookTarget)(tenant.webhookUrl);
     const body = await serializeDelivery(delivery, db);
@@ -158,9 +188,10 @@ async function sendWebhook(payload, deps = {}) {
       signal: AbortSignal.timeout(TIMEOUT_MS)
     });
     statusCode = res.status;
+    if (res.status === 503) retryAfter = retryAfterSeconds(res.headers?.get?.("retry-after"), now());
     log("response_received", delivery, { attempt: attempts, httpStatus: statusCode,
       durationMs: Date.now() - startedAt });
-    if (res.status < 200 || res.status >= 300) error = `HTTP ${res.status}`;
+    if (res.status !== 200) error = `HTTP ${res.status}`;
     if (error) failureReason = "non_2xx_response";
   } catch (err) {
     if (err.code === "WEBHOOK_TARGET_BLOCKED") {
@@ -184,8 +215,20 @@ async function sendWebhook(payload, deps = {}) {
     return { delivered: true, attempts };
   }
 
-  const exhausted = attempts >= MAX_ATTEMPTS;
-  const nextAt = exhausted ? null : new Date(now().getTime() + RETRY_SCHEDULE_SECONDS[attempts - 1] * 1000);
+  if (statusCode >= 400 && statusCode < 500) {
+    await db.webhookDelivery.updateMany({ where: { id: delivery.id }, data: {
+      status: "failed", attempts, lastStatusCode: statusCode,
+      lastError: String(error).slice(0, 500), nextAttemptAt: null
+    } });
+    log("blocked", delivery, { attempt: attempts, httpStatus: statusCode, reason: "permanent_4xx_response" });
+    return { delivered: false, attempts, permanent: true };
+  }
+
+  const schedule = deadline === null ? RETRY_SCHEDULE_SECONDS : APPROVED_RETRY_SECONDS;
+  const delay = statusCode === 503 && retryAfter !== null ? retryAfter : schedule[attempts - 1];
+  const proposedAt = delay == null ? null : new Date(now().getTime() + delay * 1000);
+  const exhausted = attempts >= schedule.length + 1 || !proposedAt || (deadline !== null && proposedAt.getTime() >= deadline);
+  const nextAt = exhausted ? null : proposedAt;
   await db.webhookDelivery.updateMany({
     where: { id: delivery.id },
     data: {
@@ -275,6 +318,7 @@ async function createDelivery({ tenantId, sessionUid, event, eventUid: suppliedE
     ...(event === "verification.approved" ? { userSessionId: snapshot?.customerReference ?? session?.customerReference ?? null } : {}),
     status: snapshot?.status || session?.status || (event.startsWith("verification.") ? event.slice("verification.".length) : null),
     createdAt: snapshot?.createdAt || (session?.createdAt ? new Date(session.createdAt).toISOString() : null),
+    _decisionAt: snapshot?.completedAt || (session?.completedAt ? new Date(session.completedAt).toISOString() : null),
     // Internal reference only: image bytes stay in encrypted evidence storage,
     // rather than being copied into the queue or delivery log indefinitely.
     _selfie: { version: 1, evidenceId: selfie?.id || null, attemptId: eventAttempt || null }
@@ -317,6 +361,9 @@ async function serializeDelivery(delivery, db) {
     const session = await db.verificationSession.findFirst({ where: { id: delivery.sessionId, tenantId: delivery.tenantId } });
     if (!session) throw new Error("Webhook selfie session is unavailable");
     if (payload.sessionId !== session.sessionUid) throw new Error("Approved webhook session does not match delivery");
+    if (!session.customerReference || payload.userSessionId !== session.customerReference) {
+      throw new Error("Approved webhook userSessionId does not match customerReference");
+    }
     const file = await db.evidenceFile.findFirst({ where: {
       id: payload._selfie.evidenceId, sessionId: session.id, fileType: "selfie",
       ...(payload._selfie.attemptId ? { attemptId: payload._selfie.attemptId } : { OR: [{ attemptId: null }, { attemptId: { isSet: false } }] })
@@ -347,4 +394,4 @@ async function serializeDelivery(delivery, db) {
     status: payload.status, createdAt: payload.createdAt, selfieBase64 });
 }
 
-module.exports = { sendWebhook, validateWebhookTarget, isPrivateIp, RETRY_SCHEDULE_SECONDS, MAX_ATTEMPTS };
+module.exports = { sendWebhook, validateWebhookTarget, isPrivateIp, RETRY_SCHEDULE_SECONDS, APPROVED_RETRY_SECONDS, MAX_ATTEMPTS };
