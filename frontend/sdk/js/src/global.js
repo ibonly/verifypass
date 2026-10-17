@@ -3,10 +3,43 @@
 // The CDN entry embeds the same hosted workflow as the React integration.
 // Consent, camera capture, document backs, challenge guidance and retries
 // therefore share one implementation.
-const { VerifyPassClient } = require("@verifypass/sdk-core");
+const { VerifyPassClient, createFlow, pollingTimeoutForExpiry, toVerifyPassError } = require("@verifypass/sdk-core");
 const instances = new WeakMap();
+
+// Copy for the mobile-handoff step. The desktop shows a QR and waits;
+// the phone runs the hosted page in its own browser and performs the
+// capture there. The desktop never acquires a camera in this mode.
+const MOBILE_COPY = {
+  title: "Verify on your phone",
+  hint: "Scan the QR code with your phone camera to continue.",
+  waiting: "Waiting for scan…",
+  verifying: "Verifying…",
+  finalising: "Finalising…",
+  failed: "Verification failed — try again.",
+  retry: "Try again"
+};
+
+// Self-contained inline styles (no external CSS) so the CDN bundle works
+// when dropped into any page.
+const MOBILE_STYLE = {
+  wrap: { fontFamily: "system-ui, sans-serif", maxWidth: "360px", margin: "0 auto", textAlign: "center", color: "#111827" },
+  title: { fontSize: "18px", fontWeight: "600", margin: "0 0 4px" },
+  hint: { fontSize: "14px", color: "#6B7280", margin: "0 0 16px" },
+  image: { display: "block", margin: "0 auto 16px", padding: "8px", background: "#fff", border: "1px solid #E5E7EB", borderRadius: "8px" },
+  status: { fontSize: "14px", color: "#374151", minHeight: "20px", margin: "0 0 12px" },
+  retry: { fontSize: "14px", padding: "8px 16px", border: "1px solid #D1D5DB", borderRadius: "6px", background: "#fff", cursor: "pointer" }
+};
+
 function init(opts = {}) {
-  const { container, sessionId, sdkToken, publicKey, baseUrl, onComplete, onError } = opts;
+  const {
+    container, sessionId, sdkToken, publicKey, baseUrl,
+    onComplete, onError, onTelemetry,
+    /** Mobile handoff: show a QR code the user scans with their phone,
+     *  which opens the hosted verification page in its browser. The
+     *  desktop widget never acquires a camera in this mode — it polls
+     *  /status until the session reaches a terminal outcome. */
+    mobileHandoff = false
+  } = opts;
   const root = typeof container === "string" ? document.querySelector(container) : container;
   if (!root) throw new Error("VerifyPass.init: container not found");
   const client = new VerifyPassClient({ sessionId, sdkToken, publicKey, baseUrl });
@@ -27,10 +60,29 @@ function init(opts = {}) {
   loading.setAttribute("role", "status");
   loading.textContent = "Loading verification…";
   root.replaceChildren(loading);
+
   const ready = (async () => {
+    // `ready` resolves when the verification reaches a terminal outcome
+    // the consumer must see — success, an init failure, or destroy().
+    // In mobile mode a RECOVERABLE poll failure keeps it PENDING: the
+    // in-widget Retry button is the recovery path, so `await instance.ready`
+    // cannot fire before the verification is actually over.
+    let settleReady;
+    const readyGate = new Promise((resolve) => { settleReady = resolve; });
+    const baseDestroy = instance.destroy.bind(instance);
+    instance.destroy = () => { baseDestroy(); settleReady(); };
+
     try {
-      const challenge = await client.getChallenge();
+      const challenge = await client.getChallenge({ mobileHandoff });
       if (disposed) return;
+
+      if (mobileHandoff) {
+        await runMobileHandoff(client, root, challenge, onComplete, onError, onTelemetry, settleReady, () => disposed);
+        await readyGate;
+        return;
+      }
+
+      // ── Embedded (iframe) mode ─────────────────────────────
       const url = new URL(challenge.hostedBaseUrl);
       if (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))) throw new Error("Hosted verification requires HTTPS");
       if (url.username || url.password || url.search || url.hash || /[\s\\]/.test(challenge.hostedBaseUrl)) throw new Error("Invalid hosted verification URL");
@@ -47,12 +99,160 @@ function init(opts = {}) {
       if (!disposed) onComplete?.(result);
     } catch (error) {
       if (disposed) return;
+      settleReady(); // init failed — don't leave `ready` hanging
       loading.textContent = error.message || "Unable to load verification";
       root.replaceChildren(loading);
-      onError?.(error);
+      onError?.(toVerifyPassError(error, "INIT_FAILED"));
     }
   })();
   instance.ready = ready;
   return instance;
 }
+
+// Mobile handoff: build + render the QR, then poll /status on a CHILD
+// controller until the phone-side verification reaches a terminal
+// outcome. `settleReady` resolves `instance.ready` on success; a
+// recoverable poll failure leaves it pending and surfaces a Retry button.
+async function runMobileHandoff(client, root, challenge, onComplete, onError, onTelemetry, settleReady, isDisposed) {
+  const flow = createFlow(challenge.verificationType || "ID_AND_FACE", { mobileHandoff: true });
+  // The short-lived, one-time handoff credential stays out of HTTP requests,
+  // but the QR remains sensitive until the phone claims it.
+  const mobileUrl = client.getHostedUrl();
+
+  const wrap = document.createElement("div");
+  Object.assign(wrap.style, MOBILE_STYLE.wrap);
+  const title = document.createElement("h2");
+  Object.assign(title.style, MOBILE_STYLE.title);
+  title.textContent = MOBILE_COPY.title;
+  const hint = document.createElement("p");
+  Object.assign(hint.style, MOBILE_STYLE.hint);
+  hint.textContent = MOBILE_COPY.hint;
+  const image = document.createElement("img");
+  Object.assign(image.style, MOBILE_STYLE.image);
+  image.alt = "Verification QR code";
+  image.width = 256;
+  image.height = 256;
+  const status = document.createElement("p");
+  Object.assign(status.style, MOBILE_STYLE.status);
+  status.setAttribute("role", "status");
+  status.setAttribute("aria-live", "polite");
+  status.textContent = MOBILE_COPY.waiting;
+  const retry = document.createElement("button");
+  Object.assign(retry.style, MOBILE_STYLE.retry);
+  retry.type = "button";
+  retry.textContent = MOBILE_COPY.retry;
+  retry.hidden = true;
+  const actions = document.createElement("div");
+  Object.assign(actions.style, { display: "flex", gap: "8px", justifyContent: "center", flexWrap: "wrap", marginBottom: "10px" });
+  const copy = document.createElement("button");
+  Object.assign(copy.style, MOBILE_STYLE.retry);
+  copy.type = "button";
+  copy.textContent = "Copy secure link";
+  const open = document.createElement("a");
+  Object.assign(open.style, MOBILE_STYLE.retry, { color: "#111827", textDecoration: "none" });
+  open.href = mobileUrl;
+  open.target = "_blank";
+  open.rel = "noopener noreferrer";
+  open.textContent = "Open on this device";
+  const qrRetry = document.createElement("button");
+  Object.assign(qrRetry.style, MOBILE_STYLE.retry);
+  qrRetry.type = "button";
+  qrRetry.textContent = "Retry QR code";
+  qrRetry.hidden = true;
+  const security = document.createElement("p");
+  Object.assign(security.style, { fontSize: "12px", color: "#6B7280", margin: "0 0 12px" });
+  security.textContent = `This code and link are private, expire shortly, and can be claimed once. Do not share or screenshot them.${challenge.handoffExpiresAt ? ` Code expires ${new Date(challenge.handoffExpiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.` : ""}${challenge.expiresAt ? ` Session expires ${new Date(challenge.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.` : ""}`;
+  actions.append(copy, open, qrRetry);
+  wrap.append(title, hint, image, actions, security, status, retry);
+  root.replaceChildren(wrap);
+
+  const renderQr = async () => {
+    qrRetry.hidden = true;
+    image.removeAttribute("src");
+    status.textContent = "Generating QR code…";
+    try {
+      const QR = await import("qrcode");
+      image.src = await QR.toDataURL(mobileUrl, { errorCorrectionLevel: "M", margin: 2, width: 256 });
+      status.textContent = MOBILE_COPY.waiting;
+    } catch (err) {
+      status.textContent = "Unable to generate the QR code. Retry or copy the secure link.";
+      qrRetry.hidden = false;
+      onTelemetry?.({ type: "mobile_handoff_qr_failed", stage: "encode", errorName: err?.name || "Error" });
+    }
+  };
+  qrRetry.addEventListener("click", renderQr);
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(mobileUrl);
+      status.textContent = "Secure link copied. Treat it like a password.";
+      onTelemetry?.({ type: "mobile_handoff_link_copied" });
+    } catch (err) {
+      status.textContent = "Could not copy the link. Open it in a new tab instead.";
+      onTelemetry?.({ type: "mobile_handoff_copy_failed", errorName: err?.name || "Error" });
+    }
+  });
+  await renderQr();
+  if (isDisposed()) return;
+
+  // Polling runs on a CHILD AbortController linked to the parent:
+  //   * destroy() (parent abort) cancels it, and
+  //   * a failed poll's Retry restarts with a FRESH child — aborting the
+  //     shared parent would kill the client and any later step.
+  let stopPoll = () => {};
+  let completed = false;
+
+  const startPoll = () => {
+    stopPoll();
+    const pollController = new AbortController();
+    const onParentAbort = () => pollController.abort();
+    client.controller.signal.addEventListener("abort", onParentAbort, { once: true });
+    stopPoll = () => {
+      client.controller.signal.removeEventListener("abort", onParentAbort);
+      pollController.abort();
+    };
+    status.textContent = MOBILE_COPY.waiting;
+    retry.hidden = true;
+    client.waitForResult({
+      intervalMs: 2500,
+      timeoutMs: pollingTimeoutForExpiry(challenge.expiresAt),
+      onTick: (s) => {
+        if (isDisposed()) return;
+        // Surface real progress: `started` → the phone is uploading
+        // captures, `submitted` → the worker is finalising.
+        if (s.status === "started") status.textContent = MOBILE_COPY.verifying;
+        else if (s.status === "submitted") status.textContent = MOBILE_COPY.finalising;
+      },
+      signal: pollController.signal
+    }).then((result) => {
+      if (isDisposed()) return;
+      stopPoll();
+      flow.finish(result);
+      if (!completed) { completed = true; onComplete?.(result); }
+      settleReady();
+    }).catch((err) => {
+      if (isDisposed()) return;
+      stopPoll();
+      flow.fail(err);
+      status.textContent = err.message || MOBILE_COPY.failed;
+      retry.hidden = false;
+      onError?.(toVerifyPassError(err));
+      // `ready` stays pending — the in-widget Retry is the recovery path.
+    });
+  };
+
+  retry.addEventListener("click", () => {
+    if (isDisposed()) return;
+    // Clear the error and re-arm polling — the same pattern the
+    // React widget uses for its mobile-step Retry. Deliberately
+    // NO server call: a transient poll failure must not burn a
+    // retry attempt (retrySession is capped + audit-logged, and
+    // is reserved for a rejected/failed OUTCOME, which the
+    // consumer re-inits for via onComplete).
+    flow.retry();
+    startPoll();
+  });
+
+  startPoll();
+}
+
 module.exports = { init };

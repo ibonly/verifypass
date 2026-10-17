@@ -38,6 +38,14 @@ test("Lambda container handlers use dot-free entry modules", () => {
   assert.doesNotMatch(apiDockerfile, /CMD \["api\.lambda\.handler"\]/);
 });
 
+test("worker inherits shared API configuration needed for webhook evidence reads", () => {
+  const template = fs.readFileSync(path.join(root, "backend/template.yaml"), "utf8");
+  const globals = template.match(/Globals:\s*\n([\s\S]*?)\nConditions:/)?.[1];
+  assert.ok(globals, "SAM Globals.Function must exist");
+  assert.match(globals, /API_PUBLIC_URL:\s*!Ref ApiPublicUrl/);
+  assert.match(globals, /AUTH_TOKEN_SECRET:\s*!Ref AuthTokenSecret/);
+});
+
 test("frontend deploy binds prod environment and validates cPanel secrets", () => {
   const workflow = fs.readFileSync(path.join(root, ".github/workflows/frontend-deploy.yml"), "utf8");
   assert.match(workflow, /environment:\s*prod/);

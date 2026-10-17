@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 
 const { verifyWebhookSignature } = require("@verifypass/shared");
 const { createMockDb } = require("./helpers/mockDb");
-const { sendWebhook, RETRY_SCHEDULE_SECONDS, MAX_ATTEMPTS } = require("../src/worker/webhookDispatcher");
+const { sendWebhook, APPROVED_RETRY_SECONDS, MAX_ATTEMPTS } = require("../src/worker/webhookDispatcher");
 
 function mockFetch(responder) {
   const calls = [];
@@ -13,7 +13,7 @@ function mockFetch(responder) {
     calls.push({ url, opts });
     const r = responder(calls.length, url, opts);
     if (r.throw) throw new Error(r.throw);
-    return { status: r.status ?? 200 };
+    return { status: r.status ?? 200, headers: { get: name => r.headers?.[name.toLowerCase()] ?? null } };
   };
   fn.calls = calls;
   return fn;
@@ -29,19 +29,56 @@ async function seed(db, { webhookUrl = "https://client.example/hook", webhookSec
       customerReference: "CUST-9", completedAt: new Date()
     }
   });
+  await db.verificationResult.create({ data: { sessionId: session.id, livenessStatus: "passed" } });
+  await db.evidenceFile.create({ data: { sessionId: session.id, fileType: "selfie", attemptId: null, createdAt: new Date(0) } });
   return { tenant, session };
 }
 
-test("verification payload contains exactly the five requested fields", async () => {
+test("approved payload contains the caller reference and a signed selfie URL", async () => {
   const db = createMockDb();
   const { tenant, session } = await seed(db);
   const fetch = mockFetch(() => ({ status: 200 }));
   await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid, event: "verification.approved" },
     { db, fetchImpl: fetch, validateTarget: async () => {} });
-  assert.deepEqual(JSON.parse(fetch.calls[0].opts.body), {
+  const body = JSON.parse(fetch.calls[0].opts.body);
+  const { selfieUrl, ...fields } = body;
+  assert.deepEqual(fields, {
     event: "verification.approved", sessionId: session.sessionUid, status: "approved",
-    createdAt: session.createdAt.toISOString(), selfieBase64: null
+    createdAt: session.createdAt.toISOString(), userSessionId: "CUST-9"
   });
+  const url = new URL(selfieUrl);
+  const selfie = db.evidenceFile.rows[0];
+  assert.equal(url.pathname, `/v1/dashboard/evidence/${selfie.id}/image`);
+  assert.equal(require("../src/services/evidenceStore").verifyEvidenceAccess(selfie.id, url.searchParams.get("token"), { tenantId: tenant.id }), true);
+  assert.equal(body.selfieBase64, undefined);
+});
+
+test("structured lifecycle logs correlate sends and retries without exposing secrets", async () => {
+  const db = createMockDb();
+  const { tenant, session } = await seed(db, { webhookUrl: "https://client.example/hook?secret=DO_NOT_LOG" });
+  const entries = [];
+  const fetch = mockFetch(attempt => ({ status: attempt === 1 ? 503 : 200 }));
+  const deps = { db, fetchImpl: fetch, validateTarget: async () => {}, log: line => entries.push(JSON.parse(line)) };
+  await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid, event: "verification.approved" }, deps);
+  const delivery = db.webhookDelivery.rows[0];
+  await sendWebhook({ deliveryId: delivery.id }, deps);
+
+  assert.deepEqual(entries.filter(e => e.stage === "response_received").map(e => e.httpStatus), [503, 200]);
+  assert.deepEqual(entries.filter(e => e.stage === "request_sent").map(e => e.attempt), [1, 2]);
+  assert.equal(entries.some(e => e.stage === "retry_scheduled" && e.nextAttemptAt), true);
+  assert.equal(entries.at(-1).stage, "delivered");
+  assert.equal(entries.every(e => e.component === "webhook" && e.eventUid === delivery.eventUid && e.deliveryId === delivery.id), true);
+  const sent = entries.find(e => e.stage === "request_sent");
+  assert.deepEqual(sent.payloadFields, ["createdAt", "event", "selfieUrl", "sessionId", "status", "userSessionId"]);
+  assert.equal(sent.selfieUrlPresent, true);
+  assert.equal(sent.userSessionIdPresent, true);
+  assert.equal(sent.receiverOrigin, "https://client.example");
+  assert.match(sent.bodySha256, /^[a-f0-9]{64}$/);
+  const allLogs = JSON.stringify(entries);
+  assert.equal(allLogs.includes("DO_NOT_LOG"), false);
+  assert.equal(allLogs.includes("whsec_test"), false);
+  assert.equal(allLogs.includes("token="), false);
+  assert.equal(allLogs.includes("CUST-9"), false);
 });
 
 test("delivers signed webhook; receiver can verify signature", async () => {
@@ -77,6 +114,7 @@ test("delivers signed webhook; receiver can verify signature", async () => {
   assert.equal(body.event, "verification.approved");
   assert.equal(body.tenantId, undefined);
   assert.equal(body.sessionId, "vps_WH1");
+  assert.equal(body.userSessionId, "CUST-9");
   assert.equal(body.customerReference, undefined);
 
   const delivery = (await db.webhookDelivery.findMany({}))[0];
@@ -99,11 +137,49 @@ test("failure schedules retry with backoff; delivery row tracks state", async ()
   const delivery = (await db.webhookDelivery.findMany({}))[0];
   assert.equal(delivery.status, "failed");
   assert.equal(delivery.lastStatusCode, 500);
-  assert.equal(delivery.nextAttemptAt.getTime(), now.getTime() + RETRY_SCHEDULE_SECONDS[0] * 1000);
+  assert.equal(delivery.nextAttemptAt.getTime(), now.getTime() + APPROVED_RETRY_SECONDS[0] * 1000);
 
   const retryJobs = await db.jobQueue.findMany({ where: { type: "send_webhook" } });
   assert.equal(retryJobs.length, 1);
   assert.equal(retryJobs[0].payload.deliveryId, delivery.id);
+});
+
+test("HTTP 4xx is permanent and 204 is not an accepted delivery", async () => {
+  const db = createMockDb();
+  const { tenant, session } = await seed(db);
+  const fetch = mockFetch(attempt => ({ status: attempt === 1 ? 422 : 204 }));
+  const deps = { db, fetchImpl: fetch, validateTarget: async () => {} };
+  const rejected = await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid, event: "verification.approved" }, deps);
+  assert.equal(rejected.permanent, true);
+  assert.equal(db.jobQueue.rows.length, 0);
+  assert.equal(db.webhookDelivery.rows[0].nextAttemptAt, null);
+
+  const second = await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid,
+    event: "verification.approved", eventUid: "evt_204" }, deps);
+  assert.equal(second.delivered, false);
+  assert.equal(db.webhookDelivery.rows[1].status, "failed");
+  assert.equal(db.jobQueue.rows.length, 1);
+});
+
+test("503 Retry-After is used only inside the five-minute decision window", async () => {
+  const db = createMockDb();
+  const { tenant, session } = await seed(db);
+  let clock = new Date("2026-10-16T18:11:40Z");
+  session.completedAt = clock;
+  const fetch = mockFetch(() => ({ status: 503, headers: { "retry-after": "45" } }));
+  const deps = { db, fetchImpl: fetch, validateTarget: async () => {}, now: () => clock };
+  await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid, event: "verification.approved" }, deps);
+  assert.equal(db.webhookDelivery.rows[0].nextAttemptAt.getTime(), clock.getTime() + 45_000);
+
+  clock = new Date(session.completedAt.getTime() + 280_000);
+  const stopped = await sendWebhook({ deliveryId: db.webhookDelivery.rows[0].id }, deps);
+  assert.equal(stopped.exhausted, true);
+  assert.equal(db.webhookDelivery.rows[0].nextAttemptAt, null);
+  assert.equal(fetch.calls.length, 2);
+
+  clock = new Date(session.completedAt.getTime() + 301_000);
+  await sendWebhook({ deliveryId: db.webhookDelivery.rows[0].id }, deps);
+  assert.equal(fetch.calls.length, 2, "late jobs must not send an unusable selfie URL");
 });
 
 test("retries until exhausted after MAX_ATTEMPTS", async () => {
@@ -151,12 +227,82 @@ test("tenant without webhook config: skipped, no delivery row", async () => {
   assert.equal((await db.webhookDelivery.findMany({})).length, 0);
 });
 
+test("approved deliveries with non-passed or missing liveness never reach HTTP, including retries", async () => {
+  for (const livenessStatus of ["review", "failed", null]) {
+    const db = createMockDb();
+    const { tenant, session } = await seed(db);
+    db.verificationResult.rows[0].livenessStatus = livenessStatus;
+    const fetch = mockFetch(() => ({ status: 200 }));
+    const deps = { db, fetchImpl: fetch, validateTarget: async () => {} };
+    const first = await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid, event: "verification.approved" }, deps);
+    const delivery = db.webhookDelivery.rows[0];
+    assert.equal(first.skipped, true);
+    assert.equal(delivery.status, "skipped");
+    assert.equal(delivery.attempts, 0);
+    assert.equal(delivery.nextAttemptAt, null);
+    await sendWebhook({ deliveryId: delivery.id }, deps);
+    assert.equal(fetch.calls.length, 0);
+  }
+});
+
+test("failed liveness delivers a signed verification.failed event and retains the test webhook", async () => {
+  const db = createMockDb();
+  const { tenant, session } = await seed(db);
+  db.verificationResult.rows[0].livenessStatus = "failed";
+  db.evidenceFile.rows.length = 0;
+  session.status = "rejected";
+  const fetch = mockFetch(() => ({ status: 200 }));
+  const deps = { db, fetchImpl: fetch, validateTarget: async () => {} };
+  const result = await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid, event: "verification.failed" }, deps);
+  assert.equal(result.delivered, true);
+  assert.equal(fetch.calls[0].opts.headers["X-Verifypass-Event"], "verification.failed");
+  assert.deepEqual(JSON.parse(fetch.calls[0].opts.body), {
+    event: "verification.failed", sessionId: session.sessionUid, status: "rejected",
+    createdAt: session.createdAt.toISOString(), selfieBase64: null
+  });
+  assert.equal(verifyWebhookSignature(fetch.calls[0].opts.body, fetch.calls[0].opts.headers, tenant.webhookSecret), true);
+  const testDelivery = await db.webhookDelivery.create({ data: {
+    tenantId: tenant.id, event: "webhook.test", status: "pending", attempts: 0,
+    payload: { event: "webhook.test", sessionId: null, status: "test", createdAt: new Date().toISOString(), selfieBase64: null }
+  } });
+  assert.equal((await sendWebhook({ deliveryId: testDelivery.id }, deps)).delivered, true);
+  assert.equal(fetch.calls.length, 2);
+});
+
+test("failed delivery requires failed liveness from the same attempt", async () => {
+  for (const livenessStatus of ["passed", "review", null]) {
+    const db = createMockDb();
+    const { tenant, session } = await seed(db);
+    db.verificationResult.rows[0].livenessStatus = livenessStatus;
+    const fetch = mockFetch(() => ({ status: 200 }));
+    const result = await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid, event: "verification.failed" },
+      { db, fetchImpl: fetch, validateTarget: async () => {} });
+    assert.equal(result.skipped, true);
+    assert.equal(fetch.calls.length, 0);
+  }
+});
+
+test("an approved webhook cannot use a passed result from another attempt", async () => {
+  const db = createMockDb();
+  const { tenant, session } = await seed(db);
+  session.attemptId = "current";
+  const fetch = mockFetch(() => ({ status: 200 }));
+  const out = await sendWebhook({
+    tenantId: tenant.id, sessionUid: session.sessionUid, event: "verification.approved",
+    snapshot: { attemptId: "current", status: "approved" }
+  }, { db, fetchImpl: fetch, validateTarget: async () => {} });
+  assert.equal(out.skipped, true);
+  assert.equal(fetch.calls.length, 0);
+});
+
 test("outbox webhook snapshots survive retries and redelivery reuses the event ID", async () => {
   const db=createMockDb();
   const {tenant,session}=await seed(db);
   session.status="submitted";
   const fetch=mockFetch(()=>({status:200}));
   const payload={tenantId:tenant.id,sessionUid:session.sessionUid,event:"verification.approved",eventUid:"evt_fixed",snapshot:{status:"approved",riskLevel:"high",attempt:1,attemptId:"old"}};
+  await db.verificationResult.create({ data: { sessionId: session.id, attemptId: "old", livenessStatus: "passed" } });
+  await db.evidenceFile.create({ data: { sessionId: session.id, attemptId: "old", fileType: "selfie" } });
   await sendWebhook(payload,{db,fetchImpl:fetch,validateTarget:async()=>{}});
   await sendWebhook(payload,{db,fetchImpl:fetch,validateTarget:async()=>{}});
   assert.equal(fetch.calls.length,1);
@@ -164,6 +310,72 @@ test("outbox webhook snapshots survive retries and redelivery reuses the event I
   const body=JSON.parse(fetch.calls[0].opts.body);
   assert.equal(body.status,"approved");assert.equal(body.attemptId,undefined);
   assert.equal(db.webhookDelivery.rows[0].eventUid,"evt_fixed");
+});
+
+test("legacy first sends and retries upgrade from the original consumed selfie", async () => {
+  const db = createMockDb();
+  const { tenant, session } = await seed(db);
+  const original = await db.evidenceFile.create({ data: { sessionId: session.id, attemptId: "original", fileType: "selfie" } });
+  const resultTime = new Date(Date.now() - 120000);
+  const deliveryTime = new Date(Date.now() - 60000);
+  await db.verificationResult.create({ data: {
+    sessionId: session.id, attemptId: "original", livenessStatus: "passed", createdAt: resultTime,
+    rawResult: { decision: { status: "approved" }, consumedEvidenceIds: [original.id] }
+  } });
+  const deliveries = [];
+  for (const [status, attempts] of [["pending", 0], ["failed", 1]]) {
+    deliveries.push(await db.webhookDelivery.create({ data: {
+      tenantId: tenant.id, sessionId: session.id, event: "verification.approved", status,
+      attempts, createdAt: deliveryTime,
+      payload: { event: "verification.approved", sessionId: session.sessionUid, status: "approved", createdAt: session.createdAt.toISOString() }
+    } }));
+  }
+  session.attemptId = "new";
+  await db.evidenceFile.create({ data: { sessionId: session.id, attemptId: "new", fileType: "selfie" } });
+  await db.verificationResult.create({ data: {
+    sessionId: session.id, attemptId: "new", livenessStatus: "passed", createdAt: new Date(),
+    rawResult: { decision: { status: "approved" } }
+  } });
+  const fetch = mockFetch(() => ({ status: 200 }));
+  for (const delivery of deliveries) {
+    const out = await sendWebhook({ deliveryId: delivery.id }, { db, fetchImpl: fetch, validateTarget: async () => {} });
+    assert.equal(out.delivered, true);
+    const body = JSON.parse(fetch.calls.at(-1).opts.body);
+    assert.deepEqual(Object.keys(body).sort(), ["createdAt", "event", "selfieUrl", "sessionId", "status", "userSessionId"]);
+    assert.equal(body.userSessionId, "CUST-9");
+    assert.equal(new URL(body.selfieUrl).pathname, `/v1/dashboard/evidence/${original.id}/image`);
+    assert.equal(delivery.payload._selfie.attemptId, "original");
+  }
+  assert.equal(fetch.calls.length, 2);
+});
+
+test("malformed approved records never send an incomplete body", async () => {
+  const db = createMockDb();
+  const { tenant, session } = await seed(db);
+  const delivery = await db.webhookDelivery.create({ data: {
+    tenantId: tenant.id, sessionId: session.id, event: "verification.approved", status: "pending", attempts: 0,
+    payload: { event: "verification.approved", sessionId: session.sessionUid, status: "pending",
+      createdAt: session.createdAt.toISOString(), _selfie: { version: 1, evidenceId: db.evidenceFile.rows[0].id, attemptId: null } }
+  } });
+  const fetch = mockFetch(() => ({ status: 200 }));
+  const out = await sendWebhook({ deliveryId: delivery.id }, { db, fetchImpl: fetch, validateTarget: async () => {} });
+  assert.equal(out.delivered, false);
+  assert.equal(fetch.calls.length, 0);
+  assert.match(delivery.lastError, /Approved webhook payload is incomplete/);
+});
+
+test("legacy approved delivery without a consumed selfie cannot forward an unrelated image", async () => {
+  const db = createMockDb();
+  const { tenant, session } = await seed(db);
+  const delivery = await db.webhookDelivery.create({ data: {
+    tenantId: tenant.id, sessionId: session.id, event: "verification.approved", status: "failed", attempts: 1,
+    payload: { event: "verification.approved", sessionId: session.sessionUid, status: "approved", createdAt: session.createdAt.toISOString() }
+  } });
+  const fetch = mockFetch(() => ({ status: 200 }));
+  const out = await sendWebhook({ deliveryId: delivery.id }, { db, fetchImpl: fetch, validateTarget: async () => {} });
+  assert.equal(out.skipped, true);
+  assert.equal(delivery.status, "skipped");
+  assert.equal(fetch.calls.length, 0);
 });
 
 async function addSelfie(db, session, t, { attemptId, fileType = "selfie", bytes = Buffer.from("selfie bytes"), createdAt = new Date() } = {}) {
@@ -178,11 +390,12 @@ async function addSelfie(db, session, t, { attemptId, fileType = "selfie", bytes
   return db.evidenceFile.create({ data: { sessionId: session.id, attemptId, fileType, ...stored, createdAt } });
 }
 
-test("encrypted selfie is delivered as base64, signed, and remains pinned across retries", async t => {
+test("approved selfie URL is signed, readable, and pinned across retries", async t => {
   const db = createMockDb();
   const { tenant, session } = await seed(db);
   const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", "base64");
   const selfie = await addSelfie(db, session, t, { attemptId: "original", bytes });
+  await db.verificationResult.create({ data: { sessionId: session.id, attemptId: "original", livenessStatus: "passed" } });
   await addSelfie(db, session, t, { attemptId: "original", fileType: "liveness_frame" });
   const http = require("node:http");
   const { once } = require("node:events");
@@ -191,7 +404,7 @@ test("encrypted selfie is delivered as base64, signed, and remains pinned across
     let body = "";
     for await (const chunk of req) body += chunk;
     received.push({ body, headers: req.headers });
-    res.writeHead(received.length === 1 ? 503 : 204); res.end();
+    res.writeHead(received.length === 1 ? 503 : 200); res.end();
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -203,7 +416,7 @@ test("encrypted selfie is delivered as base64, signed, and remains pinned across
   fetch.calls = [];
   const deps = { db, fetchImpl: fetch, validateTarget: async () => {} };
   await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid, event: "verification.approved",
-    snapshot: { selfieId: selfie.id, attemptId: "original", minimalPayload: true, status: "approved" } }, deps);
+    snapshot: { selfieId: selfie.id, attemptId: "original", status: "approved" } }, deps);
   session.attemptId = "new";
   session.status = "submitted";
   await addSelfie(db, session, t, { attemptId: "new" });
@@ -211,11 +424,20 @@ test("encrypted selfie is delivered as base64, signed, and remains pinned across
   assert.equal(fetch.calls.length, 2);
   assert.equal(received.length, 2);
   assert.equal(verifyWebhookSignature(received[1].body, received[1].headers, "whsec_test"), true);
-  assert.deepEqual(Buffer.from(JSON.parse(received[1].body).selfieBase64, "base64"), bytes);
-  assert.equal(fetch.calls[0].opts.body, fetch.calls[1].opts.body);
   const body = JSON.parse(fetch.calls[1].opts.body);
-  assert.deepEqual(Object.keys(body).sort(), ["createdAt", "event", "selfieBase64", "sessionId", "status"]);
-  assert.deepEqual(Buffer.from(body.selfieBase64, "base64"), bytes);
+  assert.deepEqual(Object.keys(body).sort(), ["createdAt", "event", "selfieUrl", "sessionId", "status", "userSessionId"]);
+  assert.equal(body.userSessionId, "CUST-9");
+  const url = new URL(body.selfieUrl);
+  assert.equal(url.pathname, `/v1/dashboard/evidence/${selfie.id}/image`);
+  assert.equal(require("../src/services/evidenceStore").verifyEvidenceAccess(selfie.id, url.searchParams.get("token"), { tenantId: tenant.id }), true);
+  assert.equal(require("../src/services/evidenceStore").verifyEvidenceAccess(selfie.id, url.searchParams.get("token"), { tenantId: "other-tenant" }), false);
+  const { setDb } = require("../src/lib/db");
+  const app = require("express")();
+  app.use("/v1/dashboard", require("../src/routes/dashboard"));
+  app.use(require("../src/middleware/errors").errorHandler);
+  setDb(db); t.after(() => setDb(null));
+  const response = await require("supertest")(app).get(url.pathname + url.search).expect(200);
+  assert.deepEqual(Buffer.from(response.body), bytes);
   assert.equal(body.status, "approved");
   assert.equal(verifyWebhookSignature(fetch.calls[1].opts.body, fetch.calls[1].opts.headers, "whsec_test"), true);
   assert.equal(JSON.stringify(db.webhookDelivery.rows).includes(bytes.toString("base64")), false, "do not duplicate plaintext biometric data in delivery storage");
@@ -225,6 +447,7 @@ test("selfie selection isolates session and attempt; no document or frame fallba
   const db = createMockDb();
   const { tenant, session } = await seed(db);
   session.attemptId = "current";
+  await db.verificationResult.create({ data: { sessionId: session.id, attemptId: "current", livenessStatus: "passed" } });
   await addSelfie(db, session, t, { attemptId: "old" });
   const frame = await addSelfie(db, session, t, { attemptId: "current", fileType: "liveness_frame" });
   const foreign = await addSelfie(db, { ...session, id: "other-session" }, t, { attemptId: "current" });
@@ -233,33 +456,33 @@ test("selfie selection isolates session and attempt; no document or frame fallba
     await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid, event: "verification.approved", snapshot: { selfieId } },
       { db, fetchImpl: fetch, validateTarget: async () => {} });
   }
-  for (const call of fetch.calls) assert.equal(JSON.parse(call.opts.body).selfieBase64, null);
+  assert.equal(fetch.calls.length, 0, "no URL may point to another attempt, a frame, or another session");
+  assert.equal(db.webhookDelivery.rows.every(row => row.status === "failed"), true);
 });
 
-test("selfie read failure is visible and retryable; it never sends an incomplete image", async t => {
+test("missing pinned selfie metadata is retryable and never sends an incomplete URL", async t => {
   const db = createMockDb();
   const { tenant, session } = await seed(db);
   const selfie = await addSelfie(db, session, t);
-  const fs = require("node:fs/promises");
-  const encrypted = await fs.readFile(selfie.storagePath);
-  await fs.unlink(selfie.storagePath);
-  const fetch = mockFetch(() => ({ status: 200 }));
+  const fetch = mockFetch((attempt) => ({ status: attempt === 1 ? 503 : 200 }));
   const deps = { db, fetchImpl: fetch, validateTarget: async () => {} };
   await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid, event: "verification.approved" }, deps);
-  assert.equal(fetch.calls.length, 0);
+  assert.equal(fetch.calls.length, 1);
+  db.evidenceFile.rows.splice(db.evidenceFile.rows.indexOf(selfie), 1);
+  await sendWebhook({ deliveryId: db.webhookDelivery.rows[0].id }, deps);
+  assert.equal(fetch.calls.length, 1);
   assert.equal(db.webhookDelivery.rows[0].status, "failed");
-  assert.equal(db.jobQueue.rows.length, 1);
-  await fs.writeFile(selfie.storagePath, encrypted);
-  const result = await sendWebhook(db.jobQueue.rows[0].payload, deps);
+  db.evidenceFile.rows.push(selfie);
+  const result = await sendWebhook({ deliveryId: db.webhookDelivery.rows[0].id }, deps);
   assert.equal(result.delivered, true);
-  assert.equal(JSON.parse(fetch.calls[0].opts.body).selfieBase64, Buffer.from("selfie bytes").toString("base64"));
+  assert.equal(JSON.parse(fetch.calls[1].opts.body).selfieUrl.includes(selfie.id), true);
 });
 
 test("temporary DNS failure retries and later delivers the same event", async () => {
   const db = createMockDb();
   const { tenant } = await seed(db);
   const { validateWebhookTarget } = require("../src/lib/webhookTarget");
-  const fetch = mockFetch(() => ({ status: 204 }));
+  const fetch = mockFetch(() => ({ status: 200 }));
   const out = await sendWebhook({ tenantId: tenant.id, sessionUid: "vps_WH1", event: "verification.approved" }, {
     db, fetchImpl: fetch,
     validateTarget: url => validateWebhookTarget(url, { resolve4: async () => { throw new Error("EAI_AGAIN"); } })
@@ -292,27 +515,29 @@ test("private targets are blocked permanently, with no HTTP call or retry", asyn
   assert.equal(db.webhookDelivery.rows[0].nextAttemptAt, null);
 });
 
-test("all five advertised delays are used, including the final 12-hour retry", async () => {
+test("approved retries use five short delays", async () => {
   const db = createMockDb();
   const { tenant } = await seed(db);
   const now = new Date("2026-09-15T12:00:00Z");
   const deps = { db, now: () => now, fetchImpl: mockFetch(() => ({ status: 503 })), validateTarget: async () => {} };
   await sendWebhook({ tenantId: tenant.id, sessionUid: "vps_WH1", event: "verification.approved" }, deps);
   for (let i = 1; i < 6; i++) await sendWebhook({ deliveryId: db.webhookDelivery.rows[0].id }, deps);
-  assert.deepEqual(db.jobQueue.rows.map(j => (j.runAfter - now) / 1000), [60, 300, 1800, 7200, 43200]);
+  assert.deepEqual(db.jobQueue.rows.map(j => (j.runAfter - now) / 1000), APPROVED_RETRY_SECONDS);
   assert.equal(db.webhookDelivery.rows[0].attempts, 6);
   assert.equal(db.webhookDelivery.rows[0].status, "exhausted");
 });
 
-test("ID_ONLY events never include an image, even when stray selfie evidence exists", async t => {
+test("ID_ONLY events never send a webhook, even when stray selfie evidence exists", async t => {
   const db = createMockDb();
   const { tenant, session } = await seed(db);
   session.verificationType = "ID_ONLY";
+  db.verificationResult.rows[0].livenessStatus = null;
   await addSelfie(db, session, t);
   const fetch = mockFetch(() => ({ status: 200 }));
   await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid, event: "verification.approved" },
     { db, fetchImpl: fetch, validateTarget: async () => {} });
-  assert.equal(JSON.parse(fetch.calls[0].opts.body).selfieBase64, null);
+  assert.equal(fetch.calls.length, 0);
+  assert.equal(db.webhookDelivery.rows[0].status, "skipped");
 });
 
 test("newest selfie in the same attempt is selected when no pinned ID is supplied", async t => {
@@ -324,7 +549,7 @@ test("newest selfie in the same attempt is selected when no pinned ID is supplie
   await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid, event: "verification.approved" },
     { db, fetchImpl: fetch, validateTarget: async () => {} });
   const body = JSON.parse(fetch.calls[0].opts.body);
-  assert.equal(body.selfieBase64, Buffer.from("latest").toString("base64"));
+  assert.equal(new URL(body.selfieUrl).pathname, `/v1/dashboard/evidence/${db.evidenceFile.rows.at(-1).id}/image`);
   assert.equal(body.status, "approved");
 });
 
@@ -336,15 +561,16 @@ test("explicit legacy attempt in an old event never selects a newer attempt's se
   const fetch = mockFetch(() => ({ status: 200 }));
   await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid, event: "verification.approved", snapshot: { attemptId: null } },
     { db, fetchImpl: fetch, validateTarget: async () => {} });
-  assert.equal(JSON.parse(fetch.calls[0].opts.body).selfieBase64, null);
+  assert.equal(new URL(JSON.parse(fetch.calls[0].opts.body).selfieUrl).pathname,
+    `/v1/dashboard/evidence/${db.evidenceFile.rows[0].id}/image`);
 });
 
-test("only approved verification events reach the receiver, including old delivery retries", async () => {
+test("unrelated verification events never reach the receiver, including old delivery retries", async () => {
   const db = createMockDb();
   const { tenant, session } = await seed(db);
   const fetch = mockFetch(() => ({ status: 200 }));
   const deps = { db, fetchImpl: fetch, validateTarget: async () => {} };
-  for (const status of ["rejected", "manual_review", "failed", "expired"]) {
+  for (const status of ["rejected", "manual_review", "expired"]) {
     const event = `verification.${status}`;
     const fresh = await sendWebhook({ tenantId: tenant.id, sessionUid: session.sessionUid, event }, deps);
     assert.equal(fresh.skipped, true);

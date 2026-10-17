@@ -303,10 +303,13 @@ router.get("/evidence/:evidenceId/image", async (req, res, next) => {
 
 
 
-    res.set("Content-Type", "image/jpeg");
+    const served = file.fileType === "selfie"
+      ? await require("../services/webhookSelfie").prepareWebhookSelfie(imageBuffer)
+      : { bytes: imageBuffer, contentType: require("../services/uploadService").sniffImageType(imageBuffer) || "image/jpeg" };
+    res.set("Content-Type", served.contentType);
     res.set("Cache-Control", "private, max-age=900");
     res.set("X-Content-Type-Options", "nosniff");
-    res.send(imageBuffer);
+    res.send(served.bytes);
   } catch (err) { next(err); }
 });
 

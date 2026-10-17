@@ -205,6 +205,9 @@ async function runJob(job, deps) {
 function buildHandler({ deps, execute, enqueue, now = Date.now } = {}) {
   return async function handler(event, context) {
     if (event?.type === "health" && !execute) {
+      // Webhook selfie reads load the shared API config. Check its production
+      // requirements before reporting this worker healthy.
+      require("./src/config");
       const { assertGeneratedSchema, releaseIdentity, modelHashes } = require("./src/lib/release");
       assertGeneratedSchema();
       const db = deps?.db || getDb();

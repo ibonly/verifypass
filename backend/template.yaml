@@ -90,7 +90,10 @@ Globals:
         S3_BUCKET: !Ref EvidenceBucket
         S3_REGION: !Ref AWS::Region
         DATABASE_URL: !Ref DatabaseUrl
+        # Webhook selfie reads load the shared backend config in the worker.
+        API_PUBLIC_URL: !Ref ApiPublicUrl
         SDK_TOKEN_SECRET: !Ref SdkTokenSecret
+        AUTH_TOKEN_SECRET: !Ref AuthTokenSecret
         EVIDENCE_ENCRYPTION_KEY: !Ref EvidenceEncryptionKey
         LIVENESS_VALIDATION_RECEIPTS: !Ref LivenessValidationReceipts
         BUILD_COMMIT: !Ref BuildCommit
@@ -193,8 +196,6 @@ Resources:
         AuthType: NONE        # app-level auth (API keys / SDK tokens / JWT)
       Environment:
         Variables:
-          API_PUBLIC_URL: !Ref ApiPublicUrl
-          AUTH_TOKEN_SECRET: !Ref AuthTokenSecret
           HOSTED_BASE_URL: !Ref HostedBaseUrl
           CORS_ORIGINS: !Ref CorsOrigins
           WORKER_LAMBDA_ARN: !GetAtt WorkerFunction.Arn

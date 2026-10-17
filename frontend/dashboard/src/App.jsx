@@ -1176,6 +1176,17 @@ const DELIVERY_STATUS_COLORS = {
 
 function Webhooks({ canManage }) {
   const { data, error, reload } = useData("/v1/dashboard/webhook-deliveries");
+  useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") reload();
+    };
+    const timer = window.setInterval(refreshWhenVisible, 5000);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [reload]);
   const [configUrl, setConfigUrl] = useState("");
   const [configMsg, setConfigMsg] = useState(null);
   const [retrying, setRetrying] = useState(null);
@@ -1187,7 +1198,7 @@ function Webhooks({ canManage }) {
     setTestMsg(null);
     try {
       const result = await api("/v1/onboarding/webhooks/test", { method: "POST", body: {} });
-      setTestMsg(`Test queued (${result.eventId}). Refresh the delivery log to check the outcome.`);
+      setTestMsg(`Test queued (${result.eventId}). The delivery log updates automatically.`);
       reload();
     } catch (err) {
       setTestMsg(err.message);
@@ -1280,6 +1291,7 @@ function Webhooks({ canManage }) {
 
       {/* Delivery log */}
       <Card title={`Delivery log ${data ? `(${data.deliveries.length} total)` : ""}`}>
+        <p className="vp-muted" style={{ marginTop: 0 }}>Status updates every 5 seconds while this page is open.</p>
         <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "center" }}>
           <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}
             style={{ padding: "6px 8px", borderRadius: 6, border: "1px solid #D1D5DB", fontSize: 13 }}>

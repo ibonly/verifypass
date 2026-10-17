@@ -3,6 +3,9 @@ node_modules/
 .env.*
 !.env.example
 dist/
+# Prebuilt React SDK: committed because the SDK is installed from git, not npm.
+!frontend/sdk/react/dist/
+!frontend/sdk/js/dist/
 coverage/
 playwright-report/
 test-results/
@@ -18,6 +21,8 @@ backend/models/*.partial
 .DS_Store
 id_cpanel_deploy
 id_cpanel_deploy.pub
+id_vela_deploy
+id_vela_deploy.pub
 
 # Local cleanup records and generated Vite config bundles
 /delete/

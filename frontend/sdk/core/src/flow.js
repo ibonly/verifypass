@@ -9,6 +9,17 @@ const STEP_SEQUENCES = {
   FACE_ONLY: ["liveness", "face", "processing", "complete"]
 };
 
+// Mobile handoff sequences. The desktop widget shows a QR code and waits;
+// the user's phone opens the hosted page in its browser and performs the
+// capture there. The desktop never acquires a camera in this mode — the
+// `mobile` step is transport-only (QR + polling), so it replaces the
+// capture steps entirely. The hosted page runs the SAME sequences below.
+const MOBILE_HANDOFF_SEQUENCES = {
+  ID_AND_FACE: ["mobile", "processing", "complete"],
+  ID_ONLY: ["mobile", "processing", "complete"],
+  FACE_ONLY: ["mobile", "processing", "complete"]
+};
+
 // Nigerian document types that carry data on the reverse side.
 const TWO_SIDED_DOCUMENT_TYPES = ["voters_card", "drivers_license", "national_id_card"];
 
@@ -20,10 +31,13 @@ function needsDocumentBack(documentTypes) {
 const TERMINAL_STATUSES = ["approved", "rejected", "manual_review", "expired", "failed", "abandoned"];
 
 function createFlow(verificationType = "ID_AND_FACE", opts = {}) {
-  const base = STEP_SEQUENCES[verificationType];
+  const base = opts.mobileHandoff
+    ? (MOBILE_HANDOFF_SEQUENCES[verificationType] || STEP_SEQUENCES[verificationType])
+    : STEP_SEQUENCES[verificationType];
   if (!base) throw new Error(`Unknown verificationType: ${verificationType}`);
   // Two-sided documents (voter's card, driver's licence): capture the back
   // right after the front. Server OCRs both and merges (front fields win).
+  // Irrelevant in mobile handoff mode (the phone runs the full capture).
   const steps = opts.documentBack && base.includes("document")
     ? base.flatMap((s) => (s === "document" ? ["document", "document_back"] : [s]))
     : base;
@@ -101,4 +115,4 @@ function createFlow(verificationType = "ID_AND_FACE", opts = {}) {
   };
 }
 
-module.exports = { createFlow, STEP_SEQUENCES, TERMINAL_STATUSES, TWO_SIDED_DOCUMENT_TYPES, needsDocumentBack };
+module.exports = { createFlow, STEP_SEQUENCES, MOBILE_HANDOFF_SEQUENCES, TERMINAL_STATUSES, TWO_SIDED_DOCUMENT_TYPES, needsDocumentBack };

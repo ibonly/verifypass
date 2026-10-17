@@ -19,7 +19,7 @@ function setup(hostedBaseUrl = "https://verify.example.com") {
     querySelector: () => root,
     createElement: (tag) => ({ tag, style: {}, setAttribute() {} })
   };
-  const context = { module: { exports: {} }, require: () => ({ VerifyPassClient: Client }), URL, document };
+  const context = { module: { exports: {} }, require: () => ({ VerifyPassClient: Client, toVerifyPassError: require("../src/errors").toVerifyPassError }), URL, document };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../../js/src/global.js"), "utf8"), context);
   return { init: context.module.exports.init, root, clients };
 }

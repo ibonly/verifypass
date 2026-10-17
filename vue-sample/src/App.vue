@@ -8,16 +8,11 @@ import { createVerificationSession, getServerConfig, getVerificationResult } fro
 const RETRYABLE_STATUSES = ["rejected", "manual_review", "failed"];
 
 const widgetConfig = {
-  // Token-only auth by default: the sdkToken from our server is the credential.
-  publicKey: import.meta.env.VITE_VP_PUBLIC_KEY || null,
-  // Route the widget's API calls through this app's own origin (relayed by
-  // server/sdkProxy.mjs), so VerifyPass does not need to allowlist our origin
-  // for CORS. Set VITE_VP_API_BASE to call the API directly instead (that
-  // origin must then be on VerifyPass's CORS allowlist).
-  baseUrl: import.meta.env.VITE_VP_API_BASE || window.location.origin,
-  faceModelUrl: import.meta.env.VITE_VP_FACE_MODEL_URL || "/models/fr_detect.onnx",
-  landmarkModelUrl: import.meta.env.VITE_VP_LANDMARK_MODEL_URL || undefined,
-  theme: { primaryColor: "#0F766E" }
+  // Token-only auth by default: the sdkToken from our server is the credential,
+  // and it also names the API origin. Nothing else needs configuring.
+  publicKey: import.meta.env.VITE_VP_PUBLIC_KEY || undefined,
+  baseUrl: import.meta.env.VITE_VP_API_BASE || undefined,
+  theme: { primaryColor: "#0F766E", fontFamily: "inherit" }
 };
 
 const serverConfig = ref(null);
@@ -130,15 +125,15 @@ function statusTitle(status) {
 <template>
   <header class="topbar">
     <strong>Acme Bank</strong>
-    <span class="muted">Vue 3 app · VerifyPass React SDK</span>
+    <span class="muted">Vue 3 app · VerifyPass web component</span>
   </header>
 
   <main class="container">
     <section v-if="!session" class="card">
       <h1>Verify your identity</h1>
       <p class="muted">
-        This Vue application embeds the VerifyPass React widget. Sessions are created by this app's
-        server using its secret key; the browser only receives a short-lived SDK token.
+        This Vue application embeds the VerifyPass <code>&lt;verifypass-liveness&gt;</code> element. Sessions are
+        created by this app's server using its secret key; the browser only receives a short-lived SDK token.
       </p>
 
       <div v-if="serverConfig && !serverConfig.configured" class="notice notice-warn">
@@ -176,8 +171,6 @@ function statusTitle(status) {
         :sdk-token="session.sdkToken"
         :public-key="widgetConfig.publicKey"
         :base-url="widgetConfig.baseUrl"
-        :face-model-url="widgetConfig.faceModelUrl"
-        :landmark-model-url="widgetConfig.landmarkModelUrl"
         :theme="widgetConfig.theme"
         @complete="onComplete"
         @step-change="onStepChange"

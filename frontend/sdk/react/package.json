@@ -2,13 +2,38 @@
   "name": "@verifypass/react",
   "version": "0.1.0",
   "description": "VerifyPass verification widget for React",
-  "main": "src/index.js",
+  "main": "dist/index.mjs",
+  "module": "dist/index.mjs",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "index.d.ts"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "node build.mjs",
+    "check:dist": "node build.mjs --check",
+    "test": "npm --prefix ../../verify-page run test:sdk"
+  },
   "peerDependencies": {
     "react": ">=17"
   },
   "dependencies": {
     "@verifypass/sdk-core": "file:../core",
-    "onnxruntime-web": "^1.19.2"
+    "onnxruntime-web": "1.29.0",
+    "qrcode": "^1.5.4"
   },
-  "license": "UNLICENSED"
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "esbuild": "^0.25.12"
+  }
 }

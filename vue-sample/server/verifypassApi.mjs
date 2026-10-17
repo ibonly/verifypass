@@ -9,7 +9,6 @@
 // Exposed as a plain Node (req, res, next) handler so it can run both as Vite
 // dev/preview middleware and inside the production server in server/index.mjs.
 
-import { createSdkProxy } from "./sdkProxy.mjs";
 
 export const LIVE_TEST_API_BASE = "https://uybb6wv27prwyijtkcteovvvke0hfkqw.lambda-url.us-east-2.on.aws";
 
@@ -20,7 +19,6 @@ const MAX_BODY_BYTES = 4 * 1024;
 export function createVerifyPassApi(env = process.env) {
   const secretKey = (env.VERIFYPASS_SECRET_KEY || "").trim();
   const apiBase = (env.VERIFYPASS_API_BASE || LIVE_TEST_API_BASE).replace(/\/+$/, "");
-  const sdkProxy = createSdkProxy(apiBase);
 
   async function callVerifyPass(pathname, init = {}) {
     const res = await fetch(`${apiBase}${pathname}`, {
@@ -60,7 +58,6 @@ export function createVerifyPassApi(env = process.env) {
   return async function verifyPassApi(req, res, next) {
     const { pathname } = new URL(req.url, "http://localhost");
     const notFound = () => (next ? next() : sendJson(res, 404, { error: { message: "Not found" } }));
-    if (pathname.startsWith("/v1/")) return sdkProxy(req, res, notFound);
     if (!pathname.startsWith("/api/")) return notFound();
 
     try {

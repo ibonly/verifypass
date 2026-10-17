@@ -2,12 +2,11 @@
 
 const { TERMINAL_STATUSES } = require("./flow");
 const { validateApiBase, validatePublicKey } = require("./config");
+const { VerifyPassError } = require("./errors");
 
-class VerifyPassApiError extends Error {
+class VerifyPassApiError extends VerifyPassError {
   constructor(code, message, http) {
-    super(message);
-    this.code = code;
-    this.http = http;
+    super(code, message, { http });
   }
 }
 
@@ -25,9 +24,9 @@ function decodeBase64Url(s) {
  * consumer never configures a baseUrl. Legacy `sdk_<random>` tokens return
  * baseUrl null and rely on an explicit option.
  */
-function parseSdkToken(token) {
+function parseLocatedToken(token, prefix) {
   if (typeof token !== "string" || token.length > 4096) return { baseUrl: null };
-  const m = /^sdk_v1_([A-Za-z0-9_-]+)$/.exec(String(token || ""));
+  const m = new RegExp(`^${prefix}_v1_([A-Za-z0-9_-]+)$`).exec(String(token || ""));
   if (!m) return { baseUrl: null };
   try {
     const json = JSON.parse(decodeBase64Url(m[1]));
@@ -36,6 +35,59 @@ function parseSdkToken(token) {
   } catch (_) {
     return { baseUrl: null };
   }
+}
+
+function parseSdkToken(token) {
+  return parseLocatedToken(token, "sdk");
+}
+
+function parseHandoffToken(token) {
+  return parseLocatedToken(token, "vph");
+}
+
+function resolveLocatedBase(explicitBase, tokenBase, label) {
+  if (explicitBase && tokenBase) {
+    const explicit = validateApiBase(explicitBase);
+    if (explicit !== tokenBase) {
+      throw new Error(`${label}: configured API URL does not match the credential issuer`);
+    }
+    return explicit;
+  }
+  const resolved = explicitBase || tokenBase;
+  if (!resolved) throw new Error(`${label}: credential does not embed an API origin — pass baseUrl explicitly`);
+  return validateApiBase(resolved);
+}
+
+function pollingTimeoutForExpiry(expiresAt, fallbackMs = 30 * 60 * 1000, graceMs = 5000) {
+  const expiry = new Date(expiresAt).getTime();
+  return Number.isFinite(expiry)
+    ? Math.max(1, expiry - Date.now() + graceMs)
+    : fallbackMs;
+}
+
+async function claimMobileHandoff({ sessionId, handoffToken, baseUrl, fetchImpl }) {
+  if (typeof sessionId !== "string" || !/^[A-Za-z0-9_-]{1,256}$/.test(sessionId)
+      || typeof handoffToken !== "string" || !handoffToken || handoffToken.length > 4096) {
+    throw new Error("Mobile handoff requires sessionId and handoffToken");
+  }
+  const resolvedBase = resolveLocatedBase(baseUrl, parseHandoffToken(handoffToken).baseUrl, "Mobile handoff");
+  const request = fetchImpl || (typeof fetch !== "undefined" ? fetch.bind(globalThis) : null);
+  if (!request) throw new Error("No fetch available; pass fetchImpl");
+  const res = await request(`${resolvedBase}/v1/verification-sessions/${sessionId}/handoff/claim`, {
+    method: "POST",
+    redirect: "error",
+    credentials: "omit",
+    cache: "no-store",
+    referrerPolicy: "no-referrer",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ handoffToken })
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok || json?.success !== true || typeof json.sdkToken !== "string") {
+    const err = json?.error || {};
+    throw new VerifyPassApiError(err.code || "INVALID_RESPONSE", err.message || `HTTP ${res.status}`, res.status);
+  }
+  return json;
 }
 
 /**
@@ -59,11 +111,7 @@ class VerifyPassClient {
       || typeof sdkToken !== "string" || !sdkToken || sdkToken.length > 4096 || /[\s\x00-\x1f\x7f]/.test(sdkToken)) {
       throw new Error("VerifyPassClient requires sessionId and sdkToken");
     }
-    const resolved = baseUrl || parseSdkToken(sdkToken).baseUrl;
-    if (!resolved) {
-      throw new Error("VerifyPassClient: token does not embed an API origin — pass baseUrl explicitly");
-    }
-    this.baseUrl = validateApiBase(resolved);
+    this.baseUrl = resolveLocatedBase(baseUrl, parseSdkToken(sdkToken).baseUrl, "VerifyPassClient");
     this.controller = new AbortController();
     this.publicKey = validatePublicKey(publicKey);
     this.sessionId = sessionId;
@@ -154,10 +202,42 @@ class VerifyPassClient {
   }
 
   /** Fetch the server-issued active-liveness actions + verification type. */
-  async getChallenge() {
-    const data = await this._get(`/v1/verification-sessions/${this.sessionId}/challenge`);
+  async getChallenge({ mobileHandoff = false } = {}) {
+    const suffix = mobileHandoff ? "?handoff=1" : "";
+    const data = await this._get(`/v1/verification-sessions/${this.sessionId}/challenge${suffix}`);
     this.attemptId = data.attemptId; this.flashSequence = data.flashSequence;
+    this.hostedBaseUrl = data.hostedBaseUrl || null;
+    this.handoffToken = data.handoffToken || null;
+    this.expiresAt = data.expiresAt || null;
     return data;
+  }
+
+  /**
+   * Build the hosted verification URL the user's phone opens when it scans the
+   * mobile-handoff QR. The one-time handoff token lives in the URL fragment,
+   * so it is omitted from HTTP requests and normal server access logs. It is
+   * still a bearer credential and must not be shared or logged.
+   *
+   * The URL is re-derived here (rather than returned by the server) so the
+   * desktop widget controls the payload shape. `hostedBaseUrl` comes from
+   * `getChallenge()`; if it is missing the caller may pass an explicit
+   * override. Throws on anything that would put the token in the wire.
+   * @returns {string}
+   */
+  getHostedUrl(hostedBaseUrl = null, handoffToken = null) {
+    const base = hostedBaseUrl || this.hostedBaseUrl;
+    if (typeof base !== "string" || !base) throw new Error("Hosted verification URL is not configured — call getChallenge() first");
+    const credential = handoffToken || this.handoffToken;
+    if (typeof credential !== "string" || !credential) throw new Error("Mobile handoff token is not configured — call getChallenge({ mobileHandoff: true }) first");
+    const url = new URL(base);
+    const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+    if ((url.protocol !== "https:" && !(url.protocol === "http:" && loopback))
+        || url.username || url.password || url.search || url.hash) {
+      throw new Error("Invalid hosted verification URL — must be HTTPS (HTTP only on localhost) with no credentials, query or fragment");
+    }
+    url.pathname = `${url.pathname.replace(/\/$/, "")}/session/${encodeURIComponent(this.sessionId)}`;
+    url.hash = `h=${encodeURIComponent(credential)}`;
+    return url.href;
   }
 
   /**
@@ -247,17 +327,24 @@ class VerifyPassClient {
    * Transient failures (network errors, 5xx, 429, timeouts) are retried
    * until the overall deadline; only definitive API answers (401/403/404 —
    * bad token, revoked key, unknown session) abort immediately.
+   *
+   * `signal` lets a caller scope this poll to its OWN lifecycle instead of
+   * the shared parent controller. The mobile handoff widget needs exactly
+   * that: it restarts polling on "Retry" without aborting the whole client
+   * (which would kill the init effect and any later step). When omitted the
+   * default behaviour is unchanged — everything polls against the parent.
    */
-  async waitForResult({ intervalMs = 2500, timeoutMs = 120000, onTick } = {}) {
+  async waitForResult({ intervalMs = 2500, timeoutMs = 120000, onTick, signal } = {}) {
     if (!Number.isFinite(intervalMs) || intervalMs <= 0 || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
       throw new Error("Polling interval and timeout must be positive finite numbers");
     }
+    const pollSignal = signal || this.controller.signal;
     const deadline = Date.now() + timeoutMs;
     let lastError = null;
     for (;;) {
-      if (this.controller.signal.aborted) throw new Error("Verification cancelled");
+      if (pollSignal.aborted) throw new Error("Verification cancelled");
       const remaining = deadline - Date.now();
-      if (remaining <= 0) throw lastError || new VerifyPassApiError("SESSION_EXPIRED", "Timed out waiting for result", 408);
+      if (remaining <= 0) throw new VerifyPassApiError("POLLING_TIMEOUT", "Stopped waiting for verification status", 408);
       let status;
       try {
         status = await this.getStatus({ timeoutMs: Math.min(15000, remaining) });
@@ -275,17 +362,23 @@ class VerifyPassClient {
         if (TERMINAL_STATUSES.includes(status.status)) return status;
       }
       if (Date.now() >= deadline) {
-        throw lastError || new VerifyPassApiError("SESSION_EXPIRED", "Timed out waiting for result", 408);
+        throw new VerifyPassApiError("POLLING_TIMEOUT", "Stopped waiting for verification status", 408);
       }
       await new Promise((resolve, reject) => {
-        const signal = this.controller.signal;
         const abort = () => { clearTimeout(timer); reject(new Error("Verification cancelled")); };
-        const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, Math.min(intervalMs, Math.max(0, deadline - Date.now())));
-        signal.addEventListener("abort", abort, { once: true });
-        if (signal.aborted) abort();
+        const timer = setTimeout(() => { pollSignal.removeEventListener("abort", abort); resolve(); }, Math.min(intervalMs, Math.max(0, deadline - Date.now())));
+        pollSignal.addEventListener("abort", abort, { once: true });
+        if (pollSignal.aborted) abort();
       });
     }
   }
 }
 
-module.exports = { VerifyPassClient, VerifyPassApiError, parseSdkToken };
+module.exports = {
+  VerifyPassClient,
+  VerifyPassApiError,
+  parseSdkToken,
+  parseHandoffToken,
+  claimMobileHandoff,
+  pollingTimeoutForExpiry
+};

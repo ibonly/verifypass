@@ -12,6 +12,10 @@ const core = require("../src/index.js");
 const SOURCES = [
   "../../react/src/VerificationWidget.jsx",
   "../../react/src/faceDetector.js",
+  "../../react/src/useVerification.js",
+  "../../react/src/captureLoop.js",
+  "../../react/src/screenFlash.js",
+  "../../react/src/VerifyPassProvider.jsx",
   "../../js/src/global.js"
 ].map((p) => path.join(__dirname, p)).filter(fs.existsSync);
 
@@ -19,7 +23,7 @@ test("sdk-core exports every name the react/js SDK layers import", () => {
   const names = new Set();
   for (const file of SOURCES) {
     const src = fs.readFileSync(file, "utf8");
-    for (const m of src.matchAll(/import \{([^}]*)\} from "@verifypass\/sdk-core"/g)) {
+    for (const m of src.matchAll(/(?:import|export) \{([^}]*)\} from "@verifypass\/sdk-core"/g)) {
       m[1].split(",").map((s) => s.trim()).filter(Boolean).forEach((n) => names.add(n));
     }
     for (const m of src.matchAll(/const \{([^}]*)\} = require\("@verifypass\/sdk-core"\)/g)) {

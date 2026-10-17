@@ -18,6 +18,16 @@ const captureLimiter = standardLimiters().captures;
 const sdkAuth = [sdkOrHostedAuth, tenantScope, captureLimiter];
 const bigBody = express.json({ limit: "12mb" }); // base64 inflation headroom over 8MB binary cap
 
+router.post("/:sessionId/handoff/claim", express.json({ limit: "4kb" }), captureLimiter, async (req, res, next) => {
+  try {
+    const { getDb } = require("../lib/db");
+    const { claimHandoffToken } = require("../services/sessionService");
+    res.json(await claimHandoffToken(getDb(), req.params.sessionId, req.body?.handoffToken));
+  } catch (err) {
+    next(err);
+  }
+});
+
 function uploadRoute(kind) {
   return async (req, res, next) => {
     try {
@@ -150,17 +160,26 @@ router.get("/:sessionId/status", ...sdkAuth, async (req, res, next) => {
   try {
     const session = await req.scopedDb.sessions.findByUid(req.params.sessionId);
     if (!session) throw new AppError("SESSION_NOT_FOUND");
-    const { verifySdkToken } = require("../services/sessionService");
+    const { verifySessionSdkToken } = require("../services/sessionService");
     const sdkTokenIn = req.headers["x-vp-sdk-token"] || req.query.sdkToken;
-    if (!sdkTokenIn || !verifySdkToken(session.sessionUid, sdkTokenIn, session.sdkTokenHash)) {
+    if (!verifySessionSdkToken(session, sdkTokenIn)) {
       throw new AppError("INVALID_API_KEY", "invalid SDK token for this session");
+    }
+    if (["created", "started"].includes(session.status)
+        && session.expiresAt && new Date(session.expiresAt) <= new Date()) {
+      await req.scopedDb.sessions.update(session.sessionUid, {
+        status: "expired",
+        completedAt: new Date(),
+        decisionReason: { reasonCodes: ["SESSION_EXPIRED"] }
+      });
+      session.status = "expired";
     }
     // Terminal outcomes carry the USER-ACTIONABLE reason codes only: things
     // the person can fix (lighting, framing, doing the movement). Fraud and
     // integrity signals are deliberately withheld from the SDK — telling an
     // attacker which signal caught them is a free oracle. Tenants see the
     // full set via the secret-key result endpoint.
-    const terminal = ["approved", "rejected", "manual_review", "failed", "expired"].includes(session.status);
+    const terminal = ["approved", "rejected", "manual_review", "failed", "expired", "abandoned"].includes(session.status);
     const codes = terminal ? (session.decisionReason?.reasonCodes || []).filter((c) => USER_SAFE_REASON_CODES.has(c)) : [];
     let liveness = null;
     if (terminal) {
@@ -213,11 +232,16 @@ router.get("/:sessionId/challenge", ...sdkAuth, async (req, res, next) => {
   try {
     const session = await req.scopedDb.sessions.findByUid(req.params.sessionId);
     if (!session) throw new AppError("SESSION_NOT_FOUND");
-    const { verifySdkToken } = require("../services/sessionService");
+    const { verifySdkToken, verifySessionSdkToken, issueHandoffToken, tokenApiUrl } = require("../services/sessionService");
     const sdkTokenIn = req.headers["x-vp-sdk-token"] || req.query.sdkToken;
-    if (!sdkTokenIn || !verifySdkToken(session.sessionUid, sdkTokenIn, session.sdkTokenHash)) {
+    if (!verifySessionSdkToken(session, sdkTokenIn)) {
       throw new AppError("INVALID_API_KEY", "invalid SDK token for this session");
     }
+    const wantsHandoff = req.query.handoff === "1";
+    const primaryCredential = verifySdkToken(session.sessionUid, sdkTokenIn, session.sdkTokenHash);
+    const handoff = wantsHandoff && primaryCredential
+      ? await issueHandoffToken(req.scopedDb, session, tokenApiUrl(sdkTokenIn) || undefined)
+      : null;
     // Attempt state travels with the challenge so a page refresh mid-retry
     // doesn't lose the counter / manual-upload eligibility client-side.
     const { RETRY_MAX_ATTEMPTS, RETRY_MANUAL_UPLOAD_AFTER } = require("../services/sessionService");
@@ -229,6 +253,7 @@ router.get("/:sessionId/challenge", ...sdkAuth, async (req, res, next) => {
       sessionId: session.sessionUid,
       verificationType: session.verificationType || "ID_AND_FACE",
       hostedBaseUrl: require("../config").hostedBaseUrl,
+      ...(handoff ? { handoffToken: handoff.token, handoffExpiresAt: handoff.expiresAt } : {}),
       // Two-sided document types (voter's card, driver's licence) tell the
       // SDK to add a back-of-ID capture step.
       documentTypes: Array.isArray(session.documentTypes) ? session.documentTypes : [],

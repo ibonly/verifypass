@@ -112,6 +112,9 @@ or overwritten automatically.
 See [Webhook analysis and repair](WEBHOOK_ANALYSIS.md) for the delivery architecture,
 confirmed defects, implemented fixes, receiver contract, test evidence and rollout steps.
 The dashboard Webhooks page includes **Send test webhook** to verify a saved endpoint.
+An approved verification with a passed liveness check sends `verification.approved`; a rejected verification with a failed liveness check sends `verification.failed` (with payload `status: "rejected"`, the session decision). Each event is tied to that attempt's stored result. ID-only sessions and missing or reviewable liveness results do not send automatic verification webhooks. The explicit `webhook.test` button remains available for endpoint diagnostics.
+Approved events include `userSessionId` from the session's `customerReference` and a 15-minute signed `selfieUrl`; see the [SDK webhook payload guide](frontend/sdk/README.md#approved-webhook-payload). The selfie is no longer inlined in approved webhook bodies.
+Runtime logs emit JSON entries with `component: "webhook"`. Search by `eventUid` (the dashboard's `evt_...` ID) or `deliveryId` to follow `event_queued`, `delivery_ready`, `attempt_started`, `request_sent`, `response_received`, `retry_scheduled`, and the final `delivered`, `skipped`, `blocked`, or `exhausted` stage. Request logs include the field names, byte count, and SHA-256 digest of the exact signed body; response logs include the HTTP status and duration. Endpoint query strings, signing secrets, selfie URL tokens, image data, and the caller reference value are not logged.
 
 ## SDK / API contract notes (policy v2)
 

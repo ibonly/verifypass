@@ -1,16 +1,46 @@
 {
   "name": "@verifypass/sdk-js",
   "version": "0.1.0",
-  "description": "VerifyPass CDN bundle (vanilla JS) — VerifyPass.init(...)",
-  "main": "src/global.js",
-  "scripts": {
-    "build": "esbuild src/global.js --bundle --minify --format=iife --global-name=VerifyPass --outfile=dist/verifypass.js"
+  "description": "VerifyPass browser SDK: <verifypass-liveness> custom element, hosted embed and headless controller. Self-contained bundles, zero runtime dependencies.",
+  "main": "dist/index.mjs",
+  "module": "dist/index.mjs",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.mjs"
+    },
+    "./element": {
+      "types": "./element.d.ts",
+      "import": "./dist/element.mjs",
+      "default": "./dist/element.mjs"
+    },
+    "./dist/*": "./dist/*",
+    "./package.json": "./package.json"
   },
-  "dependencies": {
-    "@verifypass/sdk-core": "file:../core"
+  "files": [
+    "dist",
+    "types",
+    "index.d.ts",
+    "element.d.ts"
+  ],
+  "sideEffects": [
+    "./dist/element.mjs",
+    "./dist/verifypass-liveness.js"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "check:dist": "node build.mjs --check",
+    "test": "node --test tests/*.test.js"
   },
   "devDependencies": {
-    "esbuild": "^0.25.12"
+    "@verifypass/sdk-core": "file:../core",
+    "esbuild": "^0.25.12",
+    "onnxruntime-web": "1.29.0",
+    "qrcode": "^1.5.4",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
   },
   "license": "UNLICENSED"
 }

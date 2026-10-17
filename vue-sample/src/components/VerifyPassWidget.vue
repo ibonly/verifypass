@@ -1,79 +1,42 @@
 <script setup>
-// Vue wrapper around the VerifyPass React SDK. React is an implementation
-// detail of the widget: this component owns a private React root, re-renders
-// it when props change and unmounts it (releasing the camera and ONNX models)
-// when the Vue component is destroyed.
-import { onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { createElement } from "react";
-import { createRoot } from "react-dom/client";
-import { VerifyPassProvider, VerificationWidget } from "@verifypass/react";
+// Thin Vue wrapper around the framework-free <verifypass-liveness> custom
+// element. The element bundles its own runtime and loads the face models and
+// WASM from the VerifyPass hosted origin, so this app installs nothing else.
+import "@verifypass/sdk-js/element";
 
-const props = defineProps({
+defineProps({
   sessionId: { type: String, required: true },
   sdkToken: { type: String, required: true },
-  // undefined → the SDK's own default, null → explicitly disabled.
-  publicKey: { type: [String, null], default: undefined },
-  baseUrl: { type: [String, null], default: undefined },
-  faceModelUrl: { type: [String, null], default: undefined },
-  landmarkModelUrl: { type: [String, null], default: undefined },
+  // Omitted → token-only auth (the sdkToken is the credential).
+  publicKey: { type: String, default: undefined },
+  // Omitted → the API origin embedded in the sdkToken.
+  baseUrl: { type: String, default: undefined },
+  // Tri-state: true = QR only, false = this device only, undefined = user
+  // chooses. Explicit default keeps Vue from casting an absent prop to false.
+  mobileHandoff: { type: Boolean, default: undefined },
+  screenFlash: { type: Boolean, default: true },
   theme: { type: Object, default: undefined },
-  consentCopy: { type: String, default: undefined },
-  screenFlash: { type: Boolean, default: true }
+  copy: { type: Object, default: undefined },
+  consentCopy: { type: String, default: undefined }
 });
 
-const emit = defineEmits(["complete", "error", "step-change"]);
-
-const container = ref(null);
-let root = null;
-
-// Stable callbacks so React does not see new handler identities per render.
-const handlers = {
-  onComplete: (result) => emit("complete", result),
-  onError: (error) => emit("error", error),
-  onStepChange: (step) => emit("step-change", step)
-};
-
-function withoutUndefined(object) {
-  return Object.fromEntries(Object.entries(object).filter(([, value]) => value !== undefined));
-}
-
-function render() {
-  if (!root) return;
-  const providerProps = withoutUndefined({
-    publicKey: props.publicKey,
-    baseUrl: props.baseUrl,
-    faceModelUrl: props.faceModelUrl,
-    landmarkModelUrl: props.landmarkModelUrl,
-    env: import.meta.env
-  });
-  const widgetProps = withoutUndefined({
-    sessionId: props.sessionId,
-    sdkToken: props.sdkToken,
-    theme: props.theme,
-    consentCopy: props.consentCopy,
-    screenFlash: props.screenFlash,
-    ...handlers
-  });
-  root.render(
-    createElement(VerifyPassProvider, providerProps,
-      createElement(VerificationWidget, widgetProps))
-  );
-}
-
-onMounted(() => {
-  root = createRoot(container.value);
-  render();
-});
-
-watch(() => ({ ...props }), render, { deep: true });
-
-onBeforeUnmount(() => {
-  const r = root;
-  root = null;
-  r?.unmount();
-});
+const emit = defineEmits(["complete", "error", "step-change", "telemetry"]);
 </script>
 
 <template>
-  <div ref="container" class="verifypass-widget" />
+  <verifypass-liveness
+    :session-id="sessionId"
+    :sdk-token="sdkToken"
+    :public-key="publicKey ?? null"
+    :base-url="baseUrl ?? null"
+    :mobile-handoff="mobileHandoff === undefined ? null : String(mobileHandoff)"
+    :screen-flash="String(screenFlash)"
+    :consent-copy="consentCopy ?? null"
+    .theme="theme"
+    .copy="copy"
+    @vp-complete="emit('complete', $event.detail)"
+    @vp-error="emit('error', $event.detail)"
+    @vp-step-change="emit('step-change', $event.detail.step)"
+    @vp-telemetry="emit('telemetry', $event.detail)"
+  />
 </template>

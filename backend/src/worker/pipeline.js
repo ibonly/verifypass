@@ -566,6 +566,7 @@ async function runVerificationInternal(payload, { db, provider, evidenceKey, env
 
 async function finalize(db, session, { decision, resultRow, dispatch, assertActive, selfieId, selfieIds }) {
   const send = dispatch || dbEnqueue(db);
+  let queuedWebhook = null;
   // Optimistic compare-and-set: claim the session FIRST to prevent duplicate
   // results if the worker dies between result-create and session-update (M2).
   // Only one worker can flip the status away from its current value.
@@ -578,31 +579,40 @@ async function finalize(db, session, { decision, resultRow, dispatch, assertActi
     if (!claimed.count) return false;
     await tx.verificationResult.create({ data: { sessionId: session.id, attemptId: session.attemptId || null, ...resultRow, rawResult: JSON.parse(JSON.stringify({ ...resultRow.rawResult, decision: { status: decision.status, riskLevel: decision.riskLevel, reasonCodes: decision.reasonCodes, ...(decision.waivedReasonCodes?.length ? { waivedReasonCodes: decision.waivedReasonCodes, livenessWaiver: decision.livenessWaiver || null } : {}) } })) } });
     await tx.auditLog.create({ data: { tenantId: session.tenantId, sessionId: session.id, actorType: "system", action: "verification.decided", metadata: { attemptId: session.attemptId || null, status: decision.status, reasonCodes: decision.reasonCodes }, riskEvent: decision.riskLevel !== "low" } });
-    if (decision.status === "approved") await addOutbox(tx, "send_webhook", {
-      tenantId: String(session.tenantId),
-      sessionUid: session.sessionUid,
-      attemptId: session.attemptId || null,
-      event: `verification.${decision.status}`,
-      eventUid: `evt_${require("crypto").randomBytes(12).toString("hex")}`,
-      snapshot: {
-        customerReference: session.customerReference || null,
-        status: decision.status,
-        riskLevel: decision.riskLevel,
-        decisionSource: "automatic",
-        reasonCodes: decision.reasonCodes || [],
-        ...(decision.waivedReasonCodes?.length ? { waivedReasonCodes: decision.waivedReasonCodes } : {}),
-        attempt: session.attemptNumber || 1,
+    if ((decision.status === "approved" && resultRow.livenessStatus === "passed") ||
+        (decision.status === "rejected" && resultRow.livenessStatus === "failed")) {
+      const event = resultRow.livenessStatus === "failed" ? "verification.failed" : "verification.approved";
+      const eventUid = `evt_${require("crypto").randomBytes(12).toString("hex")}`;
+      await addOutbox(tx, "send_webhook", {
+        tenantId: String(session.tenantId),
+        sessionUid: session.sessionUid,
         attemptId: session.attemptId || null,
-        createdAt: session.createdAt ? new Date(session.createdAt).toISOString() : null,
-        completedAt: decision.status === "manual_review" ? null : new Date().toISOString(),
-        serviceId: session.sessionUid,
-        selfieId: selfieId || null,
-        selfieIds: selfieIds || [],
-        minimalPayload: decision.status === "approved"
-      }
-    });
+        event,
+        eventUid,
+        snapshot: {
+          customerReference: session.customerReference || null,
+          status: decision.status,
+          riskLevel: decision.riskLevel,
+          decisionSource: "automatic",
+          reasonCodes: decision.reasonCodes || [],
+          ...(decision.waivedReasonCodes?.length ? { waivedReasonCodes: decision.waivedReasonCodes } : {}),
+          attempt: session.attemptNumber || 1,
+          attemptId: session.attemptId || null,
+          createdAt: session.createdAt ? new Date(session.createdAt).toISOString() : null,
+          completedAt: decision.status === "manual_review" ? null : new Date().toISOString(),
+          serviceId: session.sessionUid,
+          selfieId: selfieId || null,
+          selfieIds: selfieIds || []
+        }
+      });
+      queuedWebhook = { event, eventUid };
+    }
     assertActive?.();
     return true;
+  });
+  if (committed && queuedWebhook) require("../services/webhookLog").logWebhook("event_queued", {
+    eventUid: queuedWebhook.eventUid, tenantId: String(session.tenantId), sessionId: session.sessionUid,
+    event: queuedWebhook.event, trigger: "automatic_liveness_result"
   });
   await flushOutbox(db, send).catch(() => {});
   // C1: a case landing in manual_review notifies the tenant's reviewers.

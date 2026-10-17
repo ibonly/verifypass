@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VerifyPass SDK Playground</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: #F9FAFB; color: #111827; }
+    main { max-width: 960px; margin: 0 auto; padding: 24px 16px; display: grid; gap: 24px; grid-template-columns: minmax(0, 1fr); }
+    @media (min-width: 900px) { main { grid-template-columns: 320px minmax(0, 1fr); } }
+    section { background: #fff; border: 1px solid #E5E7EB; border-radius: 12px; padding: 16px; }
+    label { display: block; font-size: 13px; color: #374151; margin: 0 0 12px; }
+    input, select { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; padding: 8px; border: 1px solid #D1D5DB; border-radius: 6px; font: inherit; }
+    button { padding: 10px 14px; border: 0; border-radius: 6px; background: #111827; color: #fff; font: inherit; cursor: pointer; }
+    pre { font-size: 12px; background: #111827; color: #A7F3D0; padding: 12px; border-radius: 8px; max-height: 240px; overflow: auto; white-space: pre-wrap; }
+    h1 { font-size: 18px; margin: 0 0 4px; } p { font-size: 13px; color: #6B7280; margin: 0 0 16px; }
+  </style>
+  <script src="./verifypass-liveness.js"></script>
+</head>
+<body>
+  <main>
+    <section>
+      <h1>VerifyPass SDK Playground</h1>
+      <p>Create a session on your backend, paste its ID and SDK token, and mount <code>&lt;verifypass-liveness&gt;</code>. Nothing is sent anywhere except the VerifyPass API the token names.</p>
+      <form id="setup">
+        <label>Session ID <input name="sessionId" required placeholder="vps_…" autocomplete="off"></label>
+        <label>SDK token <input name="sdkToken" required placeholder="sdk_v1_…" autocomplete="off"></label>
+        <label>Mobile handoff
+          <select name="mobileHandoff">
+            <option value="">User chooses</option>
+            <option value="true">QR only</option>
+            <option value="false">This device only</option>
+          </select>
+        </label>
+        <label>Primary colour <input name="primaryColor" type="color" value="#6D28D9"></label>
+        <button type="submit">Mount widget</button>
+      </form>
+      <h1 style="margin-top:16px">Events</h1>
+      <pre id="log" aria-live="polite"></pre>
+    </section>
+    <section id="stage"></section>
+  </main>
+  <script>
+    const log = (type, detail) => {
+      const el = document.getElementById("log");
+      el.textContent = `${new Date().toLocaleTimeString()} ${type} ${JSON.stringify(detail)}\n` + el.textContent;
+    };
+    // Tokens may be passed in the fragment (#session=…&token=…) — never the query string.
+    const hash = new URLSearchParams(location.hash.slice(1));
+    const form = document.getElementById("setup");
+    if (hash.get("session")) form.sessionId.value = hash.get("session");
+    if (hash.get("token")) form.sdkToken.value = hash.get("token");
+    history.replaceState(null, "", location.pathname);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const el = document.createElement("verifypass-liveness");
+      el.setAttribute("session-id", form.sessionId.value.trim());
+      el.setAttribute("sdk-token", form.sdkToken.value.trim());
+      if (form.mobileHandoff.value) el.setAttribute("mobile-handoff", form.mobileHandoff.value);
+      el.setAttribute("primary-color", form.primaryColor.value);
+      for (const type of ["vp-complete", "vp-error", "vp-step-change", "vp-telemetry"]) {
+        el.addEventListener(type, (e) => log(type, type === "vp-error" ? { code: e.detail.code, message: e.detail.message } : e.detail));
+      }
+      document.getElementById("stage").replaceChildren(el);
+    });
+  </script>
+</body>
+</html>

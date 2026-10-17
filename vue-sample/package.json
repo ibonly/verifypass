@@ -2,7 +2,7 @@
   "name": "verifypass-vue-sample",
   "version": "0.1.0",
   "private": true,
-  "description": "Third-party Vue 3 app that embeds the VerifyPass React SDK",
+  "description": "Third-party Vue 3 app that embeds the VerifyPass <verifypass-liveness> web component",
   "type": "module",
   "engines": {
     "node": ">=20.12"
@@ -16,11 +16,7 @@
     "start": "node server/index.mjs"
   },
   "dependencies": {
-    "@verifypass/react": "file:vendor/verifypass/react",
-    "@verifypass/sdk-core": "file:vendor/verifypass/core",
-    "onnxruntime-web": "^1.29.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
+    "@verifypass/sdk-js": "file:vendor/verifypass/js",
     "vue": "^3.5.13"
   },
   "devDependencies": {

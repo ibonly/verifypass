@@ -205,14 +205,20 @@ test("maker-checker: same user proposing twice overwrites their first proposal",
   assert.equal(r3.body.status, "rejected");
 });
 
-test("manual review emits a webhook only for approval", httpOpts, async t => {
+test("manual review emits a webhook only for approval with passed liveness", httpOpts, async t => {
   const db = createMockDb(); setDb(db); t.after(() => setDb(null));
   const tenant = await db.tenant.create({ data: { tenantUid: "tnt_review_hooks", status: "active", settings: {} } });
   const user = await db.user.create({ data: { tenantId: tenant.id, role: "compliance_reviewer", status: "active" } });
   const token = signToken({ userId: user.id, role: user.role });
-  for (const decision of ["rejected", "approved"]) {
-    const sessionUid = `vps_${decision}`;
-    await db.verificationSession.create({ data: { tenantId: tenant.id, sessionUid, status: "manual_review" } });
+  for (const { decision, livenessStatus } of [
+    { decision: "rejected", livenessStatus: "passed" },
+    { decision: "approved", livenessStatus: "passed" },
+    { decision: "approved", livenessStatus: "review" },
+    { decision: "approved", livenessStatus: null }
+  ]) {
+    const sessionUid = `vps_${decision}_${livenessStatus || "none"}`;
+    const session = await db.verificationSession.create({ data: { tenantId: tenant.id, sessionUid, status: "manual_review" } });
+    await db.verificationResult.create({ data: { sessionId: session.id, livenessStatus } });
     await request(app).post(`/v1/manual-review/${sessionUid}/decision`).set("Authorization", `Bearer ${token}`).send({ decision, note: "Reviewed" }).expect(200);
   }
   const hooks = db.jobQueue.rows.filter(j => j.type === "send_webhook");

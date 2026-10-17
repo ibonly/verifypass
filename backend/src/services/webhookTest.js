@@ -12,13 +12,18 @@ async function queueWebhookTest(tenant, { db, enqueue }) {
     throw new AppError("VALIDATION_ERROR", "Configure a webhook endpoint first");
   }
   const eventUid = `evt_${crypto.randomBytes(12).toString("hex")}`;
+  let deliveryId;
   await transaction(db, async tx => {
     const delivery = await tx.webhookDelivery.create({ data: {
       eventUid, tenantId: tenant.id, event: "webhook.test",
       payload: { event: "webhook.test", sessionId: null, status: "test", createdAt: new Date().toISOString(), selfieBase64: null },
       url: tenant.webhookUrl, status: "pending", attempts: 0, nextAttemptAt: new Date()
     } });
+    deliveryId = delivery.id;
     await addOutbox(tx, "send_webhook", { deliveryId: delivery.id });
+  });
+  require("./webhookLog").logWebhook("event_queued", {
+    eventUid, deliveryId, tenantId: String(tenant.id), event: "webhook.test", trigger: "dashboard_test_button"
   });
   await flushOutbox(db, enqueue);
   return { success: true, eventId: eventUid, status: "queued" };

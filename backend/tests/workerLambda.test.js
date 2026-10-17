@@ -94,7 +94,13 @@ async function seedDrain(db, { jobs = 1, type = "send_webhook" } = {}) {
   // tenant WITHOUT webhook config → send_webhook returns {skipped} = success
   const tenant = await db.tenant.create({ data: { tenantUid: "tnt_dr", companyName: "D", status: "active" } });
   for (let i = 0; i < jobs; i++) {
-    if (type === "run_verification") await db.verificationSession.create({ data: { sessionUid: `vps_${i}`, tenantId: tenant.id, status: "approved" } });
+    const session = await db.verificationSession.create({ data: {
+      sessionUid: `vps_${i}`, tenantId: tenant.id, status: "approved", customerReference: `caller-${i}`
+    } });
+    if (type === "send_webhook") {
+      await db.verificationResult.create({ data: { sessionId: session.id, livenessStatus: "passed" } });
+      await db.evidenceFile.create({ data: { sessionId: session.id, fileType: "selfie", attemptId: null } });
+    }
     await db.jobQueue.create({
       data: {
         type, payload: { tenantId: String(tenant.id), sessionUid: `vps_${i}`, event: "verification.approved" },
@@ -198,7 +204,7 @@ test("webhook tail has its own bounded budget after a long primary job", async (
   const out = await drainDbQueue({
     db, validateTarget: async () => {}, fetchImpl: async () => {
       if (++sent === 1) time += 180_000;
-      return { status: 204 };
+      return { status: 200 };
     }
   }, { now: () => time });
   assert.equal(out.processed, 2, "a long primary job must not skip its webhook tail");

@@ -73,3 +73,26 @@ test("needsDocumentBack: two-sided Nigerian document types", () => {
   assert.equal(needsDocumentBack([]), false);
   assert.equal(needsDocumentBack(undefined), false);
 });
+
+test("mobile handoff replaces every capture step with a single `mobile` step", () => {
+  const { createFlow, MOBILE_HANDOFF_SEQUENCES } = require("../src/flow");
+  assert.deepEqual(MOBILE_HANDOFF_SEQUENCES.ID_AND_FACE, ["mobile", "processing", "complete"]);
+  assert.deepEqual(MOBILE_HANDOFF_SEQUENCES.ID_ONLY, ["mobile", "processing", "complete"]);
+  assert.deepEqual(MOBILE_HANDOFF_SEQUENCES.FACE_ONLY, ["mobile", "processing", "complete"]);
+  assert.deepEqual(createFlow("ID_AND_FACE", { mobileHandoff: true }).steps, ["mobile", "processing", "complete"]);
+  assert.deepEqual(createFlow("FACE_ONLY", { mobileHandoff: true }).steps, ["mobile", "processing", "complete"]);
+  assert.deepEqual(createFlow("ID_ONLY", { mobileHandoff: true }).steps, ["mobile", "processing", "complete"]);
+  // mobileHandoff is opt-in: the default sequences are unchanged
+  assert.deepEqual(createFlow("ID_AND_FACE").steps, ["document", "liveness", "face", "processing", "complete"]);
+  // documentBack is a no-op in mobile handoff (the phone runs the full capture)
+  assert.deepEqual(createFlow("ID_AND_FACE", { mobileHandoff: true, documentBack: true }).steps, ["mobile", "processing", "complete"]);
+  // the desktop never acquires a camera on the mobile step
+  const f = createFlow("ID_AND_FACE", { mobileHandoff: true });
+  assert.equal(f.state().step, "mobile");
+  assert.equal(f.state().done, false);
+  f.advance();
+  assert.equal(f.state().step, "processing");
+  f.advance();
+  assert.equal(f.state().step, "complete");
+  assert.equal(f.state().done, true);
+});

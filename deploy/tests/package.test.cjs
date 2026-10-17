@@ -16,6 +16,7 @@ test("release artifact includes routing, mailer and sample app code but never pr
       "frontend/dashboard/dist/.htaccess",
       "frontend/verify-page/dist/index.html",
       "frontend/verify-page/dist/.htaccess",
+      "frontend/verify-page/dist/sdk/v1/verifypass-liveness.js",
       "frontend/sdk/js/dist/verifypass.js",
       "email-api/src/bootstrap.php",
       "email-api/public/send.php",
@@ -29,6 +30,8 @@ test("release artifact includes routing, mailer and sample app code but never pr
     const archive = path.join(root, "release.tar.gz");
     const entries = execFileSync("tar", ["-tzf", archive], { encoding: "utf8" });
     assert.match(entries, /verify\/\.htaccess/);
+    assert.match(entries, /verify\/sdk\/v1\/verifypass-liveness\.js/);
+    assert.match(entries, /verify\/sdk\/verifypass\.js/);
     assert.match(entries, /mailer\/public\/send\.php/);
     assert.match(entries, /verify\/sample-app\/index\.html/);
     assert.match(entries, /verify\/sample-app\/\.htaccess/);

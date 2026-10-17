@@ -56,11 +56,11 @@ test("definitive answers (401/404) abort immediately — no pointless polling", 
   assert.equal(call, 1, "no retry on a definitive rejection");
 });
 
-test("persistent network failure surfaces the REAL error at the deadline", async () => {
+test("persistent network failure ends with a distinct polling timeout", async () => {
   const c = clientWith(async () => { throw new TypeError("Failed to fetch"); });
   await assert.rejects(
     () => c.waitForResult({ intervalMs: 1, timeoutMs: 30 }),
-    /Failed to fetch/
+    (error) => error.code === "POLLING_TIMEOUT"
   );
 });
 
@@ -69,7 +69,10 @@ test("poll deadline aborts an in-flight status request", { timeout: 1000 }, asyn
   const client = clientWith(async (url, { signal }) => new Promise((resolve, reject) => {
     signal.addEventListener("abort", () => { aborted = true; reject(new Error("request aborted")); }, { once: true });
   }));
-  await assert.rejects(client.waitForResult({ intervalMs: 1, timeoutMs: 20 }), /request aborted/);
+  await assert.rejects(
+    client.waitForResult({ intervalMs: 1, timeoutMs: 20 }),
+    (error) => error.code === "POLLING_TIMEOUT"
+  );
   assert.equal(aborted, true);
 });
 
