@@ -198,7 +198,11 @@ function createVerificationController(opts = {}) {
       if (!live()) return;
       setHandoff({ polling: false });
       f.finish(result);
-      if (callbacks.onComplete) callbacks.onComplete(result, { allowedDomains: state.allowedDomains });
+      if (callbacks.onComplete) {
+        const exhausted = !!state.attempts?.exhausted;
+        const canRetry = ["rejected", "manual_review", "failed"].includes(result?.status) && !exhausted;
+        callbacks.onComplete(result, { allowedDomains: state.allowedDomains, attemptsExhausted: exhausted, canRetry });
+      }
     }).catch((err) => {
       if (!live()) return;
       setHandoff({ polling: false });
@@ -286,7 +290,11 @@ function createVerificationController(opts = {}) {
     const result = await client.waitForResult({ timeoutMs: RESULT_TIMEOUT_MS });
     if (aborted()) return false;
     flow.finish(result);
-    if (callbacks.onComplete) callbacks.onComplete(result, { allowedDomains: state.allowedDomains });
+    if (callbacks.onComplete) {
+      const exhausted = !!state.attempts?.exhausted;
+      const canRetry = ["rejected", "manual_review", "failed"].includes(result?.status) && !exhausted;
+      callbacks.onComplete(result, { allowedDomains: state.allowedDomains, attemptsExhausted: exhausted, canRetry });
+    }
     return undefined;
   }
 

@@ -104,12 +104,10 @@ class _HomeScreenState extends State<HomeScreen> {
       final sessionId = _sessionIdController.text.trim();
       final sdkToken = _sdkTokenController.text.trim();
 
-      final session = VerificationSession(
+      final session = VerificationSession.credentials(
         sessionId: sessionId,
         sdkToken: sdkToken,
-        verificationType: _verificationType.value,
         hostedBaseUrl: hostedBase,
-        raw: {},
       );
 
       final secretKey = _secretKeyController.text.trim().isNotEmpty

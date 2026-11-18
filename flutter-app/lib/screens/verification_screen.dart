@@ -23,46 +23,44 @@ class VerificationScreen extends StatefulWidget {
 
 class _VerificationScreenState extends State<VerificationScreen> {
   bool _isNavigatingToResult = false;
-  StreamSubscription? _statusPollingSub;
+  bool _disposed = false;
+  late final VerifyPassClient _client;
 
   @override
   void initState() {
     super.initState();
+    _client = VerifyPassClient(apiBaseUrl: widget.apiBaseUrl);
     _startBackgroundPolling();
   }
 
   @override
   void dispose() {
-    _statusPollingSub?.cancel();
+    _disposed = true;
+    _client.close();
     super.dispose();
   }
 
   /// Polls the session status in the background so even if the hosted page's
   /// redirect doesn't fire, the app automatically detects when verification finishes.
-  void _startBackgroundPolling() {
-    final client = VerifyPassClient(apiBaseUrl: widget.apiBaseUrl);
-
-    // Poll every 3 seconds for terminal status
-    Timer.periodic(const Duration(seconds: 3), (timer) async {
-      if (!mounted || _isNavigatingToResult) {
-        timer.cancel();
-        return;
-      }
+  Future<void> _startBackgroundPolling() async {
+    while (mounted && !_isNavigatingToResult && !_disposed) {
+      await Future<void>.delayed(const Duration(seconds: 3));
+      if (!mounted || _isNavigatingToResult || _disposed) return;
 
       try {
-        final statusRes = await client.getStatus(
+        final statusRes = await _client.getStatus(
           sessionId: widget.session.sessionId,
           sdkToken: widget.session.sdkToken,
         );
 
-        if (statusRes.isTerminal) {
-          timer.cancel();
+        if (statusRes.isTerminal && mounted && !_isNavigatingToResult) {
           _navigateToResult(statusRes.status);
+          return;
         }
       } catch (_) {
         // Ignore background polling transient network errors
       }
-    });
+    }
   }
 
   void _navigateToResult(String status) {
@@ -83,42 +81,51 @@ class _VerificationScreenState extends State<VerificationScreen> {
     );
   }
 
+  Future<bool> _confirmExit() async {
+    final exit = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Cancel Verification?'),
+        content: const Text(
+          'Are you sure you want to exit? Your verification progress will be stopped.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Stay'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Exit'),
+          ),
+        ],
+      ),
+    );
+    return exit == true;
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.white,
-      appBar: AppBar(
-        backgroundColor: const Color(0xFF111827),
-        elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.close, color: Colors.white),
-          tooltip: 'Cancel verification',
-          onPressed: () {
-            showDialog(
-              context: context,
-              builder: (ctx) => AlertDialog(
-                title: const Text('Cancel Verification?'),
-                content: const Text(
-                  'Are you sure you want to exit? Your verification progress will be stopped.',
-                ),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.of(ctx).pop(),
-                    child: const Text('Stay'),
-                  ),
-                  TextButton(
-                    onPressed: () {
-                      Navigator.of(ctx).pop();
-                      Navigator.of(context).pop();
-                    },
-                    style: TextButton.styleFrom(foregroundColor: Colors.red),
-                    child: const Text('Exit'),
-                  ),
-                ],
-              ),
-            );
-          },
-        ),
+    final navigator = Navigator.of(context);
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        if (await _confirmExit() && mounted) navigator.pop();
+      },
+      child: Scaffold(
+        backgroundColor: Colors.white,
+        appBar: AppBar(
+          backgroundColor: const Color(0xFF111827),
+          elevation: 0,
+          leading: IconButton(
+            icon: const Icon(Icons.close, color: Colors.white),
+            tooltip: 'Cancel verification',
+            onPressed: () async {
+              if (await _confirmExit() && mounted) navigator.pop();
+            },
+          ),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -187,6 +194,7 @@ class _VerificationScreenState extends State<VerificationScreen> {
             }
           },
         ),
+      ),
       ),
     );
   }

@@ -50,12 +50,32 @@ class _VerifyPassViewState extends State<VerifyPassView> {
   late final WebViewController _controller;
   double _progress = 0.0;
   bool _isLoading = true;
+  bool _completed = false;
   String? _errorMessage;
 
   @override
   void initState() {
     super.initState();
     _initController();
+  }
+
+  @override
+  void didUpdateWidget(covariant VerifyPassView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.session.sessionId != widget.session.sessionId ||
+        oldWidget.session.sdkToken != widget.session.sdkToken ||
+        oldWidget.session.attemptId != widget.session.attemptId ||
+        oldWidget.hostedBaseUrl != widget.hostedBaseUrl ||
+        oldWidget.redirectUrl != widget.redirectUrl) {
+      _completed = false;
+      _errorMessage = null;
+      _isLoading = true;
+      final uri = widget.session.buildHostedUri(
+        widget.hostedBaseUrl,
+        redirectUrl: widget.redirectUrl,
+      );
+      _controller.loadRequest(uri);
+    }
   }
 
   void _initController() {
@@ -108,6 +128,7 @@ class _VerifyPassViewState extends State<VerifyPassView> {
           if (kDebugMode) {
             print('VerifyPass WebView error: ${error.description}');
           }
+          if (error.isForMainFrame == false) return;
           if (mounted) {
             setState(() {
               _isLoading = false;
@@ -133,8 +154,24 @@ class _VerifyPassViewState extends State<VerifyPassView> {
         AndroidWebViewController.enableDebugging(true);
       }
       androidController.setMediaPlaybackRequiresUserGesture(false);
-      // Automatically grant web camera permissions requested by hosted verification
       androidController.setOnPlatformPermissionRequest(
+        (PlatformWebViewPermissionRequest request) {
+          final allowed = request.types.every(
+            (t) =>
+                t == WebViewPermissionResourceType.camera ||
+                t == WebViewPermissionResourceType.microphone,
+          );
+          if (allowed) {
+            request.grant();
+          } else {
+            request.deny();
+          }
+        },
+      );
+    } else if (controller.platform is WebKitWebViewController) {
+      final webkitController =
+          controller.platform as WebKitWebViewController;
+      webkitController.setOnPlatformPermissionRequest(
         (PlatformWebViewPermissionRequest request) {
           request.grant();
         },
@@ -153,17 +190,24 @@ class _VerifyPassViewState extends State<VerifyPassView> {
   bool _checkRedirect(String url) {
     try {
       final uri = Uri.parse(url);
+      final expected = Uri.tryParse(widget.redirectUrl);
+      final matchesConfiguredRedirect = expected != null &&
+          uri.scheme == expected.scheme &&
+          uri.host == expected.host &&
+          uri.path.startsWith(expected.path);
       final isMatchingRedirect =
           url.startsWith(widget.redirectUrl) ||
-          uri.scheme == 'verifypass' ||
-          (uri.queryParameters.containsKey('sessionId') &&
-              uri.queryParameters.containsKey('status'));
+          matchesConfiguredRedirect ||
+          uri.scheme == 'verifypass';
 
       if (isMatchingRedirect) {
-        final sessionId =
-            uri.queryParameters['sessionId'] ?? widget.session.sessionId;
-        final status = uri.queryParameters['status'] ?? 'completed';
-        widget.onComplete(sessionId, status);
+        if (!_completed) {
+          _completed = true;
+          final sessionId =
+              uri.queryParameters['sessionId'] ?? widget.session.sessionId;
+          final status = uri.queryParameters['status'] ?? 'completed';
+          widget.onComplete(sessionId, status);
+        }
         return true;
       }
     } catch (_) {}
