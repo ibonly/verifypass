@@ -21,6 +21,9 @@ function requireUser(...allowedRoles) {
       // MongoDB ObjectId ids are strings — the JWT carries String(user.id).
       const user = await db.user.findFirst({ where: { id: String(payload.userId), status: "active" } });
       if (!user) throw new AppError("FORBIDDEN", "Sign in required");
+      if ((user.tokenVersion ?? 0) !== (payload.ver ?? 0)) {
+        throw new AppError("FORBIDDEN", "Session expired — please sign in again");
+      }
       if (allowedRoles.length && !allowedRoles.includes(user.role)) {
         throw new AppError("FORBIDDEN", "Insufficient role");
       }

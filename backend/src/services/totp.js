@@ -54,11 +54,17 @@ function totpAt(secretBase32, timeSeconds, { digits = 6, stepSeconds = 30 } = {}
 
 /** Accepts current step ±1 to absorb clock drift. */
 function verifyTotp(secretBase32, token, { now = Math.floor(Date.now() / 1000), stepSeconds = 30 } = {}) {
-  if (!/^\d{6}$/.test(String(token || ""))) return false;
+  const tokStr = String(token || "");
+  if (!/^\d{6}$/.test(tokStr)) return false;
+  const tokBuf = Buffer.from(tokStr);
+  let matched = false;
   for (const drift of [-1, 0, 1]) {
-    if (totpAt(secretBase32, now + drift * stepSeconds) === String(token)) return true;
+    const expected = Buffer.from(totpAt(secretBase32, now + drift * stepSeconds));
+    if (expected.length === tokBuf.length && crypto.timingSafeEqual(expected, tokBuf)) {
+      matched = true;
+    }
   }
-  return false;
+  return matched;
 }
 
 function otpauthUrl(secretBase32, { email, issuer = "VerifyPass" }) {

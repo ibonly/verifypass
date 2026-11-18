@@ -36,7 +36,12 @@ const S3_SCHEME = "s3://";
 // defaults it to the backend directory — so every entrypoint agrees.
 function resolveLocal(storagePath) {
   if (path.isAbsolute(storagePath)) return storagePath;
-  return path.resolve(process.env.EVIDENCE_LOCAL_ROOT || process.cwd(), storagePath);
+  const root = path.resolve(process.env.EVIDENCE_LOCAL_ROOT || process.cwd());
+  const resolved = path.resolve(root, storagePath);
+  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+    throw new Error("Evidence storage path escapes EVIDENCE_LOCAL_ROOT");
+  }
+  return resolved;
 }
 
 function backend() {
@@ -95,6 +100,9 @@ function isRemote(storagePath) {
 function parseRemote(storagePath) {
   const rest = storagePath.slice(S3_SCHEME.length);
   const slash = rest.indexOf("/");
+  if (slash <= 0 || slash === rest.length - 1) {
+    throw new Error(`Invalid S3 storage URI: ${storagePath}`);
+  }
   return { bucket: rest.slice(0, slash), key: rest.slice(slash + 1) };
 }
 

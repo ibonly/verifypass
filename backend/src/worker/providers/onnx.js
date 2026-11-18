@@ -61,25 +61,26 @@ function createOnnxProvider({ modelsDir, matchThreshold = 0.6, livenessThreshold
   }
 
   // ---- image helpers (sharp) ----
+  const SHARP_OPTS = { limitInputPixels: 16_000_000, sequentialRead: true };
   async function meta(buf) {
-    const m = await sharp(buf).metadata();
+    const m = await sharp(buf, SHARP_OPTS).metadata();
     return { width: m.width, height: m.height };
   }
   async function rawRGB(buf) {
-    const { data, info } = await sharp(buf).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    const { data, info } = await sharp(buf, SHARP_OPTS).removeAlpha().raw().toBuffer({ resolveWithObject: true });
     return { data, width: info.width, height: info.height };
   }
   async function regionRGB(buf, rect, W, H) {
-    let s = sharp(buf);
+    let s = sharp(buf, SHARP_OPTS);
     if (rect) s = s.extract(rect);
     const { data } = await s.resize(W, H, { fit: "fill" }).removeAlpha().raw().toBuffer({ resolveWithObject: true });
     return data; // RGB interleaved
   }
   async function regionGray(buf, rect, W, H) {
-    let s = sharp(buf);
+    let s = sharp(buf, SHARP_OPTS);
     if (rect) s = s.extract(rect);
     const { data } = await s.resize(W, H, { fit: "fill" }).removeAlpha().grayscale().raw().toBuffer({ resolveWithObject: true });
-    return data; // 1 channel (grayscale still emits 3 equal channels unless toColourspace); handle below
+    return data; // 1 channel raw buffer
   }
 
   // ---- CHW packers ----
@@ -188,10 +189,10 @@ function createOnnxProvider({ modelsDir, matchThreshold = 0.6, livenessThreshold
   async function landmark68(buf, box, imgW, imgH) {
     const rect = M.livenessCrop(box, imgW, imgH, 1.0);
     const gray = await regionGray(buf, rect, 64, 64);
-    // grayscale() keeps 3 identical channels in raw output → take channel 0
     const plane = 64 * 64;
+    const stride = gray.length >= plane * 3 ? 3 : 1;
     const input = new Float32Array(plane);
-    for (let i = 0; i < plane; i++) input[i] = gray[i * 3] / 256;
+    for (let i = 0; i < plane; i++) input[i] = gray[i * stride] / 256;
     const out = await run(await session("landmark"), input, [1, 1, 64, 64]);
     const t = firstData(out, () => true);
     const bw = box.x2 - box.x1, bh = box.y2 - box.y1;

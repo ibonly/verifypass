@@ -34,6 +34,9 @@ async function saveEvidence({ tenantUid, sessionUid, fileType, buffer, retention
   // Backend-agnostic persistence: encryption ALWAYS happens here, before the
   // ciphertext reaches any backend. Local mode keeps the original on-disk
   // layout; s3 mode stores under the same tenant/session key structure.
+  if (!/^[a-zA-Z0-9_-]+$/.test(String(tenantUid || "")) || !/^[a-zA-Z0-9_-]+$/.test(String(sessionUid || ""))) {
+    throw new Error("Invalid tenantUid or sessionUid for evidence path");
+  }
   let localPath = null;
   if (storage.storageBackend() !== "s3") {
     const dir = path.join(baseDir || config.evidenceDir, tenantUid, sessionUid);

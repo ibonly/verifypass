@@ -127,10 +127,22 @@ export default function App() {
 function useData(path, deps = []) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
+  const reqIdRef = useRef(0);
   const reload = useCallback(() => {
-    api(path).then(setData).catch(setError);
+    const id = ++reqIdRef.current;
+    api(path).then((d) => {
+      if (id === reqIdRef.current) {
+        setData(d);
+        setError(null);
+      }
+    }).catch((err) => {
+      if (id === reqIdRef.current) setError(err);
+    });
+    return () => { if (id === reqIdRef.current) reqIdRef.current++; };
   }, [path]);
-  useEffect(reload, deps.concat(reload));
+  useEffect(() => {
+    return reload();
+  }, deps.concat(reload));
   return { data, error, reload };
 }
 
@@ -936,6 +948,7 @@ function Settings() {
     try {
       await api("/v1/settings/thresholds", { method: "PUT", body });
       setMsg("Thresholds saved — applied to the next verification.");
+      setDraft(null);
       reload();
     } catch (e) {
       setMsg(`Error: ${e.message}`);
@@ -947,6 +960,7 @@ function Settings() {
     try {
       await api("/v1/settings/retention", { method: "PUT", body: retentionDraft });
       setMsg("Retention policy saved.");
+      setRetentionDraft(null);
       reload();
     } catch (e) {
       setMsg(`Error: ${e.message}`);

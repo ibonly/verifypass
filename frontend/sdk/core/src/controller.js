@@ -133,7 +133,8 @@ function createVerificationController(opts = {}) {
       verificationType,
       actions: Array.isArray(c.livenessActions) ? c.livenessActions : [],
       actionIndex: 0,
-      hostedBaseUrl: c.hostedBaseUrl || null
+      hostedBaseUrl: c.hostedBaseUrl || null,
+      allowedDomains: Array.isArray(c.allowedDomains) ? c.allowedDomains : []
     };
     // Rehydrate attempt state — a refresh mid-retry must not reset the
     // counter or hide the manual-upload option the server already granted.
@@ -197,7 +198,7 @@ function createVerificationController(opts = {}) {
       if (!live()) return;
       setHandoff({ polling: false });
       f.finish(result);
-      if (callbacks.onComplete) callbacks.onComplete(result);
+      if (callbacks.onComplete) callbacks.onComplete(result, { allowedDomains: state.allowedDomains });
     }).catch((err) => {
       if (!live()) return;
       setHandoff({ polling: false });
@@ -285,7 +286,7 @@ function createVerificationController(opts = {}) {
     const result = await client.waitForResult({ timeoutMs: RESULT_TIMEOUT_MS });
     if (aborted()) return false;
     flow.finish(result);
-    if (callbacks.onComplete) callbacks.onComplete(result);
+    if (callbacks.onComplete) callbacks.onComplete(result, { allowedDomains: state.allowedDomains });
     return undefined;
   }
 

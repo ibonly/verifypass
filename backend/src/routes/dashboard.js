@@ -65,11 +65,20 @@ router.get("/stats", anyUser, requireTenant, tenantScope, async (req, res, next)
   }
 });
 
+const SESSION_STATUSES = new Set(["created", "started", "submitted", "approved", "rejected", "manual_review", "expired", "failed", "abandoned"]);
+
 // GET /v1/dashboard/sessions?status=&limit=
 router.get("/sessions", anyUser, requireTenant, tenantScope, async (req, res, next) => {
   try {
     const now = new Date();
-    const status = req.query.status;
+    const rawStatus = req.query.status;
+    let status;
+    if (rawStatus !== undefined && rawStatus !== "") {
+      if (typeof rawStatus !== "string" || !SESSION_STATUSES.has(rawStatus)) {
+        throw new AppError("VALIDATION_ERROR", "Invalid session status filter");
+      }
+      status = rawStatus;
+    }
     let where = status ? { status } : {};
     if (status === "expired") where = { OR: [{ status: "expired" }, { status: { in: ["created", "started"] }, expiresAt: { lte: now } }] };
     if (["created", "started"].includes(status)) where = { status, OR: [{ expiresAt: { gt: now } }, { expiresAt: null }, { expiresAt: { isSet: false } }] };
@@ -269,10 +278,13 @@ router.get("/sessions/:sessionId/evidence", anyUser, requireTenant, tenantScope,
 // No JWT required here — the signed token IS the auth (safe to embed in <img src>).
 router.get("/evidence/:evidenceId/image", async (req, res, next) => {
   try {
-    const evidenceId = req.params.evidenceId;
+    const evidenceId = String(req.params.evidenceId || "");
+    if (!/^[0-9a-f]{24}$/i.test(evidenceId)) {
+      return res.status(404).json({ success: false, error: "Evidence file not found" });
+    }
     const token = req.query.token;
     const { getDb } = require("../lib/db");
-    const file = await getDb().evidenceFile.findFirst({ where: { id: String(evidenceId) } });
+    const file = await getDb().evidenceFile.findFirst({ where: { id: evidenceId } });
     if (!file) return res.status(404).json({ success: false, error: "Evidence file not found" });
     // M5 fix: bind the token to the tenant — look up via the evidence's session
     const evidenceSession = await getDb().verificationSession.findFirst({ where: { id: file.sessionId } });

@@ -15,6 +15,11 @@ const mailer = () => require("../services/emailService");
 const router = Router();
 router.use((_req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
 
+function limitAuthSensitive(req, res, next) {
+  const fn = req.app?.locals?.limiters?.authSensitive;
+  return fn ? fn(req, res, next) : next();
+}
+
 // Fire-and-forget: mail failures never break the request path. Delivery
 // problems surface in the mail API's own logs/health, not to the end user.
 function notify(promise) {
@@ -77,7 +82,7 @@ router.post("/register", async (req, res, next) => {
         if (out.tokenHash) await setEmailToken(user.id, "emailVerificationToken", out.tokenHash, out.expiresIn);
       })());
     }
-    res.status(201).json({ success: true, token: signToken({ userId: String(user.id), role: user.role }), email: user.email, role: user.role, mfaEnrolled: false, emailVerified: false });
+    res.status(201).json({ success: true, token: signToken({ userId: String(user.id), role: user.role, ver: user.tokenVersion ?? 0 }), email: user.email, role: user.role, mfaEnrolled: false, emailVerified: false });
   } catch (err) {
     if (err.code === "P2002") return next(new AppError("VALIDATION_ERROR", "Unable to create account with these details. Try signing in or contact your administrator."));
     next(err);
@@ -109,7 +114,7 @@ router.post("/verify-email/confirm", requireUser(), async (req, res, next) => {
 });
 
 // POST /v1/auth/password/forgot {email} — UNIFORM response (no enumeration)
-router.post("/password/forgot", async (req, res, next) => {
+router.post("/password/forgot", limitAuthSensitive, async (req, res, next) => {
   try {
     const addr = String(req.body?.email || "").trim().toLowerCase();
     if (addr && mailer().enabled()) {
@@ -126,7 +131,7 @@ router.post("/password/forgot", async (req, res, next) => {
 });
 
 // POST /v1/auth/password/reset {email, token, password}
-router.post("/password/reset", async (req, res, next) => {
+router.post("/password/reset", limitAuthSensitive, async (req, res, next) => {
   try {
     const { token, password } = req.body || {};
     const addr = String(req.body?.email || "").trim().toLowerCase();
@@ -136,7 +141,7 @@ router.post("/password/reset", async (req, res, next) => {
     const candidate = await getDb().user.findFirst({ where: { email: addr, status: "active" } });
     const user = candidate ? await consumeEmailToken(candidate.id, "passwordResetToken", token) : null;
     if (!user) throw new AppError("VALIDATION_ERROR", "Invalid or expired reset link");
-    await getDb().user.updateMany({ where: { id: user.id }, data: { passwordHash: hashPassword(password) } });
+    await getDb().user.updateMany({ where: { id: user.id }, data: { passwordHash: hashPassword(password), tokenVersion: (user.tokenVersion ?? 0) + 1 } });
     await audit({ tenantId: user.tenantId, actorType: "tenant_user", actorId: `user:${user.id}`, action: "user.password_reset", req });
     if (mailer().enabled()) notify(mailer().sendPasswordChanged(user, { ip: req.ip }));
     res.json({ success: true });
@@ -144,7 +149,7 @@ router.post("/password/reset", async (req, res, next) => {
 });
 
 // POST /v1/auth/password/change {currentPassword, password} — authenticated
-router.post("/password/change", requireUser(), async (req, res, next) => {
+router.post("/password/change", limitAuthSensitive, requireUser(), async (req, res, next) => {
   try {
     const { currentPassword, password } = req.body || {};
     if (!verifyPassword(currentPassword || "", req.user.passwordHash)) {
@@ -153,7 +158,7 @@ router.post("/password/change", requireUser(), async (req, res, next) => {
     if (typeof password !== "string" || password.length < 12 || password.length > 128) {
       throw new AppError("VALIDATION_ERROR", "Password must be 12–128 characters");
     }
-    await getDb().user.updateMany({ where: { id: req.user.id }, data: { passwordHash: hashPassword(password) } });
+    await getDb().user.updateMany({ where: { id: req.user.id }, data: { passwordHash: hashPassword(password), tokenVersion: (req.user.tokenVersion ?? 0) + 1 } });
     await audit({ tenantId: req.user.tenantId, actorType: "tenant_user", actorId: `user:${req.user.id}`, action: "user.password_changed", req });
     if (mailer().enabled()) notify(mailer().sendPasswordChanged(req.user, { ip: req.ip }));
     res.json({ success: true });
@@ -161,7 +166,7 @@ router.post("/password/change", requireUser(), async (req, res, next) => {
 });
 
 // POST /v1/auth/email/change {newEmail, currentPassword} — notifies BOTH addresses
-router.post("/email/change", requireUser(), async (req, res, next) => {
+router.post("/email/change", limitAuthSensitive, requireUser(), async (req, res, next) => {
   try {
     const { newEmail, currentPassword } = req.body || {};
     if (!verifyPassword(currentPassword || "", req.user.passwordHash)) {
@@ -208,7 +213,7 @@ router.post("/email/change/confirm", requireUser(), async (req, res, next) => {
     if (!user?.pendingEmail) throw new AppError("VALIDATION_ERROR", "Invalid or expired confirmation link");
     await getDb().user.updateMany({
       where: { id: req.user.id },
-      data: { email: user.pendingEmail, pendingEmail: null, emailVerifiedAt: new Date() }
+      data: { email: user.pendingEmail, pendingEmail: null, emailVerifiedAt: new Date(), tokenVersion: (req.user.tokenVersion ?? 0) + 1 }
     });
     await audit({ tenantId: req.user.tenantId, actorType: "tenant_user", actorId: `user:${req.user.id}`, action: "user.email_changed", req });
     res.json({ success: true, email: user.pendingEmail });
@@ -227,7 +232,7 @@ router.get("/me", requireUser(), (req, res) => {
 router.post("/login", async (req, res, next) => {
   try {
     const user = await authenticate(req.body || {});
-    const token = signToken({ userId: String(user.id), role: user.role });
+    const token = signToken({ userId: String(user.id), role: user.role, ver: user.tokenVersion ?? 0 });
     await audit({
       tenantId: user.tenantId, actorType: user.role === "super_admin" ? "admin" : "tenant_user",
       actorId: `user:${user.id}`, action: "user.logged_in", req
@@ -293,7 +298,7 @@ router.post("/users/invite", requireUser("tenant_admin", "super_admin"), async (
 });
 
 // POST /v1/auth/invite/accept {email, token, password} — invited user sets their own password
-router.post("/invite/accept", async (req, res, next) => {
+router.post("/invite/accept", limitAuthSensitive, async (req, res, next) => {
   try {
     const { token, password } = req.body || {};
     const addr = String(req.body?.email || "").trim().toLowerCase();
@@ -325,14 +330,18 @@ router.post("/mfa/enroll", requireUser(), async (req, res, next) => {
 });
 
 // POST /v1/auth/mfa/confirm {secret, totp}
-router.post("/mfa/confirm", requireUser(), async (req, res, next) => {
+router.post("/mfa/confirm", limitAuthSensitive, requireUser(), async (req, res, next) => {
   try {
     if (req.user.mfaSecret) throw new AppError("VALIDATION_ERROR", "MFA already enrolled");
     const { secret, totp } = req.body || {};
     if (typeof secret !== "string" || !/^[A-Z2-7]{32}$/.test(secret) || !verifyTotp(secret, totp)) {
       throw new AppError("VALIDATION_ERROR", "Invalid TOTP code");
     }
-    await getDb().user.updateMany({ where: { id: req.user.id }, data: { mfaSecret: secret } });
+    const upd = await getDb().user.updateMany({
+      where: { id: req.user.id, mfaSecret: null },
+      data: { mfaSecret: secret, tokenVersion: (req.user.tokenVersion ?? 0) + 1 }
+    });
+    if (upd.count === 0) throw new AppError("VALIDATION_ERROR", "MFA already enrolled");
     await audit({
       tenantId: req.user.tenantId, actorType: "tenant_user", actorId: `user:${req.user.id}`,
       action: "user.mfa_enrolled", req

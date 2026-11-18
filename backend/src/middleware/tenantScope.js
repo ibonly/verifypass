@@ -43,6 +43,12 @@ function createScope(db, tenantId) {
           where: { sessionId },
           orderBy: { createdAt: "desc" }
         });
+      },
+      findBySessionId(sessionId) {
+        return db.verificationResult.findFirst({
+          where: { sessionId },
+          orderBy: { createdAt: "desc" }
+        });
       }
     },
 

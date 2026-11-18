@@ -22,11 +22,15 @@ function requireTenant(req, _res, next) {
 }
 router.use(readers, requireTenant, tenantScope);
 
+function safeFilenamePart(value) {
+  return String(value || "export").replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 128);
+}
+
 function send(res, req, { name, rows, columns, wrap }) {
   const format = String(req.query.format || "json").toLowerCase();
   if (format === "csv") {
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", `attachment; filename="verifypass-${name}-${new Date().toISOString().slice(0, 10)}.csv"`);
+    res.setHeader("Content-Disposition", `attachment; filename="verifypass-${safeFilenamePart(name)}-${new Date().toISOString().slice(0, 10)}.csv"`);
     return res.send(toCsv(rows, columns));
   }
   return res.json({ success: true, ...(wrap ? { [wrap]: rows } : rows) });
@@ -142,7 +146,7 @@ router.get("/sessions/:sessionId/evidence.pdf", async (req, res, next) => {
       metadata: { sessionId: req.params.sessionId, bytes: pdf.length }
     });
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="verifypass-case-${req.params.sessionId}.pdf"`);
+    res.setHeader("Content-Disposition", `attachment; filename="verifypass-case-${safeFilenamePart(req.params.sessionId)}.pdf"`);
     res.send(pdf);
   } catch (err) { next(err); }
 });
