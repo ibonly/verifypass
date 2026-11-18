@@ -6,7 +6,7 @@
 const { Router } = require("express");
 const { AppError } = require("@verifypass/shared");
 const { requireUser } = require("../middleware/userAuth");
-const { tenantScope } = require("../middleware/tenantScope");
+const { tenantScope, requireTenant } = require("../middleware/tenantScope");
 const { audit } = require("../services/auditLogger");
 const {
   validateThresholds, validateRetention, effectiveSettings, saveSettingsPatch
@@ -15,11 +15,6 @@ const { issueKey, rotateKey, revokeKey, deleteKey } = require("../services/apiKe
 
 const router = Router();
 const admins = requireUser("super_admin", "tenant_admin");
-
-function requireTenant(req, _res, next) {
-  if (!req.tenant) return next(new AppError("VALIDATION_ERROR", "X-Tenant-Id header required for super admin"));
-  next();
-}
 router.use(admins, requireTenant, tenantScope);
 
 // GET /v1/settings — effective + overrides + bounds (drives the rules builder UI)

@@ -8,18 +8,13 @@
 const { Router } = require("express");
 const { AppError } = require("@verifypass/shared");
 const { requireUser } = require("../middleware/userAuth");
-const { tenantScope } = require("../middleware/tenantScope");
+const { tenantScope, requireTenant } = require("../middleware/tenantScope");
 const { audit } = require("../services/auditLogger");
 const { toCsv } = require("../services/csv");
 const reports = require("../services/reportService");
 
 const router = Router();
 const readers = requireUser("super_admin", "tenant_admin", "compliance_reviewer", "auditor");
-
-function requireTenant(req, _res, next) {
-  if (!req.tenant) return next(new AppError("VALIDATION_ERROR", "X-Tenant-Id header required for super admin"));
-  next();
-}
 router.use(readers, requireTenant, tenantScope);
 
 function safeFilenamePart(value) {

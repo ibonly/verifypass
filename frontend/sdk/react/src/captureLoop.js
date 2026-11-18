@@ -210,7 +210,7 @@ export function runCaptureLoop(ctx) {
         history.push(motion);
         if (history.length > 40) history.shift();
         const baseline = history.length >= 8 ? Math.min(...history) : 0;
-        const bright = meanBrightness(small);
+        const bright = meanBrightness(gray);
         lightOk = bright > 35 && bright < 240;
         settled = history.length >= 8 && motion <= baseline + SETTLE_DELTA;
         if (docGate) {

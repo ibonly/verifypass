@@ -150,8 +150,7 @@ class _VerificationScreenState extends State<VerificationScreen> {
             onPressed: () async {
               final messenger = ScaffoldMessenger.of(context);
               try {
-                final client = VerifyPassClient(apiBaseUrl: widget.apiBaseUrl);
-                final s = await client.getStatus(
+                final s = await _client.getStatus(
                   sessionId: widget.session.sessionId,
                   sdkToken: widget.session.sdkToken,
                 );

@@ -8,7 +8,6 @@ const express = require("express");
 const { sdkOrHostedAuth } = require("../middleware/auth");
 const { tenantScope } = require("../middleware/tenantScope");
 const { handleUpload } = require("../services/uploadService");
-const { enqueue } = require("../services/jobService");
 const { audit } = require("../services/auditLogger");
 const { AppError, DEFAULT_TTL_MS, SEQUENCE_LIMITS } = require("@verifypass/shared");
 

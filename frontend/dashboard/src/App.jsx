@@ -1180,14 +1180,6 @@ function CreateKeyForm({ onCreated }) {
 
 // ─── Webhooks ─────────────────────────────────────────────────────────────────
 
-const DELIVERY_STATUS_COLORS = {
-  delivered: STATUS_COLORS.approved,
-  pending: STATUS_COLORS.manual_review,
-  failed: STATUS_COLORS.rejected,
-  exhausted: STATUS_COLORS.rejected,
-  skipped: "#6B7280"
-};
-
 function Webhooks({ canManage }) {
   const { data, error, reload } = useData("/v1/dashboard/webhook-deliveries");
   useEffect(() => {
@@ -1350,11 +1342,7 @@ function Webhooks({ canManage }) {
                     <code style={{ color: "#9CA3AF", fontSize: 10 }}>{d.eventId}</code>
                   </td>
                   <td style={{ padding: "8px 8px" }}>
-                    <span style={{
-                      background: (DELIVERY_STATUS_COLORS[d.status] || "#6B7280") + "22",
-                      color: DELIVERY_STATUS_COLORS[d.status] || "#6B7280",
-                      padding: "2px 7px", borderRadius: 999, fontSize: 11, fontWeight: 600
-                    }}>{d.status}</span>
+                    <StatusPill status={d.status} />
                   </td>
                   <td style={{ padding: "8px 8px", textAlign: "center" }}>{d.attempts}</td>
                   <td style={{ padding: "8px 8px" }}>

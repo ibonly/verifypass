@@ -7,20 +7,16 @@ const { Router } = require("express");
 const fs = require("fs/promises");
 const { AppError } = require("@verifypass/shared");
 const { requireUser } = require("../middleware/userAuth");
-const { tenantScope } = require("../middleware/tenantScope");
+const { tenantScope, requireTenant } = require("../middleware/tenantScope");
 const { readEvidence, signEvidenceAccess, verifyEvidenceAccess } = require("../services/evidenceStore");
 const { resolveEvidenceKey } = require("@verifypass/shared");
 const config = require("../config");
-const { effectiveSessionStatus, isSessionOverdue } = require("../services/sessionExpiry");
+const { effectiveSessionStatus, isSessionOverdue, SESSION_STATUSES } = require("../services/sessionExpiry");
+const { formatWebhookDelivery } = require("../services/webhookLog");
 const { getDb } = require("../lib/db");
 
 const router = Router();
 const anyUser = requireUser(); // all roles may view
-
-function requireTenant(req, _res, next) {
-  if (!req.tenant) return next(new AppError("VALIDATION_ERROR", "X-Tenant-Id header required for super admin"));
-  next();
-}
 
 async function selectedResult(session, resultId) {
   if (typeof resultId !== "string" || !/^[a-f0-9]{24}$/i.test(resultId)) throw new AppError("VALIDATION_ERROR", "Invalid result ID");
@@ -64,8 +60,6 @@ router.get("/stats", anyUser, requireTenant, tenantScope, async (req, res, next)
     next(err);
   }
 });
-
-const SESSION_STATUSES = new Set(["created", "started", "submitted", "approved", "rejected", "manual_review", "expired", "failed", "abandoned"]);
 
 // GET /v1/dashboard/sessions?status=&limit=
 router.get("/sessions", anyUser, requireTenant, tenantScope, async (req, res, next) => {
@@ -222,17 +216,7 @@ router.get("/webhook-deliveries", anyUser, requireTenant, tenantScope, async (re
       success: true,
       tenant: { tenantUid: req.tenant.tenantUid, companyName: req.tenant.companyName },
       webhookUrl: tenant?.webhookUrl || null,
-      deliveries: deliveries.map((d) => ({
-        eventId: d.eventUid,
-        event: d.event,
-        status: d.status,
-        attempts: d.attempts,
-        lastStatusCode: d.lastStatusCode,
-        lastError: d.lastError,
-        nextAttemptAt: d.nextAttemptAt ? new Date(d.nextAttemptAt).toISOString() : null,
-        deliveredAt: d.deliveredAt ? new Date(d.deliveredAt).toISOString() : null,
-        createdAt: d.createdAt ? new Date(d.createdAt).toISOString() : null
-      }))
+      deliveries: deliveries.map(formatWebhookDelivery)
     });
   } catch (err) {
     next(err);

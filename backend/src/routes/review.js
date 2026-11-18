@@ -5,28 +5,16 @@
 const { Router } = require("express");
 const { AppError } = require("@verifypass/shared");
 const { requireUser } = require("../middleware/userAuth");
-const { tenantScope } = require("../middleware/tenantScope");
+const { tenantScope, requireTenant } = require("../middleware/tenantScope");
 const { getDb } = require("../lib/db");
 const { audit } = require("../services/auditLogger");
 const { enqueue } = require("../services/jobService");
 const { hasLivenessStatus } = require("../services/webhookEligibility");
+const { SESSION_STATUSES } = require("../services/sessionExpiry");
 const email = require("../services/emailService");
 
 const router = Router();
 const reviewers = requireUser("super_admin", "tenant_admin", "compliance_reviewer");
-
-function notify(promise) { Promise.resolve(promise).catch(err => console.error("email trigger failed:", err.message)); }
-
-// C1: notify tenant reviewers when a case enters manual_review.
-function notifyReviewWaiting(tenant, pendingCount, oldestWait) {
-  if (!email.enabled()) return;
-  (async () => {
-    const reviewersList = await getDb().user.findMany({ where: { tenantId: String(tenant.id), role: { in: ["tenant_admin", "compliance_reviewer"] }, status: "active" } });
-    for (const user of reviewersList) {
-      await email.sendReviewWaiting(user, { companyName: tenant.companyName, pendingCount, oldestWait });
-    }
-  })().catch(err => console.error("review-waiting email failed:", err.message));
-}
 
 // C2: notify OTHER reviewers that a dual-approval proposal needs confirmation.
 function notifySecondConfirmation(tenant, proposer, proposedDecision, caseAge) {
@@ -40,19 +28,12 @@ function notifySecondConfirmation(tenant, proposer, proposedDecision, caseAge) {
   })().catch(err => console.error("second-confirmation email failed:", err.message));
 }
 
-function requireTenant(req, _res, next) {
-  if (!req.tenant) return next(new AppError("VALIDATION_ERROR", "X-Tenant-Id header required for super admin"));
-  next();
-}
-
-const REVIEW_SESSION_STATUSES = new Set(["created", "started", "submitted", "approved", "rejected", "manual_review", "expired", "failed", "abandoned"]);
-
 // GET /v1/manual-review?status=manual_review&limit=50
 router.get("/", reviewers, requireTenant, tenantScope, async (req, res, next) => {
   try {
     const rawStatus = req.query.status;
     const status = rawStatus === undefined || rawStatus === "" ? "manual_review" : rawStatus;
-    if (typeof status !== "string" || !REVIEW_SESSION_STATUSES.has(status)) {
+    if (typeof status !== "string" || !SESSION_STATUSES.has(status)) {
       throw new AppError("VALIDATION_ERROR", "Invalid review status filter");
     }
     const limit = Math.max(1, Math.min(Number(req.query.limit) || 50, 200));

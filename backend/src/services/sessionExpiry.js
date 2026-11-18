@@ -2,6 +2,11 @@
 
 const { transaction } = require("./atomic");
 
+const SESSION_STATUSES = new Set([
+  "created", "started", "submitted", "approved", "rejected",
+  "manual_review", "expired", "failed", "abandoned"
+]);
+
 function isSessionOverdue(session, now = new Date()) {
   return ["created", "started"].includes(session.status)
     && !!session.expiresAt && new Date(session.expiresAt) <= now;
@@ -40,4 +45,4 @@ async function expireSessions(db, { now = new Date(), take = 200 } = {}) {
   return expired;
 }
 
-module.exports = { expireSessions, effectiveSessionStatus, isSessionOverdue };
+module.exports = { expireSessions, effectiveSessionStatus, isSessionOverdue, SESSION_STATUSES };

@@ -12,6 +12,8 @@ const { getDb } = require("../lib/db");
 const { audit } = require("../services/auditLogger");
 const { enqueue } = require("../services/jobService");
 
+const { formatWebhookDelivery } = require("../services/webhookLog");
+
 const router = Router();
 router.use(requireApiKey("secret"), tenantScope);
 
@@ -51,17 +53,7 @@ router.get("/deliveries", async (req, res, next) => {
     const deliveries = await req.scopedDb.webhookDeliveries.list(where, { orderBy: { createdAt: "desc" }, take: 100 });
     res.json({
       success: true,
-      deliveries: deliveries.map((d) => ({
-        eventId: d.eventUid,
-        event: d.event,
-        status: d.status,
-        attempts: d.attempts,
-        lastStatusCode: d.lastStatusCode,
-        lastError: d.lastError,
-        nextAttemptAt: d.nextAttemptAt ? new Date(d.nextAttemptAt).toISOString() : null,
-        deliveredAt: d.deliveredAt ? new Date(d.deliveredAt).toISOString() : null,
-        createdAt: d.createdAt ? new Date(d.createdAt).toISOString() : null
-      }))
+      deliveries: deliveries.map(formatWebhookDelivery)
     });
   } catch (err) {
     next(err);

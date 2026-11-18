@@ -103,7 +103,7 @@ export function useVerification(opts) {
   useEffect(() => {
     const c = createVerificationController({
       sessionId, sdkToken, publicKey, baseUrl, mobileHandoff,
-      onComplete: (r) => callbacksRef.current.onComplete?.(r),
+      onComplete: (r, meta) => callbacksRef.current.onComplete?.(r, meta),
       onError: (e) => callbacksRef.current.onError?.(e),
       onStepChange: (s) => callbacksRef.current.onStepChange?.(s),
       onTelemetry: (t) => callbacksRef.current.onTelemetry?.(t)
