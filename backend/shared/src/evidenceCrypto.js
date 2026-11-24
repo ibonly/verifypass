@@ -14,6 +14,9 @@ function encryptBuffer(buffer, keyBuf) {
 }
 
 function decryptBuffer(raw, keyBuf) {
+  if (!Buffer.isBuffer(raw) || raw.length < 28) {
+    throw new Error("Invalid encrypted evidence buffer");
+  }
   const iv = raw.subarray(0, 12);
   const tag = raw.subarray(12, 28);
   const ciphertext = raw.subarray(28);

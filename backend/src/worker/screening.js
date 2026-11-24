@@ -46,6 +46,7 @@ async function screenCustomer(subject, opts = {}) {
     const res = await fetchImpl(url, {
       method: "POST",
       headers,
+      redirect: "error",
       body: JSON.stringify({ fullName, customerReference: subject?.customerReference || null }),
       signal
     });

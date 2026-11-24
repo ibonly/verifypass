@@ -8,7 +8,6 @@ const express = require("express");
 const { sdkOrHostedAuth } = require("../middleware/auth");
 const { tenantScope } = require("../middleware/tenantScope");
 const { handleUpload } = require("../services/uploadService");
-const { enqueue } = require("../services/jobService");
 const { audit } = require("../services/auditLogger");
 const { AppError, DEFAULT_TTL_MS, SEQUENCE_LIMITS } = require("@verifypass/shared");
 
@@ -17,6 +16,7 @@ const { standardLimiters } = require("../middleware/rateLimit");
 const captureLimiter = standardLimiters().captures;
 const sdkAuth = [sdkOrHostedAuth, tenantScope, captureLimiter];
 const bigBody = express.json({ limit: "12mb" }); // base64 inflation headroom over 8MB binary cap
+const smallBody = express.json({ limit: "64kb" });
 
 router.post("/:sessionId/handoff/claim", express.json({ limit: "4kb" }), captureLimiter, async (req, res, next) => {
   try {
@@ -74,7 +74,7 @@ router.post("/:sessionId/liveness-frame", bigBody, ...sdkAuth, uploadRoute("live
 router.post("/:sessionId/flash", bigBody, ...sdkAuth, uploadRoute("flash"));
 
 // POST /v1/verification-sessions/:sessionId/verify (PRD §12.5)
-router.post("/:sessionId/verify", bigBody, ...sdkAuth, async (req, res, next) => {
+router.post("/:sessionId/verify", smallBody, ...sdkAuth, async (req, res, next) => {
   try {
     const { submitSession } = require("../services/sessionService");
     const result = await submitSession(req.scopedDb, req.params.sessionId, req.body?.sdkToken, req.body?.attemptId, { tenantUid: req.tenant.tenantUid, device: req.body?.device, clientIp: req.ip, capture: req.body?.capture, telemetry: req.body?.telemetry });
@@ -92,7 +92,7 @@ router.post("/:sessionId/verify", bigBody, ...sdkAuth, async (req, res, next) =>
 // change, and the log IS the counter. After 3 camera attempts the client is
 // told to offer manual file upload for the document. Logic lives in
 // sessionService.retrySession (unit-tested there).
-router.post("/:sessionId/retry", bigBody, ...sdkAuth, async (req, res, next) => {
+router.post("/:sessionId/retry", smallBody, ...sdkAuth, async (req, res, next) => {
   try {
     const { retrySession } = require("../services/sessionService");
     const payload = await retrySession(req.scopedDb, req.params.sessionId, req.body?.sdkToken, {
@@ -110,7 +110,7 @@ router.post("/:sessionId/retry", bigBody, ...sdkAuth, async (req, res, next) => 
 // POST /v1/verification-sessions/:sessionId/challenge/reissue — the user
 // cannot perform an action ("try a different movement"); body
 // { sdkToken, excludeActions: [...] }. Capped + audited (sessionService).
-router.post("/:sessionId/challenge/reissue", bigBody, ...sdkAuth, async (req, res, next) => {
+router.post("/:sessionId/challenge/reissue", smallBody, ...sdkAuth, async (req, res, next) => {
   try {
     const { reissueChallenge } = require("../services/sessionService");
     const payload = await reissueChallenge(req.scopedDb, req.params.sessionId, req.body?.sdkToken, {
@@ -128,7 +128,7 @@ router.post("/:sessionId/challenge/reissue", bigBody, ...sdkAuth, async (req, re
 // (consent, camera permission and document capture come first). Idempotent
 // once a frame exists for the current challenge; returns the deadlines the
 // UI should surface. Logic in sessionService.beginChallenge.
-router.post("/:sessionId/challenge/begin", bigBody, ...sdkAuth, async (req, res, next) => {
+router.post("/:sessionId/challenge/begin", smallBody, ...sdkAuth, async (req, res, next) => {
   try {
     const { beginChallenge } = require("../services/sessionService");
     res.json(await beginChallenge(req.scopedDb, req.params.sessionId, req.body?.sdkToken, { attemptId: req.body?.attemptId }));
@@ -140,7 +140,7 @@ router.post("/:sessionId/challenge/begin", bigBody, ...sdkAuth, async (req, res,
 // POST /v1/verification-sessions/:sessionId/consent — record the user's
 // biometric-processing consent (set-once, idempotent, audit-logged). In
 // production uploads are refused until this has been called.
-router.post("/:sessionId/consent", bigBody, ...sdkAuth, async (req, res, next) => {
+router.post("/:sessionId/consent", smallBody, ...sdkAuth, async (req, res, next) => {
   try {
     const { recordConsent } = require("../services/sessionService");
     const payload = await recordConsent(req.scopedDb, req.params.sessionId, req.body?.sdkToken, {
@@ -184,7 +184,7 @@ router.get("/:sessionId/status", ...sdkAuth, async (req, res, next) => {
     let liveness = null;
     if (terminal) {
       try {
-        const r = await req.scopedDb.verificationResults.findBySessionId(session.id);
+        const r = await req.scopedDb.results.latestForSession(session.id);
         if (r) {
           const lScore = r.livenessScore != null ? Number(r.livenessScore) : null;
           const sScore = r.rawResult?.liveness?.passiveAggregate?.selfieScore ?? (r.livenessScore != null ? Number(r.livenessScore) : null);
@@ -253,6 +253,7 @@ router.get("/:sessionId/challenge", ...sdkAuth, async (req, res, next) => {
       sessionId: session.sessionUid,
       verificationType: session.verificationType || "ID_AND_FACE",
       hostedBaseUrl: require("../config").hostedBaseUrl,
+      allowedDomains: Array.isArray(req.tenant?.allowedDomains) ? req.tenant.allowedDomains : [],
       ...(handoff ? { handoffToken: handoff.token, handoffExpiresAt: handoff.expiresAt } : {}),
       // Two-sided document types (voter's card, driver's licence) tell the
       // SDK to add a back-of-ID capture step.

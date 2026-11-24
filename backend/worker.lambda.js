@@ -116,7 +116,7 @@ async function drainDbQueue(deps, { maxJobs = 1, maxWebhookJobs = 10, webhookBud
   let webhookStarted = null;
   while (true) {
     const remaining = deps.remainingTimeMs ? deps.remainingTimeMs() : Infinity;
-    const webhooksOnly = processed + failed >= maxJobs || remaining < 250_000;
+    const webhooksOnly = processed + failed >= maxJobs || remaining < 75_000;
     if (!webhooksOnly && now() - started >= budgetMs) break;
     if (webhooksOnly) {
       webhookStarted ??= now();
@@ -132,6 +132,21 @@ async function drainDbQueue(deps, { maxJobs = 1, maxWebhookJobs = 10, webhookBud
       await db.jobQueue.updateMany({ where: { id: job.id, status: "running", lockedBy: owner }, data: { status: "done" } });
       processed++;
     } catch (err) {
+      if (/^POLICY_VERSION_MISMATCH/.test(err.message)) {
+        console.error("POLICY_VERSION_MISMATCH", { jobId: job.id, message: err.message });
+        await db.jobQueue.updateMany({
+          where: { id: job.id, status: "running", lockedBy: owner },
+          data: {
+            status: "pending",
+            lockedBy: null,
+            lockedAt: null,
+            attempts: { increment: -1 },
+            lastError: String(err.message).slice(0, 2000),
+            runAfter: new Date(now() + 5000)
+          }
+        });
+        continue;
+      }
       const exhausted = job.attempts + 1 >= job.maxAttempts;
       await db.jobQueue.updateMany({
         where: { id: job.id, status: "running", lockedBy: owner },
@@ -162,10 +177,7 @@ async function runJob(job, deps) {
       return sendWebhook(job.payload, { db: deps.db, enqueueJob: deps.enqueueJob, fetchImpl: deps.fetchImpl, validateTarget: deps.validateTarget });
     case "expire_sessions": {
       await require("./src/services/reconcileEvidence").reconcileEvidence(deps.db);
-      await deps.db.verificationSession.updateMany({
-        where: { status: { in: ["created", "started"] }, expiresAt: { lt: new Date() } },
-        data: { status: "expired" }
-      });
+      await require("./src/services/sessionExpiry").expireSessions(deps.db);
       // dead-letter safety net: sessions whose SQS message was lost/exhausted
       const timedOut = await failStuckSubmitted(deps.db, { enqueueJob: deps.enqueueJob });
       // harmless in SQS topology, but sweeps any legacy db-queue rows
@@ -185,6 +197,10 @@ async function runJob(job, deps) {
       });
       for (const file of expired) {
         await storage.removeStored(file.storagePath);
+        if (file.cloudinaryPublicId) {
+          const { destroyEvidenceImage } = require("./src/services/cloudinaryService");
+          await destroyEvidenceImage(file.cloudinaryPublicId);
+        }
         await deps.db.evidenceFile.delete({ where: { id: file.id } });
       }
       try {

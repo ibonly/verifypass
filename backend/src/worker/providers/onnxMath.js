@@ -86,7 +86,7 @@ function nms(boxes, scores, thresh) {
     const w = x2 - x1, h = y2 - y1;
     if (w > 0 && h > 0) items.push({ x1, y1, x2, y2, area: w * h, index: i, score: scores[i] });
   }
-  items.sort((a, b) => a.y2 - b.y2);
+  items.sort((a, b) => b.score - a.score);
   const keep = [];
   let pool = items;
   while (pool.length > 0) {
@@ -99,8 +99,8 @@ function nms(boxes, scores, thresh) {
       const yy1 = Math.max(box.y1, last.y1);
       const xx2 = Math.min(box.x2, last.x2);
       const yy2 = Math.min(box.y2, last.y2);
-      const w = Math.max(0, xx2 - xx1 + 1);
-      const h = Math.max(0, yy2 - yy1 + 1);
+      const w = Math.max(0, xx2 - xx1);
+      const h = Math.max(0, yy2 - yy1);
       const overlap = (w * h) / box.area;
       if (overlap >= thresh) suppress.add(pool[i]);
     }

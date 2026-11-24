@@ -5,7 +5,8 @@ const { AppError } = require("@verifypass/shared");
 
 /** Attach a correlation id to every request (PRD §20). */
 function correlationId(req, res, next) {
-  req.correlationId = req.headers["x-correlation-id"] || crypto.randomUUID();
+  const raw = req.headers["x-correlation-id"];
+  req.correlationId = typeof raw === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(raw) ? raw : crypto.randomUUID();
   res.setHeader("X-Correlation-Id", req.correlationId);
   next();
 }
@@ -15,6 +16,11 @@ function notFound(req, res, next) {
 }
 
 function errorHandler(err, req, res, next) {
+  if (err && err.type === "entity.parse.failed") {
+    err = new AppError("VALIDATION_ERROR", "Malformed JSON request body");
+  } else if (err && err.type === "entity.too.large") {
+    err = new AppError("VALIDATION_ERROR", "Request payload too large");
+  }
   const isApp = err instanceof AppError;
   const http = isApp ? err.http : 500;
   const code = isApp ? err.code : "INTERNAL_ERROR";

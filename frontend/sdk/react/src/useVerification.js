@@ -103,7 +103,7 @@ export function useVerification(opts) {
   useEffect(() => {
     const c = createVerificationController({
       sessionId, sdkToken, publicKey, baseUrl, mobileHandoff,
-      onComplete: (r) => callbacksRef.current.onComplete?.(r),
+      onComplete: (r, meta) => callbacksRef.current.onComplete?.(r, meta),
       onError: (e) => callbacksRef.current.onError?.(e),
       onStepChange: (s) => callbacksRef.current.onStepChange?.(s),
       onTelemetry: (t) => callbacksRef.current.onTelemetry?.(t)
@@ -173,8 +173,7 @@ export function useVerification(opts) {
     };
     const onVis = () => { if (document.hidden) pauseCamera(); };
     document.addEventListener("visibilitychange", onVis);
-    window.addEventListener("orientationchange", pauseCamera);
-    return () => { cancelled = true; cameraController.abort(); document.removeEventListener("visibilitychange", onVis); window.removeEventListener("orientationchange", pauseCamera); stopCamera(video); setCameraReady(false); };
+    return () => { cancelled = true; cameraController.abort(); document.removeEventListener("visibilitychange", onVis); stopCamera(video); setCameraReady(false); };
   }, [captureFacing, consented, cameraEpoch]);
 
   // ── Face model (optional; failure falls back to motion auto-capture) ──

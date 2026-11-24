@@ -41,6 +41,8 @@ export function themeStyle(theme = {}) {
     const value = theme[key];
     if (typeof value === "string" && value && !/[;{}<>]/.test(value)) style[cssVar] = value;
   }
-  if (typeof theme.backgroundColor === "string" && theme.backgroundColor) style.background = theme.backgroundColor;
+  if (typeof theme.backgroundColor === "string" && theme.backgroundColor && !/[;{}<>]/.test(theme.backgroundColor)) {
+    style.background = theme.backgroundColor;
+  }
   return style;
 }

@@ -83,4 +83,9 @@ function createScope(db, tenantId) {
 
 }
 
-module.exports = { tenantScope, createScope };
+function requireTenant(req, _res, next) {
+  if (!req.tenant) return next(new AppError("VALIDATION_ERROR", "X-Tenant-Id header required for super admin"));
+  next();
+}
+
+module.exports = { tenantScope, createScope, requireTenant };

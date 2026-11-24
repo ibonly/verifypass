@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { VerifyPassProvider, VerificationWidget, claimMobileHandoff } from "@verifypass/react";
 
 /**
@@ -7,7 +7,7 @@ import { VerifyPassProvider, VerificationWidget, claimMobileHandoff } from "@ver
  * Mobile handoff URL: /session/<sessionId>#h=<oneTimeHandoffToken>
  */
 function parseLocation() {
-  const m = window.location.pathname.match(/\/session\/(vps_[A-Za-z0-9]+)/);
+  const m = window.location.pathname.match(/\/session\/(vps_[A-Za-z0-9_-]+)/);
   const frag = new URLSearchParams(window.location.hash.slice(1));
   return {
     sessionId: m ? m[1] : null,
@@ -27,6 +27,16 @@ export default function App() {
   });
   const [fatal, setFatal] = useState(null);
   const [claiming, setClaiming] = useState(!!handoffToken && !sdkToken);
+  const redirectTimerRef = useRef(null);
+
+  useEffect(() => {
+    if (location.sdkToken || location.redirectUrl) {
+      history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+    }
+    return () => {
+      if (redirectTimerRef.current) clearTimeout(redirectTimerRef.current);
+    };
+  }, [location.sdkToken, location.redirectUrl]);
 
   useEffect(() => {
     if (!sessionId || !handoffToken || sdkToken) return;
@@ -61,7 +71,7 @@ export default function App() {
     );
   }
 
-  function handleComplete(result) {
+  function handleComplete(result, meta) {
     // Retryable outcomes stay ON the page: the widget's result screen offers
     // "Try again" (+ manual ID upload after 3 attempts). Auto-redirecting
     // 1.5s after a rejection yanked users away before they could retry.
@@ -69,13 +79,25 @@ export default function App() {
     if (redirectUrl && !retryable) {
       try {
         const u = new URL(redirectUrl);
-        // M3 fix: block javascript:/data: and require https (http allowed in dev only)
-        const allowedSchemes = ["https:"];
-        if (typeof __VP_DEV__ !== "undefined" && __VP_DEV__) allowedSchemes.push("http:");
+        const isDev = typeof __VP_DEV__ !== "undefined" && __VP_DEV__;
+        // Block javascript:/data: and require https (http allowed in dev only)
+        const allowedSchemes = isDev ? ["https:", "http:"] : ["https:"];
         if (!allowedSchemes.includes(u.protocol)) return; // stay on page
+        // Reject user credentials in redirect URL
+        if (u.username || u.password) return;
+        // Enforce tenant allowedDomains (or same-origin when none configured)
+        const host = u.hostname.toLowerCase();
+        const allowed = Array.isArray(meta?.allowedDomains) ? meta.allowedDomains.map((d) => String(d).toLowerCase()) : [];
+        const domainOk = isDev && (host === "localhost" || host === "127.0.0.1")
+          ? true
+          : allowed.length > 0
+            ? allowed.some((d) => host === d || host.endsWith(`.${d}`))
+            : u.origin === window.location.origin;
+        if (!domainOk) return;
         u.searchParams.set("sessionId", sessionId);
         u.searchParams.set("status", result.status);
-        setTimeout(() => { window.location.href = u.toString(); }, 1500);
+        if (redirectTimerRef.current) clearTimeout(redirectTimerRef.current);
+        redirectTimerRef.current = setTimeout(() => { window.location.href = u.toString(); }, 1500);
         return;
       } catch (_) { /* bad redirect — stay on page, result is shown */ }
     }
@@ -92,7 +114,7 @@ export default function App() {
         <p style={{ color: "#6B7280" }}>
           {fatal.code === "SESSION_EXPIRED"
             ? "This verification session has expired. Please restart from the app that sent you here."
-            : fatal.code === "INVALID_API_KEY"
+            : ["INVALID_API_KEY", "HANDOFF_TOKEN_EXPIRED", "INVALID_HANDOFF_TOKEN"].includes(fatal.code)
               ? "This mobile handoff link is invalid, expired, or has already been used."
               : "We couldn't find this verification session."}
         </p>

@@ -5,28 +5,16 @@
 const { Router } = require("express");
 const { AppError } = require("@verifypass/shared");
 const { requireUser } = require("../middleware/userAuth");
-const { tenantScope } = require("../middleware/tenantScope");
+const { tenantScope, requireTenant } = require("../middleware/tenantScope");
 const { getDb } = require("../lib/db");
 const { audit } = require("../services/auditLogger");
 const { enqueue } = require("../services/jobService");
 const { hasLivenessStatus } = require("../services/webhookEligibility");
+const { SESSION_STATUSES } = require("../services/sessionExpiry");
 const email = require("../services/emailService");
 
 const router = Router();
 const reviewers = requireUser("super_admin", "tenant_admin", "compliance_reviewer");
-
-function notify(promise) { Promise.resolve(promise).catch(err => console.error("email trigger failed:", err.message)); }
-
-// C1: notify tenant reviewers when a case enters manual_review.
-function notifyReviewWaiting(tenant, pendingCount, oldestWait) {
-  if (!email.enabled()) return;
-  (async () => {
-    const reviewersList = await getDb().user.findMany({ where: { tenantId: String(tenant.id), role: { in: ["tenant_admin", "compliance_reviewer"] }, status: "active" } });
-    for (const user of reviewersList) {
-      await email.sendReviewWaiting(user, { companyName: tenant.companyName, pendingCount, oldestWait });
-    }
-  })().catch(err => console.error("review-waiting email failed:", err.message));
-}
 
 // C2: notify OTHER reviewers that a dual-approval proposal needs confirmation.
 function notifySecondConfirmation(tenant, proposer, proposedDecision, caseAge) {
@@ -40,16 +28,15 @@ function notifySecondConfirmation(tenant, proposer, proposedDecision, caseAge) {
   })().catch(err => console.error("second-confirmation email failed:", err.message));
 }
 
-function requireTenant(req, _res, next) {
-  if (!req.tenant) return next(new AppError("VALIDATION_ERROR", "X-Tenant-Id header required for super admin"));
-  next();
-}
-
 // GET /v1/manual-review?status=manual_review&limit=50
 router.get("/", reviewers, requireTenant, tenantScope, async (req, res, next) => {
   try {
-    const status = req.query.status || "manual_review";
-    const limit = Math.min(Number(req.query.limit || 50), 200);
+    const rawStatus = req.query.status;
+    const status = rawStatus === undefined || rawStatus === "" ? "manual_review" : rawStatus;
+    if (typeof status !== "string" || !SESSION_STATUSES.has(status)) {
+      throw new AppError("VALIDATION_ERROR", "Invalid review status filter");
+    }
+    const limit = Math.max(1, Math.min(Number(req.query.limit) || 50, 200));
     const sessions = await req.scopedDb.sessions.list({ status }, { orderBy: { createdAt: "desc" }, take: limit });
 
     const cases = await Promise.all(sessions.map(async (s) => {
@@ -133,26 +120,43 @@ router.post("/:sessionId/decision", reviewers, requireTenant, tenantScope, async
       }
       // Second, distinct reviewer confirming the same decision → mark the
       // proposal consumed (a later re-review must not inherit it), then apply.
-      await db.manualReviewNote.updateMany({
-        where: { id: proposal.id },
+      const updateProposal = await db.manualReviewNote.updateMany({
+        where: { id: proposal.id, decision: `proposed:${decision}` },
         data: { decision: `applied:${decision}` }
       });
+      if (updateProposal.count === 0) {
+        throw new AppError("CONFLICT", "Proposal was already confirmed or updated by another reviewer");
+      }
     }
-
-    await db.manualReviewNote.create({
-      data: { sessionId: session.id, userId: req.user.id, decision, note: note || null }
-    });
 
     if (decision === "recapture") {
       // Re-open for new captures; extend expiry window
-      await req.scopedDb.sessions.update(session.sessionUid, {
-        status: "started",
-        expiresAt: new Date(Date.now() + 30 * 60 * 1000)
+      const upd = await db.verificationSession.updateMany({
+        where: { sessionUid: session.sessionUid, tenantId: req.tenant.id, status: "manual_review" },
+        data: {
+          status: "started",
+          expiresAt: new Date(Date.now() + 30 * 60 * 1000)
+        }
+      });
+      if (upd.count === 0) {
+        throw new AppError("CONFLICT", "Session is no longer in manual review");
+      }
+      await db.manualReviewNote.create({
+        data: { sessionId: session.id, userId: req.user.id, decision, note: note || null }
       });
     } else {
-      await req.scopedDb.sessions.update(session.sessionUid, {
-        status: decision,
-        completedAt: new Date()
+      const upd = await db.verificationSession.updateMany({
+        where: { sessionUid: session.sessionUid, tenantId: req.tenant.id, status: "manual_review" },
+        data: {
+          status: decision,
+          completedAt: new Date()
+        }
+      });
+      if (upd.count === 0) {
+        throw new AppError("CONFLICT", "Session is no longer in manual review");
+      }
+      await db.manualReviewNote.create({
+        data: { sessionId: session.id, userId: req.user.id, decision, note: note || null }
       });
       let selfieIds = [];
       let selfieId = null;

@@ -396,7 +396,7 @@ function runCaptureLoop(ctx) {
         history.push(motion);
         if (history.length > 40) history.shift();
         const baseline = history.length >= 8 ? Math.min(...history) : 0;
-        const bright = meanBrightness(small);
+        const bright = meanBrightness(gray);
         lightOk = bright > 35 && bright < 240;
         settled = history.length >= 8 && motion <= baseline + SETTLE_DELTA;
         if (docGate) {
@@ -976,7 +976,7 @@ function useVerification(opts) {
       publicKey,
       baseUrl,
       mobileHandoff,
-      onComplete: (r) => callbacksRef.current.onComplete?.(r),
+      onComplete: (r, meta) => callbacksRef.current.onComplete?.(r, meta),
       onError: (e) => callbacksRef.current.onError?.(e),
       onStepChange: (s) => callbacksRef.current.onStepChange?.(s),
       onTelemetry: (t) => callbacksRef.current.onTelemetry?.(t)
@@ -1053,12 +1053,10 @@ function useVerification(opts) {
       if (document.hidden) pauseCamera();
     };
     document.addEventListener("visibilitychange", onVis);
-    window.addEventListener("orientationchange", pauseCamera);
     return () => {
       cancelled = true;
       cameraController.abort();
       document.removeEventListener("visibilitychange", onVis);
-      window.removeEventListener("orientationchange", pauseCamera);
       stopCamera(video);
       setCameraReady(false);
     };
@@ -1309,7 +1307,9 @@ function themeStyle(theme = {}) {
     const value = theme[key];
     if (typeof value === "string" && value && !/[;{}<>]/.test(value)) style[cssVar] = value;
   }
-  if (typeof theme.backgroundColor === "string" && theme.backgroundColor) style.background = theme.backgroundColor;
+  if (typeof theme.backgroundColor === "string" && theme.backgroundColor && !/[;{}<>]/.test(theme.backgroundColor)) {
+    style.background = theme.backgroundColor;
+  }
   return style;
 }
 

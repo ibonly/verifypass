@@ -25,6 +25,22 @@ function resolveThresholds(tenantSettings = {}, providerName) {
     maxFailedAttempts: t.maxFailedAttempts || DEFAULT_THRESHOLDS.maxFailedAttempts,
     risk: { ...DEFAULT_THRESHOLDS.risk, ...(t.risk || {}) }
   };
+  const rb = THRESHOLD_BOUNDS.risk || {};
+  if (rb.maxFailedAttempts) {
+    const val = Number(merged.maxFailedAttempts);
+    merged.maxFailedAttempts = Number.isFinite(val)
+      ? Math.min(Math.max(val, rb.maxFailedAttempts.min), rb.maxFailedAttempts.max)
+      : DEFAULT_THRESHOLDS.maxFailedAttempts;
+  }
+  for (const rk of Object.keys(DEFAULT_THRESHOLDS.risk)) {
+    const b = rb[rk];
+    if (b) {
+      const val = Number(merged.risk[rk]);
+      merged.risk[rk] = Number.isFinite(val)
+        ? Math.min(Math.max(val, b.min), b.max)
+        : DEFAULT_THRESHOLDS.risk[rk];
+    }
+  }
   for (const k of ["liveness", "faceMatch"]) {
     const b = bounds[k];
     if (!Number.isFinite(merged[k].reject)) merged[k].reject = baseDefaults[k].reject;
@@ -72,7 +88,7 @@ const ENFORCEABLE = Object.freeze(new Set(["LIVENESS_DIRECTION_INCONSISTENT", "L
 
 /**
  * Product rule (2026-09-07): the liveness gate is satisfied when the passive
- * score is at or above thresholds.liveness.autoApprove (>= 60%) OR the active
+ * score is strictly above thresholds.liveness.autoApprove (> 60%) OR the active
  * challenge passed. Returns the waiver source or null.
  */
 function livenessWaiver({ liveness, livenessChallenge }, thresholds) {

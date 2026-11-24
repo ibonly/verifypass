@@ -2,9 +2,7 @@ import { useEffect, useState } from "react";
 import {
   VerifyPassProvider,
   VerificationWidget,
-  LIVE_TEST_API_BASE,
-  LIVE_TEST_PUBLIC_KEY,
-  DEFAULT_FACE_MODEL_URL
+  LIVE_TEST_API_BASE
 } from "@verifypass/react";
 
 // Local in-house webcam test harness. It plays the role a fintech BACKEND
@@ -16,21 +14,10 @@ import {
 // the client. The sdkToken embeds the API origin, so the widget does not need a
 // baseUrl. This app takes the secret key at runtime purely for local testing.
 
-const LIVE_API_BASE = LIVE_TEST_API_BASE;
-const LIVE_PUBLIC_KEY = LIVE_TEST_PUBLIC_KEY;
 const CONFIGURED_API_BASE = typeof __VP_API_BASE__ !== "undefined" ? __VP_API_BASE__ : "";
+const API_BASE = CONFIGURED_API_BASE ? CONFIGURED_API_BASE.replace(/\/$/, "") : LIVE_TEST_API_BASE;
 const PUBLIC_KEY = import.meta.env.VITE_VP_PUBLIC_KEY || null;
-
-function inferApiBase() {
-  if (typeof window === "undefined") return LIVE_API_BASE;
-
-  const { hostname } = window.location;
-  if (CONFIGURED_API_BASE) return CONFIGURED_API_BASE.replace(/\/$/, "");
-  if (hostname === "localhost" || hostname === "127.0.0.1") return LIVE_API_BASE;
-  return LIVE_API_BASE;
-}
-
-const API_BASE = inferApiBase();
+const FACE_MODEL_URL = import.meta.env.VITE_VP_FACE_MODEL_URL || `${import.meta.env.BASE_URL}models/fr_detect.onnx`;
 
 const PRIMARY = "#6D28D9";
 // Outcomes the WIDGET can recover from itself (its result screen offers
@@ -44,6 +31,8 @@ export default function App() {
   const [mobileHandoff, setMobileHandoff] = useState(false);
   const [session, setSession] = useState(null);
   const [result, setResult] = useState(null);
+  const [canRetry, setCanRetry] = useState(false);
+  const [details, setDetails] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const [cameraState, setCameraState] = useState("pending"); // pending | granted | denied | unsupported
@@ -51,31 +40,32 @@ export default function App() {
   // Request camera permission as soon as the page loads (not at capture time).
   // Once granted, the widget's camera starts later without a second prompt.
   useEffect(() => {
-    if (mobileHandoff) {
-      setCameraState("pending");
+    if (mobileHandoff || verificationType === "ID_ONLY") {
+      setCameraState("skipped");
       return undefined;
     }
-    let stream = null;
     let cancelled = false;
     const md = typeof navigator !== "undefined" ? navigator.mediaDevices : null;
     if (!md || !md.getUserMedia) {
       setCameraState("unsupported");
       return undefined;
     }
+    setCameraState("pending");
     md.getUserMedia({ video: { facingMode: "user" } })
       .then((s) => {
-        // Permission granted; release the camera until the flow needs it.
         s.getTracks().forEach((t) => t.stop());
         if (!cancelled) setCameraState("granted");
       })
       .catch(() => { if (!cancelled) setCameraState("denied"); });
-    return () => { cancelled = true; if (stream) stream.getTracks().forEach((t) => t.stop()); };
-  }, [mobileHandoff]);
+    return () => { cancelled = true; };
+  }, [mobileHandoff, verificationType]);
 
   async function startSession(e) {
     e.preventDefault();
     setError(null);
     setResult(null);
+    setCanRetry(false);
+    setDetails(null);
     setBusy(true);
     try {
       const res = await fetch(`${API_BASE}/v1/verification-sessions`, {
@@ -86,7 +76,7 @@ export default function App() {
           verificationType
         })
       });
-      const json = await res.json();
+      const json = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(json.error?.message || `HTTP ${res.status}`);
       setSession(json); // { sessionId, sdkToken, livenessChallenge, ... }
     } catch (err) {
@@ -101,27 +91,33 @@ export default function App() {
     setDetails(null);
     setSession(null);
     setResult(null);
+    setCanRetry(false);
     setError(null);
   }
 
   // DEV-ONLY: after a terminal result, pull the tenant result (secret key) so
   // testers see the FULL reason codes + per-action challenge detail that the
   // end-user widget deliberately does not show.
-  const [details, setDetails] = useState(null);
   useEffect(() => {
     if (!result || !session || !secretKey.trim()) return undefined;
     let cancelled = false;
     fetch(`${API_BASE}/v1/verification-sessions/${session.sessionId}/result`, {
       headers: { Authorization: `Bearer ${secretKey.trim()}` }
-    }).then((r) => r.json()).then((j) => { if (!cancelled) setDetails(j); }).catch(() => {});
+    })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((j) => { if (!cancelled) setDetails(j); })
+      .catch(() => {});
     return () => { cancelled = true; };
   }, [result, session, secretKey]);
 
   return (
     <div style={{ minHeight: "100vh", fontFamily: "system-ui, sans-serif", color: "#111827" }}>
-      <header style={{ background: "#111827", color: "#fff", padding: "14px 20px" }}>
-        <strong>VerifyPass</strong> · Sample Webcam Test App
-        <span style={{ float: "right", fontSize: 12, color: "#9CA3AF" }}>Session API: {API_BASE}</span>
+      <header style={{ background: "#111827", color: "#fff", padding: "14px 20px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+        <div><strong>VerifyPass</strong> · Sample Webcam Test App</div>
+        <span style={{ fontSize: 12, color: "#9CA3AF", wordBreak: "break-all" }}>Session API: {API_BASE}</span>
       </header>
 
       <main style={{ maxWidth: 460, margin: "24px auto", padding: "0 16px" }}>
@@ -139,11 +135,12 @@ export default function App() {
               app — create sessions from your server.
             </Warning>
 
-            <CameraStatus state={cameraState} />
+            {cameraState !== "skipped" && <CameraStatus state={cameraState} />}
 
             <form onSubmit={startSession}>
               <Label>Secret key</Label>
               <input
+                type="password"
                 style={input} value={secretKey} onChange={(e) => setSecretKey(e.target.value)}
                 placeholder="vp_sec_test_…" autoComplete="off"
               />
@@ -189,22 +186,29 @@ export default function App() {
         {/* Keep the widget MOUNTED for retryable outcomes — its result screen
             owns "Try again" (+ manual ID upload after 3 attempts). Unmounting
             on every onComplete was hiding that UI entirely. */}
-        {session && (!result || RETRYABLE_STATUSES.includes(result.status)) && (
+        {session && (!result || canRetry) && (
           <Card>
             <div style={{ fontSize: 12, color: "#6B7280", marginBottom: 8 }}>
               Session <code>{session.sessionId}</code>
               <br />
               Widget API is using <code>{API_BASE}</code>.
             </div>
-            <VerifyPassProvider publicKey={PUBLIC_KEY} faceModelUrl={import.meta.env.VITE_VP_FACE_MODEL_URL || DEFAULT_FACE_MODEL_URL}>
+            <VerifyPassProvider publicKey={PUBLIC_KEY} faceModelUrl={FACE_MODEL_URL}>
               <VerificationWidget
                 sessionId={session.sessionId}
                 sdkToken={session.sdkToken}
                 mobileHandoff={mobileHandoff ? true : undefined}
-                onComplete={(r) => setResult(r)}
+                onComplete={(r, meta) => {
+                  setResult(r);
+                  setCanRetry(meta?.canRetry ?? RETRYABLE_STATUSES.includes(r.status));
+                }}
                 onStepChange={(s) => {
-                  // a retry reset the flow — clear the stale result
-                  if (s !== "complete" && s !== "processing") setResult(null);
+                  // a retry reset the flow — clear the stale result, details, and error
+                  if (s !== "complete" && s !== "processing") {
+                    setResult(null);
+                    setDetails(null);
+                    setError(null);
+                  }
                 }}
                 onError={(err) => setError(err.message || String(err))}
               />
@@ -215,7 +219,7 @@ export default function App() {
           </Card>
         )}
 
-        {result && !RETRYABLE_STATUSES.includes(result.status) && (
+        {result && !canRetry && (
           <Card>
             <h2 style={{ marginTop: 0 }}>
               {result.status === "approved" ? "✅ Approved"
@@ -249,7 +253,7 @@ function DevDetails({ details }) {
       <div><b>status</b> {details.status} · <b>risk</b> {details.riskLevel || "-"} · <b>liveness</b> {details.liveness ? `${details.liveness.status} (${details.liveness.score ?? "-"})` : "n/a"}
         {details.faceMatch ? <> · <b>faceMatch</b> {details.faceMatch.status} ({details.faceMatch.similarityScore ?? "-"})</> : null}</div>
       <div style={{ marginTop: 4 }}><b>reasonCodes</b> {codes.length ? codes.join(", ") : "(none)"}</div>
-      {details.liveness && (
+      {details.liveness && details.liveness.score != null && (
         <div style={{ marginTop: 4, color: details.liveness.score > 0.6 && (details.liveness.selfieScore ?? details.liveness.score) > 0.6 ? "#34D399" : "#FBBF24" }}>
           <b>60% rule:</b> {details.liveness.score > 0.6 && (details.liveness.selfieScore ?? details.liveness.score) > 0.6
             ? "Auto-approved (>60% confidence & frontal score)"
@@ -304,5 +308,5 @@ function CameraStatus({ state }) {
   );
 }
 
-const input = { width: "100%", padding: 10, borderRadius: 8, border: "1px solid #D1D5DB", fontSize: 14, boxSizing: "border-box" };
+const input = { width: "100%", padding: 10, borderRadius: 8, border: "1px solid #D1D5DB", fontSize: 16, boxSizing: "border-box" };
 const linkBtn = { display: "block", margin: "12px auto 0", background: "none", border: 0, color: "#6B7280", cursor: "pointer", fontSize: 13 };

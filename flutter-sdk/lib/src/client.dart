@@ -50,13 +50,61 @@ String? parseSdkTokenOrigin(String token) {
 
 class VerifyPassClient {
   final String apiBaseUrl;
+  final Duration requestTimeout;
+  final http.Client _http;
+  final bool _ownsClient;
 
-  VerifyPassClient({String? apiBaseUrl})
-      : apiBaseUrl = (apiBaseUrl != null && apiBaseUrl.isNotEmpty)
+  VerifyPassClient({
+    String? apiBaseUrl,
+    this.requestTimeout = const Duration(seconds: 30),
+    http.Client? httpClient,
+  })  : apiBaseUrl = (apiBaseUrl != null && apiBaseUrl.isNotEmpty)
             ? apiBaseUrl
-            : defaultLiveApiBase;
+            : defaultLiveApiBase,
+        _http = httpClient ?? http.Client(),
+        _ownsClient = httpClient == null;
+
+  void close() {
+    if (_ownsClient) _http.close();
+  }
 
   String get _normalizedApiBase => apiBaseUrl.replaceAll(RegExp(r'/+$'), '');
+
+  String _resolveApiBase(String? sdkToken) {
+    if (sdkToken != null && sdkToken.isNotEmpty) {
+      final tokenBase = parseSdkTokenOrigin(sdkToken);
+      if (tokenBase != null) return tokenBase;
+    }
+    return _normalizedApiBase;
+  }
+
+  Map<String, dynamic> _parseJsonObject(http.Response response, String errMsg) {
+    try {
+      final decoded = jsonDecode(response.body);
+      if (decoded is Map<String, dynamic>) return decoded;
+    } catch (_) {}
+    throw VerifyPassException(errMsg, statusCode: response.statusCode);
+  }
+
+  void _throwIfError(
+    http.Response response,
+    Map<String, dynamic> body,
+    String fallbackMessage,
+  ) {
+    if (response.statusCode < 400 && body['error'] == null) return;
+    final rawError = body['error'];
+    if (rawError is Map<String, dynamic>) {
+      throw VerifyPassException(
+        rawError['message']?.toString() ?? fallbackMessage,
+        code: rawError['code']?.toString(),
+        statusCode: response.statusCode,
+      );
+    }
+    throw VerifyPassException(
+      rawError?.toString() ?? body['message']?.toString() ?? fallbackMessage,
+      statusCode: response.statusCode,
+    );
+  }
 
   /// Creates a verification session on the VerifyPass API.
   ///
@@ -69,38 +117,23 @@ class VerifyPassClient {
     VerificationType verificationType = VerificationType.idAndFace,
   }) async {
     final uri = Uri.parse('$_normalizedApiBase/v1/verification-sessions');
-    final response = await http.post(
-      uri,
-      headers: {
-        'Authorization': 'Bearer ${secretKey.trim()}',
-        'Content-Type': 'application/json',
-      },
-      body: jsonEncode({
-        if (customerReference != null && customerReference.isNotEmpty)
-          'customerReference': customerReference,
-        'verificationType': verificationType.value,
-      }),
-    );
+    final response = await _http
+        .post(
+          uri,
+          headers: {
+            'Authorization': 'Bearer ${secretKey.trim()}',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({
+            if (customerReference != null && customerReference.isNotEmpty)
+              'customerReference': customerReference,
+            'verificationType': verificationType.value,
+          }),
+        )
+        .timeout(requestTimeout);
 
-    final Map<String, dynamic> body;
-    try {
-      body = jsonDecode(response.body) as Map<String, dynamic>;
-    } catch (_) {
-      throw VerifyPassException(
-        'Server returned invalid JSON response',
-        statusCode: response.statusCode,
-      );
-    }
-
-    if (response.statusCode >= 400 || body['error'] != null) {
-      final error = body['error'] as Map<String, dynamic>?;
-      throw VerifyPassException(
-        error?['message']?.toString() ?? 'Session creation failed',
-        code: error?['code']?.toString(),
-        statusCode: response.statusCode,
-      );
-    }
-
+    final body = _parseJsonObject(response, 'Server returned invalid JSON response');
+    _throwIfError(response, body, 'Session creation failed');
     return VerificationSession.fromJson(body);
   }
 
@@ -111,38 +144,22 @@ class VerifyPassClient {
     required String sessionId,
     required String sdkToken,
   }) async {
-    final tokenBase = parseSdkTokenOrigin(sdkToken);
-    final effectiveBase = tokenBase ?? _normalizedApiBase;
+    final effectiveBase = _resolveApiBase(sdkToken);
     final uri = Uri.parse(
       '$effectiveBase/v1/verification-sessions/$sessionId/status',
     );
-    final response = await http.get(
-      uri,
-      headers: {
-        'X-VP-SDK-Token': sdkToken,
-        'Accept': 'application/json',
-      },
-    );
+    final response = await _http
+        .get(
+          uri,
+          headers: {
+            'X-VP-SDK-Token': sdkToken,
+            'Accept': 'application/json',
+          },
+        )
+        .timeout(requestTimeout);
 
-    final Map<String, dynamic> body;
-    try {
-      body = jsonDecode(response.body) as Map<String, dynamic>;
-    } catch (_) {
-      throw VerifyPassException(
-        'Failed to parse status response',
-        statusCode: response.statusCode,
-      );
-    }
-
-    if (response.statusCode >= 400 || body['error'] != null) {
-      final error = body['error'] as Map<String, dynamic>?;
-      throw VerifyPassException(
-        error?['message']?.toString() ?? 'Failed to get session status',
-        code: error?['code']?.toString(),
-        statusCode: response.statusCode,
-      );
-    }
-
+    final body = _parseJsonObject(response, 'Failed to parse status response');
+    _throwIfError(response, body, 'Failed to get session status');
     return VerificationStatusResponse.fromJson(body);
   }
 
@@ -171,33 +188,18 @@ class VerifyPassClient {
   }) async {
     final uri =
         Uri.parse('$_normalizedApiBase/v1/verification-sessions/$sessionId/result');
-    final response = await http.get(
-      uri,
-      headers: {
-        'Authorization': 'Bearer ${secretKey.trim()}',
-        'Accept': 'application/json',
-      },
-    );
+    final response = await _http
+        .get(
+          uri,
+          headers: {
+            'Authorization': 'Bearer ${secretKey.trim()}',
+            'Accept': 'application/json',
+          },
+        )
+        .timeout(requestTimeout);
 
-    final Map<String, dynamic> body;
-    try {
-      body = jsonDecode(response.body) as Map<String, dynamic>;
-    } catch (_) {
-      throw VerifyPassException(
-        'Failed to parse verification result',
-        statusCode: response.statusCode,
-      );
-    }
-
-    if (response.statusCode >= 400 || body['error'] != null) {
-      final error = body['error'] as Map<String, dynamic>?;
-      throw VerifyPassException(
-        error?['message']?.toString() ?? 'Failed to fetch result',
-        code: error?['code']?.toString(),
-        statusCode: response.statusCode,
-      );
-    }
-
+    final body = _parseJsonObject(response, 'Failed to parse verification result');
+    _throwIfError(response, body, 'Failed to fetch result');
     return VerificationResult.fromJson(body);
   }
 
@@ -207,50 +209,39 @@ class VerifyPassClient {
     required String sessionId,
     required String sdkToken,
     String? attemptId,
+    String verificationType = 'ID_AND_FACE',
+    String? hostedBaseUrl,
   }) async {
     // Result-only screens may not have retained the creation response. Fetch
     // the current attempt before retrying; never weaken the server's fence.
     final currentAttemptId = attemptId ??
         (await getStatus(sessionId: sessionId, sdkToken: sdkToken)).attemptId;
+    final effectiveBase = _resolveApiBase(sdkToken);
     final uri =
-        Uri.parse('$_normalizedApiBase/v1/verification-sessions/$sessionId/retry');
-    final response = await http.post(
-      uri,
-      headers: {
-        'X-VP-SDK-Token': sdkToken,
-        'Content-Type': 'application/json',
-      },
-      body: jsonEncode({
-        'sdkToken': sdkToken,
-        'attemptId': ?currentAttemptId,
-      }),
-    );
+        Uri.parse('$effectiveBase/v1/verification-sessions/$sessionId/retry');
+    final response = await _http
+        .post(
+          uri,
+          headers: {
+            'X-VP-SDK-Token': sdkToken,
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({
+            'sdkToken': sdkToken,
+            if (currentAttemptId != null) 'attemptId': currentAttemptId,
+          }),
+        )
+        .timeout(requestTimeout);
 
-    final Map<String, dynamic> body;
-    try {
-      body = jsonDecode(response.body) as Map<String, dynamic>;
-    } catch (_) {
-      throw VerifyPassException(
-        'Server returned invalid JSON response',
-        statusCode: response.statusCode,
-      );
-    }
-
-    if (response.statusCode >= 400 || body['error'] != null) {
-      final error = body['error'] as Map<String, dynamic>?;
-      throw VerifyPassException(
-        error?['message']?.toString() ?? 'Retry failed',
-        code: error?['code']?.toString(),
-        statusCode: response.statusCode,
-      );
-    }
+    final body = _parseJsonObject(response, 'Server returned invalid JSON response');
+    _throwIfError(response, body, 'Retry failed');
 
     return VerificationSession(
       sessionId: sessionId,
       sdkToken: sdkToken,
       attemptId: body['attemptId'] as String?,
-      verificationType: 'ID_AND_FACE',
-      hostedBaseUrl: null,
+      verificationType: verificationType,
+      hostedBaseUrl: hostedBaseUrl,
       raw: body,
     );
   }

@@ -85,6 +85,13 @@ function createVerificationController(opts = {}) {
   const setHandoff = (patch) => set({ handoff: { ...state.handoff, ...patch } });
   const aborted = () => !client || client.controller.signal.aborted;
 
+  function emitComplete(result) {
+    if (!callbacks.onComplete) return;
+    const exhausted = !!state.attempts?.exhausted;
+    const canRetry = ["rejected", "manual_review", "failed"].includes(result?.status) && !exhausted;
+    callbacks.onComplete(result, { allowedDomains: state.allowedDomains, attemptsExhausted: exhausted, canRetry });
+  }
+
   function emitError(err, code, errOpts) {
     if (callbacks.onError) callbacks.onError(toVerifyPassError(err, code, errOpts));
   }
@@ -133,7 +140,8 @@ function createVerificationController(opts = {}) {
       verificationType,
       actions: Array.isArray(c.livenessActions) ? c.livenessActions : [],
       actionIndex: 0,
-      hostedBaseUrl: c.hostedBaseUrl || null
+      hostedBaseUrl: c.hostedBaseUrl || null,
+      allowedDomains: Array.isArray(c.allowedDomains) ? c.allowedDomains : []
     };
     // Rehydrate attempt state — a refresh mid-retry must not reset the
     // counter or hide the manual-upload option the server already granted.
@@ -197,7 +205,7 @@ function createVerificationController(opts = {}) {
       if (!live()) return;
       setHandoff({ polling: false });
       f.finish(result);
-      if (callbacks.onComplete) callbacks.onComplete(result);
+      emitComplete(result);
     }).catch((err) => {
       if (!live()) return;
       setHandoff({ polling: false });
@@ -285,7 +293,7 @@ function createVerificationController(opts = {}) {
     const result = await client.waitForResult({ timeoutMs: RESULT_TIMEOUT_MS });
     if (aborted()) return false;
     flow.finish(result);
-    if (callbacks.onComplete) callbacks.onComplete(result);
+    emitComplete(result);
     return undefined;
   }
 
