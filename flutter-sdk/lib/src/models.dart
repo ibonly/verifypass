@@ -67,6 +67,24 @@ class VerificationSession {
     );
   }
 
+  /// Convenience constructor when the host app only has [sessionId] and [sdkToken]
+  /// from its backend.
+  factory VerificationSession.credentials({
+    required String sessionId,
+    required String sdkToken,
+    String? hostedBaseUrl,
+    String? attemptId,
+  }) {
+    return VerificationSession(
+      sessionId: sessionId,
+      sdkToken: sdkToken,
+      attemptId: attemptId,
+      verificationType: 'ID_AND_FACE',
+      hostedBaseUrl: hostedBaseUrl,
+      raw: const <String, dynamic>{},
+    );
+  }
+
   /// Builds the URL for the hosted verification flow.
   ///
   /// [baseUrl] is optional (pass null to use the session's [hostedBaseUrl],
@@ -74,13 +92,19 @@ class VerificationSession {
   /// [redirectUrl] can be a custom app URI like `verifypass://complete`
   /// or a standard HTTPS callback.
   Uri buildHostedUri(String? baseUrl, {String? redirectUrl}) {
+    String? derivedFromHostedUrl;
+    if (hostedUrl != null && hostedUrl!.isNotEmpty) {
+      try {
+        final parsed = Uri.parse(hostedUrl!);
+        if (parsed.hasScheme && parsed.host.isNotEmpty) {
+          derivedFromHostedUrl =
+              '${parsed.scheme}://${parsed.host}${parsed.hasPort ? ':${parsed.port}' : ''}';
+        }
+      } catch (_) {}
+    }
     final effectiveBase = (baseUrl != null && baseUrl.isNotEmpty)
         ? baseUrl
-        : (hostedBaseUrl ??
-            (hostedUrl != null && hostedUrl!.isNotEmpty
-                ? '${Uri.parse(hostedUrl!).scheme}://${Uri.parse(hostedUrl!).host}${Uri.parse(hostedUrl!).hasPort ? ':${Uri.parse(hostedUrl!).port}' : ''}'
-                : null) ??
-            'https://verify.verix.ifsolutions.org');
+        : (hostedBaseUrl ?? derivedFromHostedUrl ?? defaultLiveHostedBase);
     final cleanBase = effectiveBase.replaceAll(RegExp(r'/+$'), '');
     final uri = Uri.parse('$cleanBase/session/$sessionId');
     final fragParams = <String, String>{
@@ -94,13 +118,54 @@ class VerificationSession {
   }
 }
 
-class VerificationStatusResponse {
+mixin VerificationOutcomeScoring {
+  double? get livenessScore;
+  double? get selfieScore;
+  String get status;
+
+  /// Returns true if both liveness confidence and selfie frontal score
+  /// are strictly greater than 60% (0.60).
+  bool get meetsSixtyPercentThreshold =>
+      livenessScore != null &&
+      selfieScore != null &&
+      livenessScore! > 0.60 &&
+      selfieScore! > 0.60;
+
+  /// Returns true if either liveness confidence or selfie frontal score
+  /// is less than or equal to 60% (0.60), prompting a retry.
+  bool get shouldPromptRetry =>
+      (livenessScore != null && livenessScore! <= 0.60) ||
+      (selfieScore != null && selfieScore! <= 0.60);
+
+  /// Effective status considering the 60% auto-approval threshold rule:
+  /// - Automatically 'approved' if both liveness confidence and selfie frontal score > 60%
+  ///   and the backend did not already record a hard rejection/failure/expiry.
+  /// - 'retry_required' if either score <= 60%.
+  /// - Otherwise falls back to raw backend status.
+  String get effectiveStatus {
+    if (['rejected', 'failed', 'expired', 'cancelled'].contains(status)) {
+      return status;
+    }
+    if (meetsSixtyPercentThreshold) return 'approved';
+    if (shouldPromptRetry) return 'retry_required';
+    return status;
+  }
+
+  bool get isApproved => effectiveStatus == 'approved';
+  bool get isManualReview => effectiveStatus == 'manual_review';
+  bool get isRejected => effectiveStatus == 'rejected';
+}
+
+class VerificationStatusResponse with VerificationOutcomeScoring {
   final bool success;
   final String sessionId;
+  @override
   final String status;
   final String? attemptId;
   final List<String> reasonCodes;
+  @override
   final double? livenessScore;
+  @override
   final double? selfieScore;
   final Map<String, dynamic> raw;
 
@@ -143,41 +208,15 @@ class VerificationStatusResponse {
       ['approved', 'rejected', 'manual_review', 'failed', 'expired', 'cancelled']
           .contains(status);
 
-  /// Returns true if both liveness confidence and selfie frontal score
-  /// are strictly greater than 60% (0.60).
-  bool get meetsSixtyPercentThreshold =>
-      livenessScore != null &&
-      selfieScore != null &&
-      livenessScore! > 0.60 &&
-      selfieScore! > 0.60;
-
-  /// Returns true if either liveness confidence or selfie frontal score
-  /// is less than or equal to 60% (0.60), prompting a retry.
-  bool get shouldPromptRetry =>
-      (livenessScore != null && livenessScore! <= 0.60) ||
-      (selfieScore != null && selfieScore! <= 0.60);
-
-  /// Effective status considering the 60% auto-approval threshold rule:
-  /// - Automatically 'approved' if both liveness confidence and selfie frontal score > 60%.
-  /// - 'retry_required' if either score <= 60%.
-  /// - Otherwise falls back to raw backend status.
-  String get effectiveStatus {
-    if (meetsSixtyPercentThreshold) return 'approved';
-    if (shouldPromptRetry) return 'retry_required';
-    return status;
-  }
-
-  bool get isApproved => effectiveStatus == 'approved';
-  bool get isManualReview => effectiveStatus == 'manual_review';
-  bool get isRejected => effectiveStatus == 'rejected';
   bool get isFailed => status == 'failed';
   bool get isExpired => status == 'expired';
   bool get isCancelled => status == 'cancelled';
 }
 
-class VerificationResult {
+class VerificationResult with VerificationOutcomeScoring {
   final bool success;
   final String sessionId;
+  @override
   final String status;
   final String? riskLevel;
   final String? customerReference;
@@ -191,7 +230,9 @@ class VerificationResult {
 
   // Liveness details
   final String? livenessStatus;
+  @override
   final double? livenessScore;
+  @override
   final double? selfieScore;
   final String? activeStatus;
   final Map<String, dynamic>? livenessChallenge;
@@ -260,32 +301,4 @@ class VerificationResult {
       raw: json,
     );
   }
-
-  /// Returns true if both liveness confidence and selfie frontal score
-  /// are strictly greater than 60% (0.60).
-  bool get meetsSixtyPercentThreshold =>
-      livenessScore != null &&
-      selfieScore != null &&
-      livenessScore! > 0.60 &&
-      selfieScore! > 0.60;
-
-  /// Returns true if either liveness confidence or selfie frontal score
-  /// is less than or equal to 60% (0.60), prompting a retry.
-  bool get shouldPromptRetry =>
-      (livenessScore != null && livenessScore! <= 0.60) ||
-      (selfieScore != null && selfieScore! <= 0.60);
-
-  /// Effective status considering the 60% auto-approval threshold rule:
-  /// - Automatically 'approved' if both liveness confidence and selfie frontal score > 60%.
-  /// - 'retry_required' if either score <= 60%.
-  /// - Otherwise falls back to raw backend status.
-  String get effectiveStatus {
-    if (meetsSixtyPercentThreshold) return 'approved';
-    if (shouldPromptRetry) return 'retry_required';
-    return status;
-  }
-
-  bool get isApproved => effectiveStatus == 'approved';
-  bool get isManualReview => effectiveStatus == 'manual_review';
-  bool get isRejected => effectiveStatus == 'rejected';
 }

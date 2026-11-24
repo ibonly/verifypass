@@ -107,7 +107,7 @@ class _ResultScreenState extends State<ResultScreen> {
       final hostedBase = widget.hostedBaseUrl ??
           (widget.apiBaseUrl.contains(':3000')
               ? widget.apiBaseUrl.replaceAll(':3000', ':5174')
-              : widget.apiBaseUrl);
+              : defaultLiveHostedBase);
 
       final outcome = await VerifyPass.startVerification(
         context,
@@ -153,17 +153,17 @@ class _ResultScreenState extends State<ResultScreen> {
     final livenessScore = _result?.livenessScore ?? _statusResponse?.livenessScore;
     final selfieScore = _result?.selfieScore ?? _statusResponse?.selfieScore;
 
-    final bool meetsSixtyPercent = livenessScore != null &&
-        selfieScore != null &&
-        livenessScore > 0.60 &&
-        selfieScore > 0.60;
+    final bool meetsSixtyPercent = _result?.meetsSixtyPercentThreshold ??
+        _statusResponse?.meetsSixtyPercentThreshold ??
+        false;
 
-    final bool isScoreBelowSixty = (livenessScore != null && livenessScore <= 0.60) ||
-        (selfieScore != null && selfieScore <= 0.60);
+    final bool isScoreBelowSixty = _result?.shouldPromptRetry ??
+        _statusResponse?.shouldPromptRetry ??
+        false;
 
-    final String displayStatus = meetsSixtyPercent
-        ? 'approved'
-        : (isScoreBelowSixty ? 'retry_required' : rawStatus);
+    final String displayStatus = _result?.effectiveStatus ??
+        _statusResponse?.effectiveStatus ??
+        rawStatus;
 
     final bool isApproved = displayStatus == 'approved';
 

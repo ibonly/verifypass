@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api } from "./api";
+import { api, setAuth } from "./api";
 import "./onboarding.css";
 
 const STEPS = [
@@ -73,7 +73,7 @@ export default function Onboarding({ onExit, onSelectSession }) {
         </form>}
         {current === "security" && <>
           <p>Use an authenticator app to add a second sign-in check for your account.</p>
-          {data.mfaEnrolled ? <div className="vp-success">Two-factor authentication is enabled for your account.</div> : mfa ? <form onSubmit={e => { e.preventDefault(); run(async () => { await api("/v1/auth/mfa/confirm", { method: "POST", body: { secret: mfa.secret, totp: code } }); setMfa(null); setCode(""); await reload(); setNotice("Two-factor authentication enabled."); }); }}>
+          {data.mfaEnrolled ? <div className="vp-success">Two-factor authentication is enabled for your account.</div> : mfa ? <form onSubmit={e => { e.preventDefault(); run(async () => { const r = await api("/v1/auth/mfa/confirm", { method: "POST", body: { secret: mfa.secret, totp: code } }); setAuth(r.token); setMfa(null); setCode(""); await reload(); setNotice("Two-factor authentication enabled."); }); }}>
             <p>Add a new time-based account in your authenticator and enter this setup key.</p><label>Authenticator setup key<input readOnly value={mfa.secret} /></label><button type="button" className="vp-secondary" onClick={() => copy(mfa.secret)}>Copy setup key</button>
             <label>Six-digit code<input required inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={code} onChange={e => setCode(e.target.value)} /></label><button className="vp-primary">Verify & enable</button>
           </form> : <button className="vp-primary" onClick={() => run(async () => setMfa(await api("/v1/auth/mfa/enroll", { method: "POST", body: {} })))}>Set up authenticator</button>}

@@ -123,8 +123,9 @@ test("MFA setup handles invalid secrets and completion reads actual enrollment",
   await call("post", "/v1/auth/mfa/confirm").send({ secret: { unexpected: true }, totp: "123456" }).expect(400);
   const enrolled = await call("post", "/v1/auth/mfa/enroll").send({}).expect(200);
   const { totpAt } = require("../src/services/totp");
-  await call("post", "/v1/auth/mfa/confirm").send({ secret: enrolled.body.secret, totp: totpAt(enrolled.body.secret, Math.floor(Date.now() / 1000)) }).expect(200);
-  const status = await call("get", "/v1/onboarding").expect(200);
+  const confirmed = await call("post", "/v1/auth/mfa/confirm").send({ secret: enrolled.body.secret, totp: totpAt(enrolled.body.secret, Math.floor(Date.now() / 1000)) }).expect(200);
+  await call("get", "/v1/onboarding").expect(403);
+  const status = await request(app).get("/v1/onboarding").set("Authorization", `Bearer ${confirmed.body.token}`).expect(200);
   assert.equal(status.body.steps.security, true); assert.equal(status.body.mfaEnrolled, true);
 });
 
@@ -139,7 +140,7 @@ test("admin config → queued test → real HTTP receiver → visible signed del
     let body = "";
     for await (const chunk of req) body += chunk;
     received.push({ body, headers: req.headers, method: req.method });
-    res.writeHead(204); res.end();
+    res.writeHead(200); res.end();
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -170,7 +171,7 @@ test("admin config → queued test → real HTTP receiver → visible signed del
   const log = await call("get", "/v1/dashboard/webhook-deliveries").expect(200);
   assert.deepEqual(log.body.tenant, { tenantUid: tenant.tenantUid, companyName: tenant.companyName });
   assert.equal(log.body.deliveries[0].status, "delivered");
-  assert.equal(log.body.deliveries[0].lastStatusCode, 204);
+  assert.equal(log.body.deliveries[0].lastStatusCode, 200);
   assert.equal(JSON.stringify(log.body).includes(config.body.secret), false);
   await call("post", `/v1/onboarding/webhooks/${queued.body.eventId}/retry`).send({}).expect(400);
 

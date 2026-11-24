@@ -31,4 +31,18 @@ function requestSummary(body) {
   };
 }
 
-module.exports = { logWebhook, requestSummary };
+function formatWebhookDelivery(d) {
+  return {
+    eventId: d.eventUid,
+    event: d.event,
+    status: d.status,
+    attempts: d.attempts,
+    lastStatusCode: d.lastStatusCode,
+    lastError: d.lastError,
+    nextAttemptAt: d.nextAttemptAt ? new Date(d.nextAttemptAt).toISOString() : null,
+    deliveredAt: d.deliveredAt ? new Date(d.deliveredAt).toISOString() : null,
+    createdAt: d.createdAt ? new Date(d.createdAt).toISOString() : null
+  };
+}
+
+module.exports = { logWebhook, requestSummary, formatWebhookDelivery };

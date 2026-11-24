@@ -37,9 +37,9 @@ function laplacianVariance(imageData) {
   return sumSq / n - mean * mean;
 }
 
-/** Mean brightness 0–255. */
+/** Mean brightness 0–255 (accepts ImageData or precomputed grayscale Float32Array). */
 function meanBrightness(imageData) {
-  const gray = toGrayscale(imageData);
+  const gray = imageData instanceof Float32Array ? imageData : toGrayscale(imageData);
   let sum = 0;
   for (let i = 0; i < gray.length; i++) sum += gray[i];
   return gray.length ? sum / gray.length : 0;

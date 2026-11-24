@@ -71,11 +71,11 @@ Parameters:
     Description: Version label for the deployed biometric models (scores are only comparable within one version)
   ChallengeRequireIdentity:
     Type: String
-    Default: "false"
+    Default: "true"
     Description: Whether active challenge requires frontal identity verification against the selfie (false = waived for non-frontal actions)
   LivenessEnforceReleaseValidation:
     Type: String
-    Default: "false"
+    Default: "true"
     Description: Whether to enforce release validation receipts in production
 
 Globals:

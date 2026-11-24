@@ -90,6 +90,7 @@ function createFacepluginProvider({
       res = await doFetch(`${baseUrl}${path}`, {
         method: "POST",
         body: makeForm(files, fields),
+        redirect: "error",
         signal: AbortSignal.timeout(timeoutMs)
       });
     } catch (err) {

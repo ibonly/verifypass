@@ -6,7 +6,7 @@
 // pre-checks quality, but the server never trusts the client.
 
 const { AppError, CHALLENGE_ACTIONS, computeFrameBinding } = require("@verifypass/shared");
-const { verifySessionSdkToken, validateAttempt } = require("./sessionService");
+const { validateAttempt } = require("./sessionService");
 
 // sharp is required in production; in dev environments where its native
 // binary can't load (cross-OS node_modules, CI sandboxes) we fall back to a
@@ -126,10 +126,6 @@ async function handleUpload({ scopedDb, tenantUid, sessionUid, sdkToken, kind, s
   const session = await scopedDb.sessions.findByUid(sessionUid);
   if (!session) throw new AppError("SESSION_NOT_FOUND");
   validateAttempt(session, sdkToken, attemptId);
-
-  if (!verifySessionSdkToken(session, sdkToken)) {
-    throw new AppError("INVALID_API_KEY", "invalid SDK token for this session");
-  }
 
   if (session.expiresAt && new Date(session.expiresAt) < new Date()) {
     await scopedDb.sessions.update(sessionUid, { status: "expired" });

@@ -3,7 +3,7 @@
 // The CDN entry embeds the same hosted workflow as the React integration.
 // Consent, camera capture, document backs, challenge guidance and retries
 // therefore share one implementation.
-const { VerifyPassClient, createFlow, pollingTimeoutForExpiry, toVerifyPassError } = require("@verifypass/sdk-core");
+const { VerifyPassClient, pollingTimeoutForExpiry, toVerifyPassError } = require("@verifypass/sdk-core");
 const instances = new WeakMap();
 
 // Copy for the mobile-handoff step. The desktop shows a QR and waits;
@@ -114,7 +114,6 @@ function init(opts = {}) {
 // outcome. `settleReady` resolves `instance.ready` on success; a
 // recoverable poll failure leaves it pending and surfaces a Retry button.
 async function runMobileHandoff(client, root, challenge, onComplete, onError, onTelemetry, settleReady, isDisposed) {
-  const flow = createFlow(challenge.verificationType || "ID_AND_FACE", { mobileHandoff: true });
   // The short-lived, one-time handoff credential stays out of HTTP requests,
   // but the QR remains sensitive until the phone claims it.
   const mobileUrl = client.getHostedUrl();
@@ -226,13 +225,11 @@ async function runMobileHandoff(client, root, challenge, onComplete, onError, on
     }).then((result) => {
       if (isDisposed()) return;
       stopPoll();
-      flow.finish(result);
       if (!completed) { completed = true; onComplete?.(result); }
       settleReady();
     }).catch((err) => {
       if (isDisposed()) return;
       stopPoll();
-      flow.fail(err);
       status.textContent = err.message || MOBILE_COPY.failed;
       retry.hidden = false;
       onError?.(toVerifyPassError(err));
@@ -242,13 +239,6 @@ async function runMobileHandoff(client, root, challenge, onComplete, onError, on
 
   retry.addEventListener("click", () => {
     if (isDisposed()) return;
-    // Clear the error and re-arm polling — the same pattern the
-    // React widget uses for its mobile-step Retry. Deliberately
-    // NO server call: a transient poll failure must not burn a
-    // retry attempt (retrySession is capped + audit-logged, and
-    // is reserved for a rejected/failed OUTCOME, which the
-    // consumer re-inits for via onComplete).
-    flow.retry();
     startPoll();
   });
 

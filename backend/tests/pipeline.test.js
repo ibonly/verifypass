@@ -709,7 +709,7 @@ test("60-percent boundary: pipeline decision → outbox → signed selfie webhoo
     let body = "";
     for await (const chunk of req) body += chunk;
     received.push({ body, headers: req.headers });
-    res.writeHead(204); res.end();
+    res.writeHead(200); res.end();
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -795,7 +795,7 @@ test("60-percent boundary: pipeline decision → outbox → signed selfie webhoo
     } else {
       assert.deepEqual(Buffer.from(body.selfieBase64, "base64"), plain);
     }
-    assert.equal(db.webhookDelivery.rows[0].lastStatusCode, 204);
+    assert.equal(db.webhookDelivery.rows[0].lastStatusCode, 200);
     await sendWebhook(hooks[0].payload, deps);
     assert.equal(received.length, before + 1, "outbox redelivery must not POST the same event twice");
   });

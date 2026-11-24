@@ -127,10 +127,22 @@ export default function App() {
 function useData(path, deps = []) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
+  const reqIdRef = useRef(0);
   const reload = useCallback(() => {
-    api(path).then(setData).catch(setError);
+    const id = ++reqIdRef.current;
+    api(path).then((d) => {
+      if (id === reqIdRef.current) {
+        setData(d);
+        setError(null);
+      }
+    }).catch((err) => {
+      if (id === reqIdRef.current) setError(err);
+    });
+    return () => { if (id === reqIdRef.current) reqIdRef.current++; };
   }, [path]);
-  useEffect(reload, deps.concat(reload));
+  useEffect(() => {
+    return reload();
+  }, deps.concat(reload));
   return { data, error, reload };
 }
 
@@ -936,6 +948,7 @@ function Settings() {
     try {
       await api("/v1/settings/thresholds", { method: "PUT", body });
       setMsg("Thresholds saved — applied to the next verification.");
+      setDraft(null);
       reload();
     } catch (e) {
       setMsg(`Error: ${e.message}`);
@@ -947,6 +960,7 @@ function Settings() {
     try {
       await api("/v1/settings/retention", { method: "PUT", body: retentionDraft });
       setMsg("Retention policy saved.");
+      setRetentionDraft(null);
       reload();
     } catch (e) {
       setMsg(`Error: ${e.message}`);
@@ -1166,14 +1180,6 @@ function CreateKeyForm({ onCreated }) {
 
 // ─── Webhooks ─────────────────────────────────────────────────────────────────
 
-const DELIVERY_STATUS_COLORS = {
-  delivered: STATUS_COLORS.approved,
-  pending: STATUS_COLORS.manual_review,
-  failed: STATUS_COLORS.rejected,
-  exhausted: STATUS_COLORS.rejected,
-  skipped: "#6B7280"
-};
-
 function Webhooks({ canManage }) {
   const { data, error, reload } = useData("/v1/dashboard/webhook-deliveries");
   useEffect(() => {
@@ -1336,11 +1342,7 @@ function Webhooks({ canManage }) {
                     <code style={{ color: "#9CA3AF", fontSize: 10 }}>{d.eventId}</code>
                   </td>
                   <td style={{ padding: "8px 8px" }}>
-                    <span style={{
-                      background: (DELIVERY_STATUS_COLORS[d.status] || "#6B7280") + "22",
-                      color: DELIVERY_STATUS_COLORS[d.status] || "#6B7280",
-                      padding: "2px 7px", borderRadius: 999, fontSize: 11, fontWeight: 600
-                    }}>{d.status}</span>
+                    <StatusPill status={d.status} />
                   </td>
                   <td style={{ padding: "8px 8px", textAlign: "center" }}>{d.attempts}</td>
                   <td style={{ padding: "8px 8px" }}>

@@ -7,20 +7,16 @@ const { Router } = require("express");
 const fs = require("fs/promises");
 const { AppError } = require("@verifypass/shared");
 const { requireUser } = require("../middleware/userAuth");
-const { tenantScope } = require("../middleware/tenantScope");
+const { tenantScope, requireTenant } = require("../middleware/tenantScope");
 const { readEvidence, signEvidenceAccess, verifyEvidenceAccess } = require("../services/evidenceStore");
 const { resolveEvidenceKey } = require("@verifypass/shared");
 const config = require("../config");
-const { effectiveSessionStatus, isSessionOverdue } = require("../services/sessionExpiry");
+const { effectiveSessionStatus, isSessionOverdue, SESSION_STATUSES } = require("../services/sessionExpiry");
+const { formatWebhookDelivery } = require("../services/webhookLog");
 const { getDb } = require("../lib/db");
 
 const router = Router();
 const anyUser = requireUser(); // all roles may view
-
-function requireTenant(req, _res, next) {
-  if (!req.tenant) return next(new AppError("VALIDATION_ERROR", "X-Tenant-Id header required for super admin"));
-  next();
-}
 
 async function selectedResult(session, resultId) {
   if (typeof resultId !== "string" || !/^[a-f0-9]{24}$/i.test(resultId)) throw new AppError("VALIDATION_ERROR", "Invalid result ID");
@@ -69,7 +65,14 @@ router.get("/stats", anyUser, requireTenant, tenantScope, async (req, res, next)
 router.get("/sessions", anyUser, requireTenant, tenantScope, async (req, res, next) => {
   try {
     const now = new Date();
-    const status = req.query.status;
+    const rawStatus = req.query.status;
+    let status;
+    if (rawStatus !== undefined && rawStatus !== "") {
+      if (typeof rawStatus !== "string" || !SESSION_STATUSES.has(rawStatus)) {
+        throw new AppError("VALIDATION_ERROR", "Invalid session status filter");
+      }
+      status = rawStatus;
+    }
     let where = status ? { status } : {};
     if (status === "expired") where = { OR: [{ status: "expired" }, { status: { in: ["created", "started"] }, expiresAt: { lte: now } }] };
     if (["created", "started"].includes(status)) where = { status, OR: [{ expiresAt: { gt: now } }, { expiresAt: null }, { expiresAt: { isSet: false } }] };
@@ -213,17 +216,7 @@ router.get("/webhook-deliveries", anyUser, requireTenant, tenantScope, async (re
       success: true,
       tenant: { tenantUid: req.tenant.tenantUid, companyName: req.tenant.companyName },
       webhookUrl: tenant?.webhookUrl || null,
-      deliveries: deliveries.map((d) => ({
-        eventId: d.eventUid,
-        event: d.event,
-        status: d.status,
-        attempts: d.attempts,
-        lastStatusCode: d.lastStatusCode,
-        lastError: d.lastError,
-        nextAttemptAt: d.nextAttemptAt ? new Date(d.nextAttemptAt).toISOString() : null,
-        deliveredAt: d.deliveredAt ? new Date(d.deliveredAt).toISOString() : null,
-        createdAt: d.createdAt ? new Date(d.createdAt).toISOString() : null
-      }))
+      deliveries: deliveries.map(formatWebhookDelivery)
     });
   } catch (err) {
     next(err);
@@ -269,10 +262,13 @@ router.get("/sessions/:sessionId/evidence", anyUser, requireTenant, tenantScope,
 // No JWT required here — the signed token IS the auth (safe to embed in <img src>).
 router.get("/evidence/:evidenceId/image", async (req, res, next) => {
   try {
-    const evidenceId = req.params.evidenceId;
+    const evidenceId = String(req.params.evidenceId || "");
+    if (!/^[0-9a-f]{24}$/i.test(evidenceId)) {
+      return res.status(404).json({ success: false, error: "Evidence file not found" });
+    }
     const token = req.query.token;
     const { getDb } = require("../lib/db");
-    const file = await getDb().evidenceFile.findFirst({ where: { id: String(evidenceId) } });
+    const file = await getDb().evidenceFile.findFirst({ where: { id: evidenceId } });
     if (!file) return res.status(404).json({ success: false, error: "Evidence file not found" });
     // M5 fix: bind the token to the tenant — look up via the evidence's session
     const evidenceSession = await getDb().verificationSession.findFirst({ where: { id: file.sessionId } });
@@ -303,10 +299,13 @@ router.get("/evidence/:evidenceId/image", async (req, res, next) => {
 
 
 
-    res.set("Content-Type", "image/jpeg");
+    const served = file.fileType === "selfie"
+      ? await require("../services/webhookSelfie").prepareWebhookSelfie(imageBuffer)
+      : { bytes: imageBuffer, contentType: require("../services/uploadService").sniffImageType(imageBuffer) || "image/jpeg" };
+    res.set("Content-Type", served.contentType);
     res.set("Cache-Control", "private, max-age=900");
     res.set("X-Content-Type-Options", "nosniff");
-    res.send(imageBuffer);
+    res.send(served.bytes);
   } catch (err) { next(err); }
 });
 

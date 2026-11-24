@@ -7,6 +7,7 @@
 //            in-memory limiter would silently multiply every cap by N).
 // Select explicitly with RATE_LIMIT_BACKEND=db|memory.
 
+const crypto = require("crypto");
 const { AppError } = require("@verifypass/shared");
 
 function createRateLimiter({ windowMs, max, keyFn, name = "default", now = Date.now }) {
@@ -63,7 +64,8 @@ function createDbRateLimiter({ windowMs, max, keyFn, name = "default", now = Dat
     const db = resolveDb();
     const t = now();
     const bucket = Math.floor(t / windowMs);
-    const rowKey = `${name}:${key}:${bucket}`.slice(0, 191);
+    const keyHash = crypto.createHash("sha256").update(String(key)).digest("hex").slice(0, 32);
+    const rowKey = `${name}:${keyHash}:${bucket}`.slice(0, 191);
     const windowEndsAt = new Date((bucket + 1) * windowMs);
     try {
       const row = await db.rateLimitCounter.upsert({
@@ -125,7 +127,12 @@ function standardLimiters() {
     // credential stuffing protection: per IP+email
     login: make({
       windowMs: 15 * 60_000, max: 10, name: "login", failClosed: true,
-      keyFn: (req) => `${ipKey(req)}:${(req.body?.email || "").toLowerCase()}`
+      keyFn: (req) => `${ipKey(req)}:${String(req.body?.email || "").trim().toLowerCase()}`
+    }),
+    // sensitive auth mutations (password reset, MFA confirm, email change, invite accept)
+    authSensitive: make({
+      windowMs: 15 * 60_000, max: 10, name: "auth_sensitive", failClosed: true,
+      keyFn: ipKey
     }),
     // capture uploads: per tenant once authed — applied after auth middleware
     captures: make({

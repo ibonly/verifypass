@@ -79,6 +79,7 @@ model User {
   passwordHash String   @map("password_hash")
   role         UserRole
   mfaSecret    String?  @map("mfa_secret")
+  tokenVersion Int      @default(0) @map("token_version")
   status       String   @default("active") // active | invited
   createdAt    DateTime @default(now()) @map("created_at")
 
