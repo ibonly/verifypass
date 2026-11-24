@@ -3,7 +3,7 @@
 let token = sessionStorage.getItem("vp_token") || null;
 let tenantId = sessionStorage.getItem("vp_tenant") || null;
 
-export function setAuth(t, tenant) {
+export function setAuth(t, tenant = tenantId) {
   token = t;
   if (t) sessionStorage.setItem("vp_token", t); else sessionStorage.removeItem("vp_token");
   tenantId = t && tenant ? tenant : null;

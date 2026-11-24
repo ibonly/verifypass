@@ -337,9 +337,11 @@ router.post("/mfa/confirm", limitAuthSensitive, requireUser(), async (req, res, 
     if (typeof secret !== "string" || !/^[A-Z2-7]{32}$/.test(secret) || !verifyTotp(secret, totp)) {
       throw new AppError("VALIDATION_ERROR", "Invalid TOTP code");
     }
+    const ver = (req.user.tokenVersion ?? 0) + 1;
     const upd = await getDb().user.updateMany({
-      where: { id: req.user.id, mfaSecret: null },
-      data: { mfaSecret: secret, tokenVersion: (req.user.tokenVersion ?? 0) + 1 }
+      // Mongo: an unset optional field is missing, not null, so match both.
+      where: { id: req.user.id, OR: [{ mfaSecret: null }, { mfaSecret: { isSet: false } }] },
+      data: { mfaSecret: secret, tokenVersion: ver }
     });
     if (upd.count === 0) throw new AppError("VALIDATION_ERROR", "MFA already enrolled");
     await audit({
@@ -347,7 +349,8 @@ router.post("/mfa/confirm", limitAuthSensitive, requireUser(), async (req, res, 
       action: "user.mfa_enrolled", req
     });
     if (mailer().enabled()) notify(mailer().sendMfaChanged(req.user, { changeKind: "enabled", ip: req.ip }));
-    res.json({ success: true });
+    // The version bump revokes every older session; hand this caller its replacement.
+    res.json({ success: true, token: signToken({ userId: String(req.user.id), role: req.user.role, ver }) });
   } catch (err) {
     next(err);
   }
